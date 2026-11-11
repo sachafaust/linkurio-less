@@ -1,0 +1,72 @@
+[
+ {
+  "name": "Internet-exposed EC2 instances",
+  "tags": [
+   "aws",
+   "network"
+  ],
+  "cypher": "MATCH (a:AWSAccount)-[r:RESOURCE]->(i:EC2Instance) WHERE i.exposed_internet = true RETURN a, r, i"
+ },
+ {
+  "name": "Security groups open to 0.0.0.0/0",
+  "tags": [
+   "aws",
+   "network"
+  ],
+  "cypher": "MATCH p=(rng:IpRange {range:'0.0.0.0/0'})-[:MEMBER_OF_IP_RULE]->(rule:IpPermissionInbound)-[:MEMBER_OF_EC2_SECURITY_GROUP]->(sg:EC2SecurityGroup) RETURN p LIMIT 100"
+ },
+ {
+  "name": "Publicly readable S3 buckets",
+  "tags": [
+   "aws",
+   "storage"
+  ],
+  "cypher": "MATCH (a:AWSAccount)-[r:RESOURCE]->(b:S3Bucket) WHERE b.anonymous_access = true RETURN a, r, b"
+ },
+ {
+  "name": "Principals with AdministratorAccess",
+  "tags": [
+   "aws",
+   "iam"
+  ],
+  "cypher": "MATCH p=(x:AWSPrincipal)-[:POLICY]->(pol:AWSPolicy {name:'AdministratorAccess'}) RETURN p"
+ },
+ {
+  "name": "Roles trusted by foreign accounts",
+  "tags": [
+   "aws",
+   "iam"
+  ],
+  "cypher": "MATCH p=(r:AWSRole)-[:TRUSTS_AWS_PRINCIPAL]->(x:AWSPrincipal)<-[:RESOURCE]-(a:AWSAccount {foreign:true}) RETURN p"
+ },
+ {
+  "name": "GitHub repos that can assume AWS roles",
+  "tags": [
+   "github",
+   "aws"
+  ],
+  "cypher": "MATCH p=(r:GitHubRepository)-[:ASSUMED_ROLE_WITH_WEB_IDENTITY]->(role:AWSRole) RETURN p"
+ },
+ {
+  "name": "GitHub users without 2FA",
+  "tags": [
+   "github"
+  ],
+  "cypher": "MATCH p=(u:GitHubUser)-[]->(o:GitHubOrganization) WHERE u.has_2fa_enabled = false RETURN p"
+ },
+ {
+  "name": "Okta groups mapped to AWS roles",
+  "tags": [
+   "okta",
+   "aws"
+  ],
+  "cypher": "MATCH p=(u:OktaUser)-[:MEMBER_OF_OKTA_GROUP]->(g:OktaGroup)-[:ALLOWED_BY]->(r:AWSRole) RETURN p LIMIT 150"
+ },
+ {
+  "name": "Outside collaborators with write access",
+  "tags": [
+   "github"
+  ],
+  "cypher": "MATCH p=(u:GitHubUser)-[r]->(repo:GitHubRepository) WHERE type(r) STARTS WITH 'OUTSIDE_COLLAB' RETURN p"
+ }
+]

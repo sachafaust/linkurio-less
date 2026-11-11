@@ -1,0 +1,200 @@
+{
+ "passed": 28,
+ "total": 32,
+ "when": "2026-11-11 14:20 PST",
+ "results": [
+  {
+   "test": "connect to Neo4j and show the landing screen",
+   "ok": true,
+   "detail": "Neo4j/5.26.0 1099 nodes / 2430 edges, landing shown, 'Neo4j/5.26.0 \u00b7 neo4j \u00b7 1,099 nodes \u00b7 read-only'",
+   "secs": 0.34
+  },
+  {
+   "test": "full-text search shows ranked results with category chip and highlights",
+   "ok": true,
+   "detail": "22 results, first category AWSAccount, 65 highlighted matches",
+   "secs": 1.15
+  },
+  {
+   "test": "search edges by type",
+   "ok": true,
+   "detail": "edge search for CAN_WRITE returned 9 edges",
+   "secs": 1.89
+  },
+  {
+   "test": "pick a search result adds and selects the node",
+   "ok": true,
+   "detail": "added AWSAccount node, undisplayed-neighbor badge = 163",
+   "secs": 0.81
+  },
+  {
+   "test": "expand menu filtered by category and edge type (selective expand)",
+   "ok": true,
+   "detail": "expand menu items: 15; selective expand had 13 category rows; result categories ['AWSAccount', 'AWSRole'], edge types ['RESOURCE']",
+   "secs": 3.14
+  },
+  {
+   "test": "double-click a node expands its neighbors",
+   "ok": true,
+   "detail": "double-click expanded an AWSRole: 21 -> 27 nodes",
+   "secs": 13.02
+  },
+  {
+   "test": "expand all neighbors (limit 60) and lay out",
+   "ok": true,
+   "detail": "67 nodes / 127 edges on screen",
+   "secs": 10.03
+  },
+  {
+   "test": "property panel shows caption, id, categories and searchable properties",
+   "ok": true,
+   "detail": "title 'auth-ledger-9 - i-c37e9d2e2d35ac07a', 13 properties, chips ['AWSEC2Instance', 'ComputeInstance', 'EC2Instance'], property search left 1",
+   "secs": 0.79
+  },
+  {
+   "test": "edge selection shows edge type, source and target",
+   "ok": true,
+   "detail": "edge panel 'RESOURCE', 2 source/target links",
+   "secs": 0.21
+  },
+  {
+   "test": "multi-selection table per category (Ctrl+A)",
+   "ok": true,
+   "detail": "67 selected, 9 per-category tables, sortable headers",
+   "secs": 0.88
+  },
+  {
+   "test": "background context menu: select leaf nodes",
+   "ok": true,
+   "detail": "background menu Select > Leaf nodes selected 13",
+   "secs": 8.78
+  },
+  {
+   "test": "shift+click selects direct neighbors",
+   "ok": true,
+   "detail": "shift+click selected the node and its 64 neighbors",
+   "secs": 7.51
+  },
+  {
+   "test": "design panel: color, size, icon and caption by category",
+   "ok": true,
+   "detail": "color -> rgb(23,190,207), size 26px -> 52px, icon set, caption 'OrganizationAccountAccessRole - AROAEKK6T4EYBC\u2026'; reset gave rgb(198,40,40)",
+   "secs": 9.16
+  },
+  {
+   "test": "design panel: color by property value",
+   "ok": false,
+   "detail": "TimeoutError: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#rightpanel [data-vcolor='AWSEC2Instance|state|stopped']\")\n",
+   "secs": 30.13
+  },
+  {
+   "test": "design panel: dynamic size by numeric property",
+   "ok": true,
+   "detail": "21 buckets sized by log(object_count): 16px .. 78px",
+   "secs": 2.8
+  },
+  {
+   "test": "filters: category and property value, remove filtered, undo, reset",
+   "ok": false,
+   "detail": "TimeoutError: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#rightpanel [data-ftog='val|AWSEC2Instance|state|stopped']\")\n",
+   "secs": 30.78
+  },
+  {
+   "test": "filters: numeric lower bound",
+   "ok": false,
+   "detail": "AssertionError: (21, 9)",
+   "secs": 0.39
+  },
+  {
+   "test": "layouts: hierarchical, radial, force-directed",
+   "ok": true,
+   "detail": "hierarchical: 3 layers; radial: root offset from center 2,-9; force re-run",
+   "secs": 15.59
+  },
+  {
+   "test": "pinned node stays put during force layout",
+   "ok": true,
+   "detail": "pinned node moved 0.00px during force layout",
+   "secs": 29.71
+  },
+  {
+   "test": "node grouping by property (collapse/expand)",
+   "ok": true,
+   "detail": "groups ['Region: us-west-2 x18', 'Region: us-east-1 x16', 'Region: eu-west-1 x8']; 42 members collapsed; double-click opened one with 18 members; rule off -> 0 groups",
+   "secs": 3.55
+  },
+  {
+   "test": "edge grouping of parallel edges (synthetic duplicates)",
+   "ok": true,
+   "detail": "grouped parallel edges into ['RESOURCE (3)']",
+   "secs": 0.43
+  },
+  {
+   "test": "lasso selection (Ctrl+drag)",
+   "ok": true,
+   "detail": "ctrl+drag lasso selected 43 nodes",
+   "secs": 21.69
+  },
+  {
+   "test": "keyboard shortcuts: hide, undo, redo, pan, zoom",
+   "ok": true,
+   "detail": "Ctrl+Backspace 88->45, Ctrl+Z ->88, Ctrl+Y ->45; arrow pans, + zooms",
+   "secs": 1.24
+  },
+  {
+   "test": "export PNG image",
+   "ok": true,
+   "detail": "PNG export 720 KB",
+   "secs": 21.67
+  },
+  {
+   "test": "export CSV data (nodes + edges)",
+   "ok": true,
+   "detail": "nodes-2026-11-11-22-20-10.csv: 88 rows; edges-2026-11-11-22-20-10.csv: 162 rows",
+   "secs": 1.66
+  },
+  {
+   "test": "save, new and reopen a visualization locally",
+   "ok": true,
+   "detail": "saved 'Test viz' (Auto save ON), new -> 0 nodes, reopened -> 88 nodes (localStorage)",
+   "secs": 1.52
+  },
+  {
+   "test": "read-only Cypher: writes refused, reads added to the graph",
+   "ok": true,
+   "detail": "write refused in UI ('Read-only explorer: 'DETACH' is not allowed') and API (HTTP 403); read query added 19 nodes; DB still 1099 nodes",
+   "secs": 3.15
+  },
+  {
+   "test": "built-in Cartography queries panel",
+   "ok": true,
+   "detail": "built-in query added 45 nodes",
+   "secs": 2.23
+  },
+  {
+   "test": "understand your data model view",
+   "ok": true,
+   "detail": "data model shows 37 categories",
+   "secs": 2.1
+  },
+  {
+   "test": "minimap and dark theme",
+   "ok": true,
+   "detail": "minimap shown; dark theme toggled",
+   "secs": 1.25
+  },
+  {
+   "test": "workspace overview screenshot",
+   "ok": true,
+   "detail": "54 nodes in the IAM workspace shot",
+   "secs": 24.22
+  },
+  {
+   "test": "no JavaScript errors during the run",
+   "ok": false,
+   "detail": [
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)"
+   ]
+  }
+ ]
+}
