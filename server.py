@@ -10,8 +10,12 @@ Config (environment variables):
     NEO4J_PASSWORD  (required)
     NEO4J_DATABASE  neo4j
     HOST / PORT     127.0.0.1 / 8744
-    SEARCH_FULLTEXT_INDEX  optional name of a Neo4j full-text index to use for search
-    EXPAND_LIMIT    default neighbor limit per expand (50)
+    SEARCH_FULLTEXT_INDEX  name of a Neo4j full-text index for search (auto-detects "gx_search",
+                    made by tools/create_fulltext_index.py)
+    EXPAND_LIMIT    default neighbor limit per expand (50); EXPAND_MAX caps one page (5000)
+    HUB_SAMPLE      neighbors read per node for summaries / degree ranking (20000)
+    SEARCH_SCAN_CAP nodes scanned per search without a full-text index (200000)
+    CACHE_TTL / SCHEMA_TTL  seconds to cache neighbor summaries (60) / the schema (600)
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -99,13 +104,48 @@ def rel_json(r: Relationship):
             "props": {k: jsonable(v) for k, v in r.items()}}
 
 
+class TTLCache:
+    """Tiny thread-safe TTL + size-bounded cache for read results (schema, neighbor summaries)."""
+
+    def __init__(self, ttl: float, size: int = 512):
+        self.ttl, self.size, self.d, self.lock = ttl, size, {}, threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            v = self.d.get(key)
+            if v and time.time() - v[0] < self.ttl:
+                return v[1]
+            self.d.pop(key, None)
+            return None
+
+    def put(self, key, val):
+        with self.lock:
+            if len(self.d) >= self.size:
+                self.d.pop(next(iter(self.d)))
+            self.d[key] = (time.time(), val)
+        return val
+
+
+# Above this many relationships a node is a "hub": summaries are computed from per-type degrees
+# (O(1) in Neo4j's degree store) plus a sample of neighbors instead of reading every neighbor.
+HUB_SAMPLE = int(os.environ.get("HUB_SAMPLE", 20000))
+SCAN_CAP = int(os.environ.get("SEARCH_SCAN_CAP", 200000))
+EXPAND_MAX = int(os.environ.get("EXPAND_MAX", 5000))
+
+
+def cyq(name: str) -> str:
+    return "`" + name.replace("`", "``") + "`"
+
+
 class Graph:
     def __init__(self):
         self.uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
         self.db = os.environ.get("NEO4J_DATABASE", "neo4j")
         self.driver = GraphDatabase.driver(self.uri, auth=(os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", "")))
-        self.fulltext = os.environ.get("SEARCH_FULLTEXT_INDEX") or None
-        self._schema_cache = None
+        self._fulltext = os.environ.get("SEARCH_FULLTEXT_INDEX") or None
+        self._ft_checked = bool(self._fulltext)
+        self.cache = TTLCache(ttl=float(os.environ.get("CACHE_TTL", 60)))
+        self.schema_cache = TTLCache(ttl=float(os.environ.get("SCHEMA_TTL", 600)), size=4)
 
     def read(self, query: str, timeout: float = 30, **params):
         """Run one statement in a READ transaction and return the records."""
@@ -114,25 +154,39 @@ class Graph:
         with self.driver.session(database=self.db, default_access_mode=READ_ACCESS) as s:
             return s.execute_read(neo4j.unit_of_work(timeout=timeout)(work))
 
+    @property
+    def fulltext(self):
+        """Use SEARCH_FULLTEXT_INDEX, or auto-detect the index made by tools/create_fulltext_index.py."""
+        if not self._ft_checked:
+            self._ft_checked = True
+            try:
+                rows = self.read("SHOW FULLTEXT INDEXES YIELD name, state WHERE name = 'gx_search' AND state = 'ONLINE' RETURN name")
+                self._fulltext = rows[0]["name"] if rows else None
+            except Exception:  # noqa: BLE001
+                self._fulltext = None
+        return self._fulltext
+
     # ---- API ---------------------------------------------------------------
     def status(self):
         info = self.driver.get_server_info()
-        n = self.read("MATCH (n) RETURN count(n) AS n")[0]["n"]
+        n = self.read("MATCH (n) RETURN count(n) AS n")[0]["n"]          # count store: O(1)
         r = self.read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
         return {"connected": True, "uri": self.uri, "database": self.db, "server": info.agent,
-                "nodes": n, "edges": r, "read_only": True}
+                "nodes": n, "edges": r, "read_only": True, "fulltext_index": self.fulltext}
 
     def schema(self, refresh=False):
-        if self._schema_cache and not refresh:
-            return self._schema_cache
+        hit = None if refresh else self.schema_cache.get("schema")
+        if hit:
+            return hit
         labels = [r["label"] for r in self.read("CALL db.labels() YIELD label RETURN label ORDER BY label")]
         types = [r["relationshipType"] for r in self.read("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType")]
-        label_counts = {l: self.read(f"MATCH (n:`{l}`) RETURN count(n) AS c")[0]["c"] for l in labels}
-        type_counts = {t: self.read(f"MATCH ()-[r:`{t}`]->() RETURN count(r) AS c")[0]["c"] for t in types}
-        # Category-level model: sample nodes per label to learn property keys and types.
+        label_counts = {l: self.read(f"MATCH (n:{cyq(l)}) RETURN count(n) AS c")[0]["c"] for l in labels}
+        type_counts = {t: self.read(f"MATCH ()-[r:{cyq(t)}]->() RETURN count(r) AS c")[0]["c"] for t in types}
         cats = {}
         for l in labels:
-            for rec in self.read(f"MATCH (n:`{l}`) RETURN n LIMIT 30"):
+            if not label_counts.get(l):
+                continue
+            for rec in self.read(f"MATCH (n:{cyq(l)}) RETURN n LIMIT 30"):
                 n = rec["n"]
                 c = category_of(n.labels)
                 e = cats.setdefault(c, {"count": 0, "labels": sorted(n.labels), "props": {}})
@@ -140,93 +194,123 @@ class Graph:
                     e["props"].setdefault(k, type(v).__name__)
         for c in cats:
             cats[c]["count"] = label_counts.get(c, 0)
-        # Which categories connect through which edge types (sampled).
         links = {}
         for t in types:
-            for rec in self.read(f"MATCH (a)-[r:`{t}`]->(b) RETURN labels(a) AS la, labels(b) AS lb LIMIT 200"):
+            if not type_counts.get(t):
+                continue
+            for rec in self.read(f"MATCH (a)-[r:{cyq(t)}]->(b) RETURN labels(a) AS la, labels(b) AS lb LIMIT 200"):
                 key = (category_of(rec["la"]), t, category_of(rec["lb"]))
                 links[key] = links.get(key, 0) + 1
-        self._schema_cache = {"labels": label_counts, "types": type_counts, "categories": cats,
-                              "links": [{"source": a, "type": t, "target": b} for (a, t, b) in sorted(links)]}
-        return self._schema_cache
+        return self.schema_cache.put("schema", {
+            "labels": label_counts, "types": {t: c for t, c in type_counts.items() if c}, "categories": cats,
+            "links": [{"source": a, "type": t, "target": b} for (a, t, b) in sorted(links)]})
 
     def search(self, q: str, kind="node", category=None, prop=None, value=None, limit=20, offset=0, fuzzy=False):
         ql = (q or "").strip().lower()
+        limit, offset = max(1, min(int(limit), 200)), max(0, int(offset))
         if kind == "edge":
             recs = self.read(
                 "MATCH (a)-[r]->(b) WHERE ($cat IS NULL OR type(r) = $cat) AND "
-                "($q = '' OR toLower(type(r)) CONTAINS $q OR any(k IN keys(r) WHERE toLower(toString(r[k])) CONTAINS $q)) "
-                "AND ($prop IS NULL OR toLower(toString(r[$prop])) = toLower($val)) "
+                "($q = '' OR toLower(type(r)) CONTAINS $q OR any(k IN keys(r) WHERE toLower(toStringOrNull(r[k])) CONTAINS $q)) "
+                "AND ($prop IS NULL OR toLower(toStringOrNull(r[$prop])) = toLower($val)) "
                 "RETURN r, a, b SKIP $off LIMIT $lim", q=ql, cat=category, prop=prop, val=value, off=offset, lim=limit)
             return {"edges": [{**rel_json(r["r"]), "sourceNode": node_json(r["a"]), "targetNode": node_json(r["b"])} for r in recs]}
         if self.fulltext and ql:
-            term = " ".join(f"{w}~" if fuzzy else f"*{w}*" for w in re.findall(r"\w+", ql)) or ql
+            words = re.findall(r"\w+", ql)
+            term = " AND ".join(f"{w}~" if fuzzy else f"(*{w}* OR {w})" for w in words) or ql
             recs = self.read(
                 "CALL db.index.fulltext.queryNodes($idx, $term) YIELD node AS n, score "
-                "WHERE ($cat IS NULL OR $cat IN labels(n)) AND ($prop IS NULL OR toLower(toString(n[$prop])) = toLower($val)) "
+                "WHERE ($cat IS NULL OR $cat IN labels(n)) AND ($prop IS NULL OR toLower(toStringOrNull(n[$prop])) = toLower($val)) "
                 "RETURN n, COUNT { (n)--() } AS deg ORDER BY score DESC SKIP $off LIMIT $lim",
                 idx=self.fulltext, term=term, cat=category, prop=prop, val=value, off=offset, lim=limit)
-        else:
-            # No full-text index: scan the configured caption/id fields (fine for a few 100k nodes).
-            recs = self.read(
-                "MATCH (n) WHERE ($cat IS NULL OR $cat IN labels(n)) "
-                "AND ($q = '' OR any(k IN $fields WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS $q)) "
-                "AND ($prop IS NULL OR toLower(toString(n[$prop])) = toLower($val)) "
-                "WITH n ORDER BY CASE WHEN any(k IN $fields WHERE toLower(toString(n[k])) = $q) THEN 0 "
-                "WHEN any(k IN $fields WHERE toLower(toString(n[k])) STARTS WITH $q) THEN 1 ELSE 2 END "
-                "SKIP $off LIMIT $lim RETURN n, COUNT { (n)--() } AS deg",
-                q=ql, fields=SEARCH_FIELDS, cat=category, prop=prop, val=value, off=offset, lim=limit)
-        total = None
-        if offset == 0 and not self.fulltext:
-            total = self.read(
-                "MATCH (n) WHERE ($cat IS NULL OR $cat IN labels(n)) AND ($q = '' OR any(k IN $fields WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS $q)) "
-                "AND ($prop IS NULL OR toLower(toString(n[$prop])) = toLower($val)) RETURN count(n) AS c",
-                q=ql, fields=SEARCH_FIELDS, cat=category, prop=prop, val=value)[0]["c"]
-        return {"nodes": [node_json(r["n"], r["deg"]) for r in recs], "total": total}
+            return {"nodes": [node_json(r["n"], r["deg"]) for r in recs], "total": None, "index": self.fulltext}
+        # No full-text index: scan the caption/id fields, but stop after SCAN_CAP candidates and rank
+        # only the first matches, so one keystroke can't scan a multi-million-node database.
+        match = f"MATCH (n:{cyq(category)})" if category else "MATCH (n)"
+        cond = ("($q = '' OR any(k IN $fields WHERE toLower(toStringOrNull(n[k])) CONTAINS $q)) "
+                "AND ($prop IS NULL OR toLower(toStringOrNull(n[$prop])) = toLower($val))")
+        recs = self.read(
+            f"CALL () {{ {match} RETURN n LIMIT $cap }} WITH n WHERE {cond} "
+            "WITH n LIMIT 2000 "
+            "WITH n, CASE WHEN any(k IN $fields WHERE toLower(toStringOrNull(n[k])) = $q) THEN 0 "
+            "WHEN any(k IN $fields WHERE toLower(toStringOrNull(n[k])) STARTS WITH $q) THEN 1 ELSE 2 END AS rank "
+            "WITH collect(n) AS found, collect(rank) AS ranks "
+            "UNWIND range(0, size(found) - 1) AS i WITH found[i] AS n, ranks[i] AS rank, size(found) AS total "
+            "ORDER BY rank SKIP $off LIMIT $lim RETURN n, COUNT { (n)--() } AS deg, total",
+            q=ql, fields=SEARCH_FIELDS, prop=prop, val=value, off=offset, lim=limit, cap=SCAN_CAP)
+        total = recs[0]["total"] if recs else 0
+        return {"nodes": [node_json(r["n"], r["deg"]) for r in recs], "total": total, "total_capped": total >= 2000}
 
     def nodes(self, ids):
-        recs = self.read("MATCH (n) WHERE elementId(n) IN $ids RETURN n, COUNT { (n)--() } AS deg", ids=ids)
+        recs = self.read("UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id RETURN n, COUNT { (n)--() } AS deg", ids=ids)
         return {"nodes": [node_json(r["n"], r["deg"]) for r in recs]}
 
     def neighbor_summary(self, ids, visible):
-        recs = self.read(
-            "MATCH (n)-[r]-(m) WHERE elementId(n) IN $ids "
-            "RETURN type(r) AS t, labels(m) AS l, elementId(m) IN $vis AS shown, count(*) AS c",
-            ids=ids, vis=visible)
-        cats, types, combos = {}, {}, {}
-        total = 0
-        for r in recs:
-            if r["shown"]:
-                continue  # Expand menus count neighbors that are not on screen yet
-            c = category_of(r["l"])
-            cats[c] = cats.get(c, 0) + r["c"]
-            types[r["t"]] = types.get(r["t"], 0) + r["c"]
+        key = ("ns", tuple(sorted(ids)))
+        base = self.cache.get(key)
+        if base is None:
+            deg = self.read("UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id RETURN sum(COUNT { (n)--() }) AS d", ids=ids)[0]["d"] or 0
+            # Read at most HUB_SAMPLE neighbor rows; for hubs, scale the sample up to the true degree.
+            recs = self.read(
+                "UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id "
+                "CALL (n) { MATCH (n)-[r]-(m) RETURN type(r) AS t, labels(m) AS l, elementId(m) AS mid LIMIT $cap } "
+                "RETURN t, l, collect(mid) AS mids", ids=ids, cap=HUB_SAMPLE)
+            base = self.cache.put(key, {"deg": deg, "rows": [(r["t"], category_of(r["l"]), r["mids"]) for r in recs]})
+        vis = set(visible)
+        sampled = sum(len(m) for _, _, m in base["rows"])
+        scale = base["deg"] / sampled if sampled and base["deg"] > sampled else 1.0
+        cats, types, combos, total = {}, {}, {}, 0
+        for t, c, mids in base["rows"]:
+            hidden = sum(1 for m in mids if m not in vis)
+            if not hidden:
+                continue
+            n = round(hidden * scale)
+            cats[c] = cats.get(c, 0) + n
+            types[t] = types.get(t, 0) + n
             combos.setdefault(c, {})
-            combos[c][r["t"]] = combos[c].get(r["t"], 0) + r["c"]
-            total += r["c"]
-        return {"total": total, "categories": cats, "types": types, "combos": combos}
+            combos[c][t] = combos[c].get(t, 0) + n
+            total += n
+        return {"total": total, "categories": cats, "types": types, "combos": combos, "approximate": scale > 1, "degree": base["deg"]}
 
-    def expand(self, ids, visible, categories=None, types=None, limit=50, order="neighbors"):
-        orderby = {"most": "deg DESC", "least": "deg ASC"}.get(order, "id")
-        recs = self.read(
-            "MATCH (n)-[r]-(m) WHERE elementId(n) IN $ids "
-            "AND ($types IS NULL OR type(r) IN $types) "
-            "AND ($cats IS NULL OR any(l IN labels(m) WHERE l IN $cats)) "
-            "WITH DISTINCT m WITH m, COUNT { (m)--() } AS deg, elementId(m) AS id "
-            f"ORDER BY {orderby} LIMIT $lim RETURN m, deg",
-            ids=ids, types=types, cats=categories, lim=int(limit))
+    def expand(self, ids, visible, categories=None, types=None, limit=50, order="neighbors", offset=0):
+        limit, offset = max(1, min(int(limit), EXPAND_MAX)), max(0, int(offset))
+        vis = list({*visible, *ids})
+        filt = ("($types IS NULL OR type(r) IN $types) AND ($cats IS NULL OR any(l IN labels(m) WHERE l IN $cats)) "
+                "AND NOT elementId(m) IN $vis")
+        if order in ("most", "least"):
+            # Rank by degree, but only among the first HUB_SAMPLE candidates (degree lookups are O(1) each).
+            recs = self.read(
+                "UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id "
+                f"CALL (n) {{ MATCH (n)-[r]-(m) WHERE {filt} RETURN DISTINCT m LIMIT $cap }} "
+                "WITH DISTINCT m WITH m, COUNT { (m)--() } AS deg "
+                f"ORDER BY deg {'DESC' if order == 'most' else 'ASC'} SKIP $off LIMIT $lim RETURN m, deg",
+                ids=ids, types=types, cats=categories, vis=vis, lim=limit, off=offset, cap=HUB_SAMPLE)
+        else:
+            # Streamed: no global ORDER BY, so a hub with millions of neighbors returns the first page at once.
+            recs = self.read(
+                "UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id "
+                f"MATCH (n)-[r]-(m) WHERE {filt} "
+                "WITH DISTINCT m SKIP $off LIMIT $lim RETURN m, COUNT { (m)--() } AS deg",
+                ids=ids, types=types, cats=categories, vis=vis, lim=limit, off=offset)
         new_nodes = [node_json(r["m"], r["deg"]) for r in recs]
-        all_ids = list({*visible, *ids, *(n["id"] for n in new_nodes)})
         new_ids = [n["id"] for n in new_nodes]
-        erecs = self.read(
-            "MATCH (a)-[r]->(b) WHERE (elementId(a) IN $new OR elementId(b) IN $new OR elementId(a) IN $src OR elementId(b) IN $src) "
-            "AND elementId(a) IN $all AND elementId(b) IN $all "
-            "AND ($types IS NULL OR type(r) IN $types OR NOT (elementId(a) IN $src OR elementId(b) IN $src)) RETURN DISTINCT r",
-            new=new_ids, src=ids, all=all_ids, types=types)
-        return {"nodes": new_nodes, "edges": [rel_json(r["r"]) for r in erecs]}
+        edges = self.edges_for(new_ids, ids, vis, types)
+        return {"nodes": new_nodes, "edges": edges, "offset": offset, "more": len(new_nodes) == limit}
+
+    def edges_for(self, new_ids, src_ids, visible, types=None):
+        """Edges between the new nodes and anything on screen, anchored on the new nodes (index lookups)."""
+        if not new_ids:
+            return []
+        recs = self.read(
+            "UNWIND $new AS id MATCH (a) WHERE elementId(a) = id "
+            "MATCH (a)-[r]-(b) WHERE (elementId(b) IN $all) "
+            "AND ($types IS NULL OR type(r) IN $types OR NOT (elementId(b) IN $src)) RETURN DISTINCT r",
+            new=new_ids, src=src_ids, all=list({*visible, *new_ids}), types=types)
+        return [rel_json(r["r"]) for r in recs]
 
     def edges_between(self, ids):
-        recs = self.read("MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids RETURN r", ids=ids)
+        recs = self.read(
+            "UNWIND $ids AS id MATCH (a) WHERE elementId(a) = id MATCH (a)-[r]->(b) WHERE elementId(b) IN $ids RETURN r", ids=ids)
         return {"edges": [rel_json(r["r"]) for r in recs]}
 
     def cypher(self, query: str, params=None, limit=500):
@@ -321,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(GRAPH.neighbor_summary(b["ids"], b.get("visible", [])))
             if u.path == "/api/expand":
                 return self._json(GRAPH.expand(b["ids"], b.get("visible", []), b.get("categories"), b.get("types"),
-                                               b.get("limit", int(os.environ.get("EXPAND_LIMIT", 50))), b.get("order", "neighbors")))
+                                               b.get("limit", int(os.environ.get("EXPAND_LIMIT", 50))), b.get("order", "neighbors"), b.get("offset", 0)))
             if u.path == "/api/edges-between":
                 return self._json(GRAPH.edges_between(b["ids"]))
             if u.path == "/api/cypher":

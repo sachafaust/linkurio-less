@@ -370,18 +370,8 @@
  ],
  "edges": {
   "default_color": "#7a7a7a",
-  "colors": {
-   "RESOURCE": "#b0b0b0",
-   "MEMBER_OF_EC2_SECURITY_GROUP": "#9575cd",
-   "STS_ASSUMEROLE_ALLOW": "#c62828",
-   "CAN_READ": "#389704",
-   "CAN_WRITE": "#e65100",
-   "POLICY": "#835543",
-   "TRUSTS_AWS_PRINCIPAL": "#c62828",
-   "EXPOSE": "#f37805",
-   "ASSUMED_ROLE_WITH_WEB_IDENTITY": "#c62828",
-   "ALLOWED_BY": "#c62828"
-  }
+  "colors": {},
+  "note": "Linkurious draws every edge type in the same grey by default; colour edge types from the Design panel."
  },
  "search_fields": [
   "name",

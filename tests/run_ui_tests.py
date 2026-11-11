@@ -167,7 +167,7 @@ def run_all(pg, url):
     def t_dblclick_expand():
         before = ev(pg, "cy.nodes().length")
         nid = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole' && hiddenCount(n) > 0 && hiddenCount(n) < 40)[0].id()")
-        ev(pg, f"cy.animate({{center: {{eles: cy.getElementById({json.dumps(nid)})}}, zoom: 1.4}}, {{duration: 0}})"); pg.wait_for_timeout(200)
+        ev(pg, f"cy.zoom(1.4); cy.center(cy.getElementById({json.dumps(nid)}))"); pg.wait_for_timeout(200)
         x, y = node_pos(pg, nid); pg.mouse.dblclick(x, y); wait_layout(pg, 2200)
         after = ev(pg, "cy.nodes().length")
         assert after > before, (before, after)
@@ -238,20 +238,20 @@ def run_all(pg, url):
         ev(pg, "cy.$(':selected').unselect()")
         pg.click("[data-panel=design]"); pg.wait_for_selector("#rightpanel .tabs-box")
         u = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole')[0].id()")
-        w0 = ev(pg, f"cy.getElementById({json.dumps(u)}).width()")
+        w0 = ev(pg, f"nodeSize(cy.getElementById({json.dumps(u)}).data())")
         pg.click("#rightpanel [data-color='AWSRole']"); pg.click(".pop [data-c='#17becf']"); pg.wait_for_timeout(200)
-        col = ev(pg, f"cy.getElementById({json.dumps(u)}).style('background-color')")
+        col = ev(pg, f"nodeColor(cy.getElementById({json.dumps(u)}).data())")
         pg.click("#rightpanel [data-size='AWSRole']"); pg.select_option(".pop [data-ss]", "200"); pg.click(".pop [data-sok]"); pg.wait_for_timeout(200)
-        w1 = ev(pg, f"cy.getElementById({json.dumps(u)}).width()")
+        w1 = ev(pg, f"nodeSize(cy.getElementById({json.dumps(u)}).data())")
         pg.click("#rightpanel [data-icon-pick='AWSRole']"); pg.click(".pop [data-n='Star']"); pg.wait_for_timeout(200)
         shot(pg, "06-design-panel")
         pg.click("#rightpanel [data-dtab=captions]"); pg.click("#rightpanel [data-open='c:AWSRole']")
         pg.check("#rightpanel [data-cap='AWSRole|roleid']"); pg.wait_for_timeout(200)
         cap = ev(pg, f"nodeCaption(cy.getElementById({json.dumps(u)}).data())")
-        assert col in ("rgb(23,190,207)", "rgb(23, 190, 207)") and abs(w1 - 2 * w0) < 0.5 and " - AROA" in cap, (col, w0, w1, cap)
+        assert col.lower() == "#17becf" and abs(w1 - 2 * w0) < 0.5 and " - AROA" in cap, (col, w0, w1, cap)
         # reset back to defaults via the gear menu
         pg.click("#rightpanel [data-d=gear]"); pg.click(".menu .mi:has-text('Reset styles')"); pg.wait_for_timeout(200)
-        col2 = ev(pg, f"cy.getElementById({json.dumps(u)}).style('background-color')")
+        col2 = ev(pg, f"nodeColor(cy.getElementById({json.dumps(u)}).data())")
         return f"color -> {col}, size {w0:.0f}px -> {w1:.0f}px, icon set, caption '{cap}'; reset gave {col2}"
     check("design panel: color, size, icon and caption by category", t_style)
 
@@ -261,9 +261,9 @@ def run_all(pg, url):
         pg.click("#rightpanel [data-dtab=styles]"); pg.click("#rightpanel [data-open='d:AWSEC2Instance']")
         pg.click("#rightpanel [data-open='dp:AWSEC2Instance:state']")
         pg.click("#rightpanel [data-vcolor='AWSEC2Instance|state|stopped']"); pg.click(".pop [data-c='#9e9e9e']"); pg.wait_for_timeout(200)
-        stopped = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'stopped').map(n => n.style('background-color'))")
-        running = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'running').map(n => n.style('background-color'))[0]")
-        assert stopped and all(c.replace(" ", "") == "rgb(158,158,158)" for c in stopped), stopped
+        stopped = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'stopped').map(n => nodeColor(n.data()))")
+        running = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'running').map(n => nodeColor(n.data()))[0]")
+        assert stopped and all(c.lower() == "#9e9e9e" for c in stopped), stopped
         pg.click("#rightpanel [data-d=gear]"); pg.click(".menu .mi:has-text('Reset styles')")
         return f"{len(stopped)} stopped instances recolored grey, running stay {running}"
     check("design panel: color by property value", t_value_color)
@@ -271,7 +271,7 @@ def run_all(pg, url):
     def t_dynamic_size():
         pg.click("#rightpanel [data-size='AWSS3Bucket']"); pg.select_option(".pop [data-sp]", "object_count"); pg.select_option(".pop [data-sc]", "log"); pg.click(".pop [data-sok]")
         ev(pg, "expand(cy.nodes().filter(n => n.data('category') === 'AWSAccount'), {categories: ['AWSS3Bucket'], limit: 30})"); wait_layout(pg, 2400)
-        ws = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSS3Bucket').map(n => n.width())")
+        ws = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSS3Bucket').map(n => nodeSize(n.data()))")
         pg.click("#rightpanel [data-d=gear]"); pg.click(".menu .mi:has-text('Reset styles')")
         assert ws and max(ws) > min(ws) * 1.5, ws
         return f"{len(ws)} buckets sized by log(object_count): {min(ws):.0f}px .. {max(ws):.0f}px"
@@ -473,6 +473,25 @@ def run_all(pg, url):
         return "minimap shown; dark theme toggled"
     check("minimap and dark theme", t_minimap_dark)
 
+    def t_hub_groups():
+        # Supernodes: above HUB_THRESHOLD hidden neighbours, double-click shows one group node per category
+        # instead of hundreds of nodes; the group loads its members in pages.
+        ev(pg, "newViz()")
+        ev(pg, "runQueryToGraph(\"MATCH (a:AWSAccount {name:'acme-prod'}) RETURN a\")"); pg.wait_for_timeout(1200)
+        hub = ev(pg, "cy.nodes()[0].id()"); hidden = ev(pg, "hiddenCount(cy.nodes()[0])")
+        ev(pg, f"HUB_THRESHOLD = 100; expandDefault(cy.getElementById({json.dumps(hub)}))"); pg.wait_for_timeout(1500)
+        groups = ev(pg, "cy.nodes().filter(n => n.data('hubgroup')).map(n => [n.data('category'), n.data('type'), n.data('count')])")
+        real0 = ev(pg, "realNodes().length")
+        shot(pg, "21-hub-groups")
+        big = max(groups, key=lambda g: g[2])
+        gid = f"hub:{hub}:{big[0]}:{big[1]}"
+        ev(pg, f"loadHubGroup(cy.getElementById({json.dumps(gid)}), 10)"); pg.wait_for_timeout(1500)
+        real1 = ev(pg, "realNodes().length"); left = ev(pg, f"cy.getElementById({json.dumps(gid)}).data('count')")
+        ev(pg, "HUB_THRESHOLD = 300")
+        assert hidden > 100 and len(groups) >= 2 and sum(g[2] for g in groups) == hidden and real0 == 1 and real1 == 11 and left == big[2] - 10, (hidden, groups, real0, real1, left)
+        return f"hub with {hidden} hidden neighbours -> {len(groups)} group nodes; loading 10 from {big[0]} left {left}"
+    check("supernode expand: neighbours grouped per category, paged loading", t_hub_groups)
+
     def t_workspace_shot():
         # A clean overview shot for the comparison sheet: Cartography IAM neighborhood with property panel.
         ev(pg, "newViz()")
@@ -481,7 +500,7 @@ def run_all(pg, url):
         ev(pg, f"selectOnly(cy.getElementById({json.dumps(rid)}))"); pg.wait_for_timeout(200)
         if pg.is_visible("#open-selpanel"):
             pg.click("#open-selpanel")
-        ev(pg, "cy.animate({fit: {eles: cy.elements(), padding: 70}, duration: 0}); cy.panBy({x: 200, y: 0})"); pg.wait_for_timeout(400)
+        ev(pg, "cy.fit(cy.elements(), 70); cy.panBy({x: 200, y: 0})"); pg.wait_for_timeout(400)
         shot(pg, "20-workspace")
         return f"{ev(pg, 'cy.nodes().length')} nodes in the IAM workspace shot"
     check("workspace overview screenshot", t_workspace_shot)

@@ -30,7 +30,7 @@ const S = {
   rightPanel: null, minimap: false,
 };
 const DEFAULT_SIZE = 26;
-let cy;
+let cy, R;
 
 // ---------- styles -------------------------------------------------------------------
 function initStyles(reset = false) {
@@ -52,7 +52,7 @@ function catStyle(c) {
 function edgeStyle(t) { if (!S.edge[t]) S.edge[t] = { color: S.cfg.edges.default_color, width: 1, widthRule: null, caption: ['type'] }; return S.edge[t]; }
 function persistStyles() { localStorage.setItem('gx:styles', JSON.stringify({ cat: S.cat, edge: S.edge, edgeCaptionsAlways: S.edgeCaptionsAlways })); }
 function nodeCaption(d) {
-  if (d.group) return d.caption;
+  if (d.group || d.hubgroup) return d.caption;
   const st = catStyle(d.category); const props = d.props || {};
   let keys = st.caption && st.caption.length ? st.caption : S.cfg.fallback_caption;
   let parts = keys.map(k => fmt(props[k])).filter(Boolean);
@@ -75,6 +75,7 @@ function iconUri(name, color = '#fff') {
 const rangeCache = {};
 function nodeSize(d) {
   if (d.group) return DEFAULT_SIZE * 1.6;
+  if (d.hubgroup) return DEFAULT_SIZE * (1.25 + Math.min(1, Math.log10(Math.max(1, d.count)) / 4));
   const st = catStyle(d.category); let f = (st.size || 100) / 100;
   if (st.sizeRule && st.sizeRule.prop) {
     const v = Number(d.props?.[st.sizeRule.prop]);
@@ -106,69 +107,72 @@ function edgeWidth(d) {
   return w;
 }
 function cyStyle() {
-  const dark = document.body.classList.contains('dark');
-  const txt = dark ? '#e6e6e6' : '#1f1f1f', halo = dark ? '#1d1f24' : '#f8f8f8', under = dark ? '#3a3e48' : '#ffffff';
+  // cytoscape is only the graph model now (headless); drawing is done by static/render.js.
+  // Sizes are kept as data(_s) so layouts know node dimensions; hidden classes drive :visible.
   return [
-    { selector: 'node', style: {
-      'width': e => nodeSize(e.data()), 'height': e => nodeSize(e.data()), 'background-color': e => nodeColor(e.data()),
-      'border-width': 1.5, 'border-color': '#ffffff', 'label': e => nodeCaption(e.data()), 'font-family': 'Roboto, Arial, sans-serif',
-      'font-size': 11, 'font-weight': 500, 'color': txt, 'text-valign': 'bottom', 'text-margin-y': 4, 'text-outline-color': halo, 'text-outline-width': 2,
-      'text-wrap': 'wrap', 'text-max-width': 150, 'min-zoomed-font-size': 7,
-      'background-image': e => { const d = e.data(); const ic = d.group ? 'SelectGroup' : catStyle(d.category).icon; return ic ? iconUri(ic, lighten(nodeColor(d)) ? '#303030' : '#ffffff') : 'none'; },
-      'background-fit': 'contain', 'background-clip': 'none', 'background-image-containment': 'inside',
-      'overlay-opacity': 0, 'transition-property': 'underlay-opacity', 'transition-duration': 120,
-    } },
-    { selector: 'node.hl', style: { 'underlay-color': under, 'underlay-padding': e => nodeSize(e.data()) * 0.55, 'underlay-opacity': 1, 'underlay-shape': 'ellipse', 'z-index': 9 } },
-    { selector: 'node:selected', style: { 'outline-width': 2, 'outline-color': '#f12a27', 'outline-offset': 1.5, 'border-width': 2, 'z-index': 10, 'font-weight': 700 } },
-    { selector: 'node.group', style: { 'border-width': 4, 'border-color': '#bdbdbd', 'shape': 'ellipse' } },
-    { selector: ':parent', style: { 'background-color': dark ? '#30333a' : '#eeeeee', 'background-opacity': 0.7, 'border-width': 1, 'border-color': '#bdbdbd', 'shape': 'round-rectangle', 'padding': 18, 'background-image': 'none', 'text-valign': 'top', 'text-margin-y': -4, 'label': e => e.data('caption') } },
-    { selector: 'node.filtered', style: { 'background-color': dark ? '#4a4d55' : '#dcdcdc', 'background-image': 'none', 'label': '', 'border-color': dark ? '#4a4d55' : '#ececec' } },
-    { selector: 'node.pulse', style: { 'underlay-color': '#f12a27', 'underlay-opacity': 0.35, 'underlay-padding': 18 } },
-    { selector: '.grp-hidden, .egrp-hidden', style: { 'display': 'none' } },
-    { selector: 'edge', style: {
-      'width': e => edgeWidth(e.data()), 'line-color': e => edgeStyle(e.data('type')).color, 'target-arrow-color': e => edgeStyle(e.data('type')).color,
-      'target-arrow-shape': 'triangle', 'arrow-scale': 0.75, 'curve-style': 'bezier', 'control-point-step-size': 28, 'opacity': 0.9,
-      'label': e => S.edgeCaptionsAlways ? edgeCaption(e.data()) : '', 'font-size': 9, 'color': dark ? '#c0c0c0' : '#4a4a4a', 'text-rotation': 'autorotate',
-      'text-outline-color': halo, 'text-outline-width': 2, 'min-zoomed-font-size': 7, 'overlay-opacity': 0, 'font-family': 'Roboto, Arial, sans-serif',
-    } },
-    { selector: 'edge.meta', style: { 'label': e => edgeCaption(e.data()), 'line-style': 'solid' } },
-    { selector: 'edge.hl', style: { 'label': e => edgeCaption(e.data()), 'underlay-color': under, 'underlay-padding': 4, 'underlay-opacity': 1, 'opacity': 1, 'z-index': 8, 'width': e => edgeWidth(e.data()) + 0.8 } },
-    { selector: 'edge:selected', style: { 'line-color': '#f12a27', 'target-arrow-color': '#f12a27', 'label': e => edgeCaption(e.data()), 'z-index': 10 } },
-    { selector: 'edge.filtered', style: { 'line-color': dark ? '#3a3d45' : '#e8e8e8', 'target-arrow-color': dark ? '#3a3d45' : '#e8e8e8', 'label': '' } },
+    { selector: 'node[_s]', style: { width: 'data(_s)', height: 'data(_s)' } },
+    { selector: ':parent', style: { padding: 18 } },
+    { selector: '.grp-hidden, .egrp-hidden', style: { display: 'none' } },
   ];
 }
-function restyle() { refreshRanges(); cy.style(cyStyle()); drawOverlay(); persistStyles(); }
+const THEME_LIGHT = { nodeBorder: '#ffffff', text: '#333333', textHalo: 'rgba(248,248,248,0.92)', halo: '#ffffff', labelBox: '#ffffff', select: '#f12a27', badge: '#454466', groupBadge: '#616161',
+  groupFill: 'rgba(224,224,224,0.55)', groupStroke: '#bdbdbd', filteredNode: '#dedede', filteredEdge: '#e9e9e9', edgeText: '#5c5c5c', pulse: 'rgba(241,42,39,0.28)' };
+const THEME_DARK = { nodeBorder: '#2b2e35', text: '#e6e6e6', textHalo: 'rgba(29,31,36,0.92)', halo: '#3a3e48', labelBox: '#2b2e35', select: '#ff5a52', badge: '#8a89c0', groupBadge: '#8d8d8d',
+  groupFill: 'rgba(60,63,72,0.6)', groupStroke: '#5b5f6a', filteredNode: '#4a4d55', filteredEdge: '#3a3d45', edgeText: '#b8b8b8', pulse: 'rgba(255,90,82,0.3)' };
+function theme() { return document.body.classList.contains('dark') ? THEME_DARK : THEME_LIGHT; }
+function nodeIcon(d) {
+  const ic = d.group && !d.hubgroup ? 'SelectGroup' : catStyle(d.category).icon; if (!ic) return null;
+  return { name: ic, color: lighten(nodeColor(d)) ? '#303030' : '#ffffff' };
+}
+function syncSizes(nodes = cy.nodes()) {
+  cy.batch(() => nodes.forEach(n => { const s = nodeSize(n._private.data); if (n._private.data._s !== s) n.data('_s', s); }));
+}
+const VISUALS = {
+  theme, defaultSize: () => DEFAULT_SIZE, nodeColor, nodeSize, nodeCaption, nodeIcon,
+  edgeColor: d => d.virtual ? '#9e9e9e' : edgeStyle(d.type).color, edgeWidth, edgeCaption: d => d.virtual ? '' : edgeCaption(d),
+  edgeCaptionsAlways: () => S.edgeCaptionsAlways, hiddenCount: n => hiddenCount(n), highlightActive: () => cy.$(':selected').length > 0,
+  groupCaption: d => d.caption || '',
+};
+function restyle() { refreshRanges(); syncSizes(); R.redraw(); drawMinimap(); persistStyles(); }
 
 // ---------- graph data ---------------------------------------------------------------
-function realNodes() { return cy.nodes().filter(n => !n.data('group')); }
-function realEdges() { return cy.edges().filter(e => !e.data('meta')); }
+function realNodes() { return cy.nodes().filter(n => !n._private.data.group && !n._private.data.hubgroup); }
+function realEdges() { return cy.edges().filter(e => !e._private.data.meta && !e._private.data.virtual); }
 function addGraph(g, around = null) {
-  const added = [];
   const ext = cy.extent(); const c0 = around ? around.position() : { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 };
-  const fresh = (g.nodes || []).filter(n => cy.getElementById(n.id).empty());
-  fresh.forEach((n, i) => {
-    const a = (2 * Math.PI * i) / Math.max(1, fresh.length), r = around ? 90 + 6 * Math.sqrt(fresh.length) : 30 * Math.sqrt(i);
-    added.push(cy.add({ group: 'nodes', data: { id: n.id, labels: n.labels, category: n.category, props: n.props, degree: n.degree ?? 0 }, position: { x: c0.x + r * Math.cos(a), y: c0.y + r * Math.sin(a) } }));
+  const seen = new Set();
+  const fresh = (g.nodes || []).filter(n => !seen.has(n.id) && seen.add(n.id) && cy.getElementById(n.id).empty());
+  const k = fresh.length;
+  const nodeEls = fresh.map((n, i) => {
+    // small batches: a ring around the expanded node; big batches: a sunflower spiral (no overlaps, O(n))
+    const big = k > 60; const a = big ? i * 2.399963 : (2 * Math.PI * i) / Math.max(1, k);
+    const r = big ? 34 * Math.sqrt(i + (around ? 4 : 0)) : around ? 90 + 6 * Math.sqrt(k) : 30 * Math.sqrt(i);
+    const data = { id: n.id, labels: n.labels, category: n.category, props: n.props, degree: n.degree ?? 0 };
+    data._s = nodeSize(data);
+    return { group: 'nodes', data, position: { x: c0.x + r * Math.cos(a), y: c0.y + r * Math.sin(a) } };
   });
-  for (const n of g.nodes || []) { const ex = cy.getElementById(n.id); if (ex.nonempty() && n.degree != null) ex.data('degree', n.degree); }
+  let added = nodeEls.length ? cy.add(nodeEls) : cy.collection();
+  for (const n of g.nodes || []) { if (n.degree == null) continue; const ex = cy.getElementById(n.id); if (ex.nonempty() && ex._private.data.degree !== n.degree) ex.data('degree', n.degree); }
+  const edgeEls = []; const seenE = new Set();
   for (const e of g.edges || []) {
-    if (cy.getElementById(e.id).nonempty() || cy.getElementById(e.source).empty() || cy.getElementById(e.target).empty()) continue;
-    added.push(cy.add({ group: 'edges', data: { id: e.id, type: e.type, source: e.source, target: e.target, props: e.props } }));
+    if (seenE.has(e.id) || cy.getElementById(e.id).nonempty() || cy.getElementById(e.source).empty() || cy.getElementById(e.target).empty()) continue;
+    seenE.add(e.id); edgeEls.push({ group: 'edges', data: { id: e.id, type: e.type, source: e.source, target: e.target, props: e.props } });
   }
+  if (edgeEls.length) added = added.union(cy.add(edgeEls));
   const missingDeg = (g.nodes || []).filter(n => n.degree == null).map(n => n.id);
-  if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => cy.getElementById(n.id).data('degree', n.degree)); drawOverlay(); });
+  if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => cy.getElementById(n.id).data('degree', n.degree)); R.redraw(); });
   afterGraphChange();
-  return cy.collection(added);
+  return added;
 }
 function afterGraphChange() {
   $('#landing').classList.toggle('hidden', cy.nodes().length > 0);
-  applyEdgeGrouping(); applyFilters(); refreshRanges(); cy.style().update(); updateHighlight(); drawOverlay(); drawMinimap();
+  applyEdgeGrouping(); applyFilters(); if (Object.values(S.cat).some(c => c.sizeRule?.prop)) { refreshRanges(); syncSizes(); } R.indexParallel(); updateHighlight(); R.redraw(); drawMinimap();
   if (S.rightPanel) renderRightPanel(); markDirty();
 }
 
 // ---------- undo / redo / snapshots ----------------------------------------------------
 function snapshot() {
-  return { nodes: realNodes().map(n => ({ data: n.data(), position: { ...n.position() }, pinned: !!n.data('pinned') })), edges: realEdges().map(e => ({ data: e.data() })) };
+  return { nodes: cy.nodes().filter(n => !n._private.data.group).map(n => ({ data: n.data(), position: { ...n.position() }, pinned: !!n.data('pinned') })), edges: cy.edges().filter(e => !e._private.data.meta).map(e => ({ data: e.data() })) };
 }
 function restore(snap) {
   cy.elements().remove();
@@ -187,40 +191,16 @@ function sizeOverlay() { const r = window.devicePixelRatio || 1; overlay.width =
 let overlayQueued = false;
 function drawOverlay() { if (!overlayQueued) { overlayQueued = true; requestAnimationFrame(() => { overlayQueued = false; paintOverlay(); }); } }
 function hiddenCount(n) {
-  if (n.data('group')) return 0;
-  const shown = n.connectedEdges().filter(e => !e.data('meta')).length;
-  return Math.max(0, (n.data('degree') || 0) - shown);
+  const d = n._private.data; if (d.group || d.hubgroup) return 0;
+  let shown = 0;
+  for (const e of n._private.edges) { const ed = e._private.data; if (ed.virtual) { const o = ed.source === d.id ? e.target() : e.source(); shown += o._private.data.count || 0; } else if (!ed.meta) shown++; }
+  return Math.max(0, (d.degree || 0) - shown);
 }
 function paintOverlay() {
   octx.clearRect(0, 0, innerWidth, innerHeight);
-  const z = cy.zoom();
-  cy.nodes(':visible').forEach(n => {
-    if (n.isParent()) return;
-    const p = n.renderedPosition(); const r = n.renderedWidth() / 2;
-    if (p.x < -50 || p.y < -50 || p.x > innerWidth + 50 || p.y > innerHeight + 50) return;
-    const filtered = n.hasClass('filtered');
-    if (n.data('group') && !filtered) {
-      const label = 'x' + n.data('count'); const br = Math.max(7, r * 0.42);
-      badge(p.x + r * 0.72, p.y - r * 0.72, br, label, '#616161');
-    }
-    const h = hiddenCount(n);
-    if (h > 0 && !filtered) {
-      const br = Math.max(3.5, r * 0.36); const sx = p.x - r * 0.72, sy = p.y + r * 0.72;
-      const label = h > 999 ? '+' : String(h);
-      badge(sx, sy, br, br >= 7 ? label : '', '#454466');
-    }
-    if (n.data('pinned')) {
-      octx.save(); octx.translate(p.x + r * 0.6, p.y - r * 1.05); const s = Math.max(10, r * 0.7) / 24; octx.scale(s, s);
-      octx.fillStyle = '#303030'; octx.fill(new Path2D(window.ICONS.PinOutline)); octx.restore();
-    }
-  });
   if (S.lasso && S.lasso.pts.length > 1) {
     octx.save(); octx.beginPath(); S.lasso.pts.forEach((p, i) => i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.closePath();
     octx.fillStyle = 'rgba(35,101,241,.08)'; octx.fill(); octx.setLineDash([5, 4]); octx.strokeStyle = '#2365f1'; octx.lineWidth = 1.5; octx.stroke(); octx.restore();
-  }
-  function badge(x, y, r, label, color) {
-    octx.beginPath(); octx.arc(x, y, r, 0, 2 * Math.PI); octx.fillStyle = color; octx.fill(); octx.lineWidth = Math.max(1, r * 0.15); octx.strokeStyle = '#fff'; octx.stroke();
-    if (label) { octx.fillStyle = '#fff'; octx.font = `${Math.round(r * (label.length > 2 ? 0.85 : 1.1))}px Roboto, Arial`; octx.textAlign = 'center'; octx.textBaseline = 'middle'; octx.fillText(label, x, y + 0.5); }
   }
 }
 
@@ -323,9 +303,30 @@ function toggleGroup(gid) { const k = 'open:' + gid; S.collapsed.has(k) ? S.coll
 function setAllGroups(open) { cy.nodes().filter(n => n.data('group')).forEach(g => { const k = 'open:' + g.id(); open ? S.collapsed.add(k) : S.collapsed.delete(k); }); applyNodeGrouping(); afterGraphChange(); }
 
 // ---------- layouts ------------------------------------------------------------------
+const FA2_THRESHOLD = 1200; let fa2Run = null;
+function runForceLarge(eles, opts, done) {
+  // ForceAtlas2 (Barnes-Hut) in a web worker; positions are streamed back into the model every few frames.
+  if (fa2Run) fa2Run.stop();
+  const { Graph, FA2Layout, inferSettings } = window.GXFA2;
+  const nodes = eles.nodes().filter(n => !n.isParent()); const g = new Graph({ type: 'undirected' });
+  if (opts.randomize) nodes.forEach((n, i) => { const a = i * 2.399963, r = 34 * Math.sqrt(i); n._private.position.x = r * Math.cos(a); n._private.position.y = r * Math.sin(a); });
+  nodes.forEach(n => { const p = n._private.position; g.addNode(n.id(), { x: p.x / 10, y: p.y / 10, size: 1, fixed: !!(n._private.data.pinned || n.locked() || (opts.onlyNew && !opts.onlyNew.has(n))) }); });
+  eles.edges().forEach(e => { const a = e._private.data.source, b = e._private.data.target; if (a !== b && g.hasNode(a) && g.hasNode(b) && !g.hasEdge(a, b)) g.addEdge(a, b); });
+  const settings = { ...inferSettings(g), barnesHutOptimize: true, barnesHutTheta: 0.9, scalingRatio: 12, gravity: 0.6, slowDown: 3, strongGravityMode: false, linLogMode: false };
+  const L = new FA2Layout(g, { settings }); L.start();
+  const t0 = performance.now(), budget = opts.budgetMs ?? Math.min(20000, 2000 + nodes.length * 0.15); let frame = 0, live = true;
+  const sync = () => { nodes.forEach(n => { const a = g.getNodeAttributes(n.id()); n._private.position.x = a.x * 10; n._private.position.y = a.y * 10; }); R.positionsChanged(); };
+  const tick = () => { if (!live) return; if (++frame % 4 === 0) sync(); if (performance.now() - t0 < budget) requestAnimationFrame(tick); else stop(); };
+  const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; sync(); cy.emit('position'); done && done(); };
+  fa2Run = { stop }; requestAnimationFrame(tick);
+}
 function runLayout(opts = {}) {
   const name = opts.name || S.layout.name; const eles = cy.elements(':visible');
   if (!eles.nodes().length) return;
+  if ((name === 'force') && eles.nodes().length > FA2_THRESHOLD && window.GXFA2) {
+    const only = opts.onlyNew ? new Set(opts.onlyNew.toArray()) : null;
+    return runForceLarge(eles, { ...opts, onlyNew: only }, () => { if (opts.fit !== false) R.fit(cy.elements(':visible'), 60); drawMinimap(); markDirty(); cy.emit('layoutstop'); });
+  }
   const pinned = cy.nodes().filter(n => n.data('pinned'));
   let lockedTmp = cy.collection();
   if (opts.onlyNew) { lockedTmp = cy.nodes().difference(opts.onlyNew).filter(n => !n.locked()); lockedTmp.lock(); }
@@ -347,7 +348,7 @@ function runLayout(opts = {}) {
       nodeRepulsion: 22000, idealEdgeLength: 95, edgeElasticity: 0.45, nodeSeparation: 90, nestingFactor: 0.6, gravity: 0.3, numIter: S.layout.fast ? 1200 : 2500, packComponents: true, nodeDimensionsIncludeLabels: false,
       fixedNodeConstraint: pinned.length ? pinned.map(n => ({ nodeId: n.id(), position: { ...n.position() } })) : undefined, fit: !!opts.fit });
   }
-  L.one('layoutstop', () => { lockedTmp.unlock(); if (opts.fit) cy.animate({ fit: { eles: cy.elements(':visible'), padding: 80 } }, { duration: 300 }); drawOverlay(); drawMinimap(); markDirty(); });
+  L.one('layoutstop', () => { lockedTmp.unlock(); if (opts.fit) R.animate({ fit: cy.elements(':visible'), padding: 80 }); drawOverlay(); drawMinimap(); markDirty(); });
   L.run();
 }
 
@@ -367,9 +368,38 @@ async function expand(nodes, { categories = null, types = null, limit = EXPAND_T
     toast(`Added ${newNodes.length} node${newNodes.length === 1 ? '' : 's'}`);
   } catch (e) { toast('Expand failed: ' + e.message, 4000); }
 }
+let HUB_THRESHOLD = 300; // hidden neighbours above this are grouped per category (tests lower it)
+async function groupHub(hub) {
+  // A hub with hundreds+ hidden neighbors is shown as one group node per (category, edge type).
+  const sum = await api('/api/neighbors', { ids: [hub.id()], visible: realNodes().map(n => n.id()) });
+  pushUndo();
+  const nodes = [], edges = []; const c = hub.position(); let k = 0; const total = Object.values(sum.combos).reduce((a, t) => a + Object.keys(t).length, 0);
+  for (const [cat, types] of Object.entries(sum.combos)) for (const [t, cnt] of Object.entries(types)) {
+    const id = `hub:${hub.id()}:${cat}:${t}`; const ex = cy.getElementById(id);
+    const caption = `${cat} (${sum.approximate ? '~' : ''}${cnt.toLocaleString()})`;
+    if (ex.nonempty()) { ex.data({ count: cnt, caption }); continue; }
+    const a = (2 * Math.PI * k++) / Math.max(1, total), r = 150 + 8 * total;
+    nodes.push({ group: 'nodes', data: { id, hubgroup: true, hub: hub.id(), category: cat, type: t, count: cnt, caption, labels: [cat], props: {}, degree: 0, _s: nodeSize({ hubgroup: true, count: cnt }) }, position: { x: c.x + r * Math.cos(a), y: c.y + r * Math.sin(a) } });
+    edges.push({ group: 'edges', data: { id: id + ':e', source: hub.id(), target: id, type: t, virtual: true, props: {} } });
+  }
+  cy.add(nodes); cy.add(edges); afterGraphChange();
+  toast(`${sum.total.toLocaleString()} neighbors grouped by category: double-click a group to load its nodes`, 4000);
+}
+async function loadHubGroup(g, n = 200) {
+  const d = g.data();
+  try {
+    const r = await api('/api/expand', { ids: [d.hub], visible: realNodes().map(x => x.id()), categories: [d.category], types: [d.type], limit: n });
+    pushUndo(); const added = addGraph(r, g); const got = added.nodes().length; const left = d.count - got;
+    if (left <= 0 || !r.more) g.remove(); else g.data({ count: left, caption: `${d.category} (${left.toLocaleString()})` });
+    afterGraphChange(); if (got) runLayout({ name: 'force', onlyNew: added.nodes(), fit: false });
+    toast(`Loaded ${got} ${d.category} node${got === 1 ? '' : 's'}${left > 0 && r.more ? `, ${left.toLocaleString()} left in the group` : ''}`);
+  } catch (e) { toast('Load failed: ' + e.message, 4000); }
+}
 async function expandDefault(node) {
+  if (node.data('hubgroup')) return loadHubGroup(node);
   const hidden = hiddenCount(node);
   if (hidden === 0) return toast('All neighbors are already displayed');
+  if (hidden > HUB_THRESHOLD) return groupHub(node);
   if (hidden > EXPAND_THRESHOLD) return openSelectiveExpand(cy.collection(node));
   expand(cy.collection(node));
 }
@@ -423,7 +453,7 @@ function pickSearch(i) {
     if (cy.getElementById(e.id).empty()) { pushUndo(); addGraph({ nodes: [e.sourceNode, e.targetNode].filter(Boolean), edges: [e] }); }
     target = cy.getElementById(e.id);
   }
-  if (target.nonempty()) { selectOnly(target); cy.animate({ center: { eles: target }, zoom: Math.max(cy.zoom(), 1.2) }, { duration: 350 }); }
+  if (target.nonempty()) { selectOnly(target); const z = Math.max(cy.zoom(), 1.2); R.animate({ zoom: z, center: target.isNode() ? target.position() : target.midpoint() }, 350); }
 }
 async function fetchEdgesAmongVisible() {
   const ids = realNodes().map(n => n.id()); if (ids.length < 2) return;
@@ -663,6 +693,7 @@ function panelTimeline() {
 }
 
 // ---------- context menus --------------------------------------------------------------
+function zoomBy(f) { const z = Math.max(R.minZoom, Math.min(R.maxZoom, cy.zoom() * f)); const c = { x: (cy.width() / 2 - cy.pan().x) / cy.zoom(), y: (cy.height() / 2 - cy.pan().y) / cy.zoom() }; R.animate({ zoom: z, center: c }, 200); }
 function closeMenus(pops = false) { $('#menus').innerHTML = ''; if (pops) $$('.pop').forEach(p => p.remove()); }
 function showMenu(items, x, y, parent = null) {
   const m = document.createElement('div'); m.className = 'menu';
@@ -715,6 +746,7 @@ async function expandSubmenu(nodes) {
   ];
 }
 function nodeMenuItems(node) {
+  if (node.data('hubgroup')) return [{ header: node.data('caption') }, { label: 'Load 200 nodes', icon: 'PlayOutline', act: () => loadHubGroup(node, 200) }, { label: 'Load 1,000 nodes', icon: 'PlayOutline', act: () => loadHubGroup(node, 1000) }, { label: 'Load all (up to 5,000)', icon: 'PlayOutline', act: () => loadHubGroup(node, 5000) }, '-', { label: 'Remove group', icon: 'MinusCircleOutline', act: () => removeEles(node) }];
   const sel = cy.$('node:selected').filter(n => !n.data('group')); const nodes = sel.length ? sel : cy.collection(node);
   const pinned = nodes.every(n => n.data('pinned'));
   const g = node.data('group');
@@ -723,7 +755,7 @@ function nodeMenuItems(node) {
     { label: 'Select', icon: 'Select', sub: () => { const nb = nodes.neighborhood().nodes(); const cats = {}; nb.forEach(n => { cats[n.data('category')] = (cats[n.data('category')] || 0) + 1; });
       return [{ label: 'All neighbors', right: String(nb.length), act: () => nodes.union(nb).select() }, '-', { header: 'Neighbors by node category' }, ...Object.keys(cats).sort().map(c => ({ html: catChip(c), right: String(cats[c]), act: () => nb.filter(n => n.data('category') === c).select() }))]; } },
     { label: 'Queries', icon: 'CodeBraces', sub: () => [{ label: 'Cypher for this selection…', act: () => openCodeQuery(`MATCH (n)-[r]-(m) WHERE elementId(n) IN ${JSON.stringify(nodes.map(n => n.id()))}\nRETURN n, r, m LIMIT 100`) }] },
-    '-', { label: pinned ? 'Unpin' : 'Pin', icon: 'PinOutline', act: () => { nodes.forEach(n => n.data('pinned', !pinned)); drawOverlay(); markDirty(); } },
+    '-', { label: pinned ? 'Unpin' : 'Pin', icon: 'PinOutline', act: () => { nodes.forEach(n => n.data('pinned', !pinned)); R.redraw(); markDirty(); } },
     { label: 'Remove from visualization', icon: 'MinusCircleOutline', act: () => removeEles(nodes) },
   ];
   if (g) items.splice(0, 1, { label: S.collapsed.has('open:' + node.id()) ? 'Collapse group' : 'Expand group', icon: 'SelectGroup', act: () => toggleGroup(node.id()) });
@@ -852,7 +884,8 @@ function openExportData(selectedOnly = false) {
   $('[data-xd]', bg).onclick = () => { exportData($('input[name=xs]:checked', bg).value === 'sel', $('[data-xf]', bg).value); bg.remove(); };
 }
 function exportPngBlob(opts) {
-  return cy.png({ output: 'blob', full: opts.full, scale: opts.scale, bg: opts.bg ? getComputedStyle(document.body).getPropertyValue('--bg').trim() || '#f8f8f8' : undefined });
+  const c = R.png({ full: opts.full, scale: opts.scale, bg: opts.bg ? getComputedStyle(document.body).getPropertyValue('--bg').trim() || '#f8f8f8' : null });
+  return new Promise(res => c.toBlob(res, 'image/png'));
 }
 function openExportImage() {
   const bg = modal('Export image', `<div style="display:flex;gap:18px"><div style="flex:1"><img data-prev="1" style="max-width:100%;max-height:52vh;border:1px solid var(--line);background:repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50%/16px 16px"></div>
@@ -861,9 +894,9 @@ function openExportImage() {
     <div class="field"><label><input type="checkbox" data-ib="1" checked> Background visible</label></div><div class="section-d">Format: PNG</div></div></div>`,
     `<button class="btn outline" data-close="1">Cancel</button><button class="btn primary" data-idl="1">Export PNG</button>`, { width: 900 });
   const opts = () => ({ full: $('[data-ia]', bg).value === 'full', scale: +$('[data-is]', bg).value, bg: $('[data-ib]', bg).checked });
-  const prev = () => { const o = opts(); $('[data-prev]', bg).src = cy.png({ full: o.full, scale: 1, bg: o.bg ? '#f8f8f8' : undefined }); };
+  const prev = () => { const o = opts(); $('[data-prev]', bg).src = R.png({ full: o.full, scale: 1, bg: o.bg ? '#f8f8f8' : null, maxWidth: 1600, maxHeight: 1200 }).toDataURL('image/png'); };
   $$('select,input', bg).forEach(i => i.onchange = prev); prev();
-  $('[data-idl]', bg).onclick = () => { download(`graph-${Date.now()}.png`, exportPngBlob(opts())); bg.remove(); };
+  $('[data-idl]', bg).onclick = async () => { download(`graph-${Date.now()}.png`, await exportPngBlob(opts())); bg.remove(); };
 }
 
 // ---------- save / open (local only) ---------------------------------------------------
@@ -965,7 +998,7 @@ function mainMenuItems() {
     { label: 'Keyboard shortcuts & help', icon: 'KeyboardOutline', act: openHelp },
   ];
 }
-function toggleTheme() { document.body.classList.toggle('dark'); localStorage.setItem('gx:theme', document.body.classList.contains('dark') ? 'dark' : 'light'); cy.style(cyStyle()); drawOverlay(); }
+function toggleTheme() { document.body.classList.toggle('dark'); localStorage.setItem('gx:theme', document.body.classList.contains('dark') ? 'dark' : 'light'); R.redraw(); drawMinimap(); }
 
 // ---------- wiring ---------------------------------------------------------------------
 const ACTIONS = {
@@ -973,9 +1006,8 @@ const ACTIONS = {
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
   'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch,
-  'zoom-in': () => cy.animate({ zoom: { level: cy.zoom() * 1.35, renderedPosition: { x: innerWidth / 2, y: innerHeight / 2 } } }, { duration: 200 }),
-  'zoom-out': () => cy.animate({ zoom: { level: cy.zoom() / 1.35, renderedPosition: { x: innerWidth / 2, y: innerHeight / 2 } } }, { duration: 200 }),
-  'locate': () => { const s = cy.$(':selected'); cy.animate({ fit: { eles: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 } }, { duration: 300 }); },
+  'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
+  'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
   'minimap': () => { S.minimap = !S.minimap; $('#minimap').classList.toggle('hidden', !S.minimap); $('#btn-minimap').classList.toggle('on', S.minimap); drawMinimap(); },
   'open-selpanel': () => { S.selPanelOpen = true; updateHighlight(); },
 };
@@ -1046,12 +1078,12 @@ $('#leftpanel').addEventListener('click', e => {
   if (d.lp === 'export') return openExportData(true);
   if (d.lp === 'more') { const r = t.getBoundingClientRect(); const n = sel.nodes().first(); showMenu(n.nonempty() ? nodeMenuItems(n) : [{ label: 'Remove from visualization', icon: 'MinusCircleOutline', act: () => removeEles(sel) }], r.right + 4, r.top); return; }
   if (d.lp === 'design') { openPanel('design'); return; }
-  if (d.goto) { const el = cy.getElementById(d.goto); if (el.nonempty()) { selectOnly(el); cy.animate({ center: { eles: el } }, { duration: 300 }); } return; }
+  if (d.goto) { const el = cy.getElementById(d.goto); if (el.nonempty()) { selectOnly(el); R.animate({ center: el.position(), zoom: cy.zoom() }); } return; }
   if (d.more) { const v = cy.$(':selected').first().data('props')[d.more]; t.parentElement.textContent = fmt(v); return; }
   if (d.jump) { $(`[data-sec="${CSS.escape(d.jump)}"]`)?.scrollIntoView({ behavior: 'smooth' }); return; }
   if (d.sort) { const [k, c] = d.sort.split('|'); const cur = TBL.sort[k]; TBL.sort[k] = { col: c, dir: cur && cur.col === c ? -cur.dir : 1 }; return renderLeftPanel(); }
   if (d.page) { const [k, p] = d.page.split('|'); TBL.page[k] = +p; return renderLeftPanel(); }
-  if (d.row) { const el = cy.getElementById(d.row); if (e.detail >= 2) cy.animate({ center: { eles: el }, zoom: Math.max(cy.zoom(), 1.4) }, { duration: 300 }); else pulse(el); }
+  if (d.row) { const el = cy.getElementById(d.row); if (e.detail >= 2) R.animate({ center: el.position(), zoom: Math.max(cy.zoom(), 1.4) }); else pulse(el); }
 });
 
 // search box
@@ -1096,7 +1128,7 @@ function startLasso(oe, edge) {
     window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
     const poly = S.lasso.pts; const edgeMode = S.lasso.edge; S.lasso = null; S.lassoMode = null; cy.userPanningEnabled(true);
     if (poly.length > 2) {
-      const hit = edgeMode ? cy.edges(':visible').filter(x => { const m = x.renderedMidpoint(); return pointInPoly(m, poly); }) : cy.nodes(':visible').filter(n => pointInPoly(n.renderedPosition(), poly));
+      const hit = edgeMode ? cy.edges(':visible').filter(x => { const a = x.source().renderedPosition(), b = x.target().renderedPosition(); const cr = $('#cy').getBoundingClientRect(); return pointInPoly({ x: (a.x + b.x) / 2 + cr.left, y: (a.y + b.y) / 2 + cr.top }, poly); }) : cy.nodes(':visible').filter(n => { if (n.isParent()) return false; const p = n.renderedPosition(); const cr = $('#cy').getBoundingClientRect(); return pointInPoly({ x: p.x + cr.left, y: p.y + cr.top }, poly); });
       if (!(oe.shiftKey && !edgeMode)) cy.$(':selected').unselect(); hit.select(); toast(`${hit.length} ${edgeMode ? 'edges' : 'nodes'} selected`);
     }
     drawOverlay();
@@ -1110,15 +1142,15 @@ async function boot() {
   sizeOverlay();
   S.cfg = await api('/api/styles');
   try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
-  try { const st = await api('/api/status'); $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · read-only`; }
+  try { const st = await api('/api/status'); $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · read-only`; $('#search-input').title = $('#conn').textContent; }
   catch (e) { $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`; }
   try { S.schema = await api('/api/schema'); } catch { S.schema = { categories: {}, types: {}, links: [] }; }
   initStyles();
-  cy = cytoscape({ container: $('#cy'), elements: [], style: cyStyle(), minZoom: 0.05, maxZoom: 6, wheelSensitivity: 0.35, boxSelectionEnabled: false, selectionType: 'single', textureOnViewport: false, pixelRatio: 'auto' });
+  cy = cytoscape({ headless: true, styleEnabled: true, elements: [], style: cyStyle(), minZoom: 0.01, maxZoom: 6 });
   window.cy = cy;
+  R = GXRender.createRenderer(cy, $('#cy'), VISUALS); window.R = R; R.wheelSensitivity = 0.8;
   let hlT; cy.on('select unselect', () => { clearTimeout(hlT); hlT = setTimeout(updateHighlight, 10); });
-  cy.on('render viewport', () => { drawOverlay(); clearTimeout(cy._mm); cy._mm = setTimeout(drawMinimap, 60); });
-  cy.on('position', 'node', () => drawOverlay());
+  cy.on('viewport', () => { drawOverlay(); clearTimeout(cy._mm); cy._mm = setTimeout(drawMinimap, 80); });
   cy.on('tap', 'node', e => { if (e.originalEvent?.shiftKey) setTimeout(() => { const base = cy.$('node:selected').union(e.target); base.union(base.neighborhood().nodes()).select(); }, 0); });
   cy.on('dbltap', 'node', e => { const n = e.target; if (n.data('group')) toggleGroup(n.id()); else expandDefault(n); });
   cy.on('dragfree', 'node', e => { if (S.prefs.pinOnDrag) { e.target.data('pinned', true); drawOverlay(); } markDirty(); });
@@ -1130,8 +1162,8 @@ async function boot() {
     showMenu([{ label: 'Select source and target', icon: 'Select', act: () => e.target.connectedNodes().select() }, { label: 'Remove from visualization', icon: 'MinusCircleOutline', act: () => removeEles(cy.$('edge:selected')) }, '-', { label: 'Export selection data', icon: 'Download', act: () => openExportData(true) }], x, y);
   });
   cy.on('tapstart', e => { if (e.target !== cy) return; const oe = e.originalEvent; if (!oe || oe.button === 2) return; if (oe.ctrlKey || oe.metaKey || S.lassoMode) startLasso(oe, S.lassoMode === 'edge' || ((oe.ctrlKey || oe.metaKey) && oe.shiftKey)); });
-  $('#minimap').addEventListener('mousedown', ev => { const t = $('#minimap')._t; if (!t) return; const r = ev.target.getBoundingClientRect(); const mx = (ev.clientX - r.left - t.ox) / t.s, my = (ev.clientY - r.top - t.oy) / t.s; cy.animate({ center: { eles: cy.collection() }, pan: { x: innerWidth / 2 - mx * cy.zoom(), y: innerHeight / 2 - my * cy.zoom() } }, { duration: 200 }); });
-  window.addEventListener('resize', () => { sizeOverlay(); cy.resize(); drawOverlay(); });
+  $('#minimap').addEventListener('mousedown', ev => { const t = $('#minimap')._t; if (!t) return; const r = ev.target.getBoundingClientRect(); const mx = (ev.clientX - r.left - t.ox) / t.s, my = (ev.clientY - r.top - t.oy) / t.s; R.animate({ center: { x: mx, y: my }, zoom: cy.zoom() }, 200); });
+  window.addEventListener('resize', () => { sizeOverlay(); R.resize(); drawOverlay(); });
   updateUndoBtns(); updateSaveChip(); afterGraphChange();
   const q = new URLSearchParams(location.search);
   if (q.get('viz')) loadViz(q.get('viz'));

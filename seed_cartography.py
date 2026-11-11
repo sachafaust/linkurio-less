@@ -8,6 +8,10 @@ Usage:
     NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=... \
         python3 seed_cartography.py --wipe
 
+Options: --fixtures loads the real-schema snapshot exported from Cartography's own demo seeds and
+test fixtures (data/cartography-fixtures.json.gz); --scale N replicates the synthetic estate N times
+and --hub N adds a supernode, for large-graph benchmarks.
+
 --wipe deletes every node in the target database first. It refuses to run unless
 NEO4J_URI points at localhost/127.0.0.1, so it cannot touch a remote database.
 """
@@ -351,38 +355,102 @@ def is_local(uri: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+def scaled(g: G, copies: int, hub: int) -> G:
+    """Replicate the synthetic estate `copies` times (ids get a ~N suffix) and optionally hang `hub`
+    extra EC2 instances off the first AWS account to create a supernode."""
+    out = G()
+    for i in range(copies):
+        sfx = "" if i == 0 else f"~{i}"
+        for labels, rows in g.nodes.items():
+            out.nodes[labels].extend(rows if i == 0 else [{**r, "id": r["id"] + sfx} for r in rows])
+        for key, rows in g.rels.items():
+            out.rels[key].extend(rows if i == 0 else [(a + sfx, b + sfx, p) for a, b, p in rows])
+    if hub:
+        acct = g.nodes[next(k for k in g.nodes if k[0] == "AWSAccount")][0]
+        for k in range(hub):
+            iid = f"i-hub{k:07d}"
+            out.node(["AWSEC2Instance", "EC2Instance", "ComputeInstance"], id=iid, instanceid=iid, name=f"fleet-{k}",
+                     state=R.choice(["running"] * 6 + ["stopped"]), region=R.choice(REGIONS), instancetype=R.choice(["t3.micro", "m5.large", "c6g.xlarge"]))
+            out.rel(acct, "RESOURCE", {"id": iid}, "AWSAccount", "AWSEC2Instance")
+    return out
+
+
+def load_fixtures(path: str):
+    """Real-schema mock data exported from Cartography's own demo seeds + test fixtures (see tools/cartography_fixtures)."""
+    import gzip
+    import json
+    with gzip.open(path, "rt") as f:
+        return json.load(f)
+
+
+def chunks(rows, n=10000):
+    for i in range(0, len(rows), n):
+        yield rows[i:i + n]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--wipe", action="store_true", help="delete all nodes first (local DB only)")
+    ap.add_argument("--fixtures", nargs="?", const=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cartography-fixtures.json.gz"),
+                    help="load the real-schema Cartography fixture snapshot instead of the synthetic estate")
+    ap.add_argument("--scale", type=int, default=1, help="replicate the synthetic estate N times (~1.1k nodes / 2.4k rels each)")
+    ap.add_argument("--hub", type=int, default=0, help="add N EC2 instances to the first AWS account (supernode test)")
     args = ap.parse_args()
     uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
     if not is_local(uri):
         sys.exit("Refusing to seed a non-local database: " + uri)
     auth = (os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", ""))
-    g = build()
+    t0 = time.time()
     with GraphDatabase.driver(uri, auth=auth) as drv, drv.session(database=os.environ.get("NEO4J_DATABASE", "neo4j")) as s:
         if args.wipe:
-            s.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 5000 ROWS").consume()
-        primaries = sorted({labels[0] for labels in g.nodes})
-        for lab in primaries:  # Cartography creates an index on id for each label
-            s.run(f"CREATE INDEX IF NOT EXISTS FOR (n:`{lab}`) ON (n.id)").consume()
-        s.run("CREATE INDEX IF NOT EXISTS FOR (n:AWSPrincipal) ON (n.id)").consume()
-        s.run("CREATE INDEX IF NOT EXISTS FOR (n:AWSPolicy) ON (n.id)").consume()
-        s.run("CREATE INDEX IF NOT EXISTS FOR (n:AccountAccessKey) ON (n.id)").consume()
-        n_nodes = n_rels = 0
-        for labels, rows in g.nodes.items():
-            lab = ":".join(f"`{x}`" for x in labels)
-            rows = [{k: v for k, v in r.items() if v is not None} for r in rows]
-            s.run(f"UNWIND $rows AS row MERGE (n:`{labels[0]}` {{id: row.id}}) SET n += row SET n:{lab}", rows=rows).consume()
-            n_nodes += len(rows)
-        for (sl, typ, dl), rows in g.rels.items():
-            data = [{"s": a, "d": b, "p": p} for a, b, p in rows]
-            s.run(f"UNWIND $rows AS row MATCH (a:`{sl}` {{id: row.s}}) MATCH (b:`{dl}` {{id: row.d}}) "
-                  f"MERGE (a)-[r:`{typ}`]->(b) SET r += row.p", rows=data).consume()
-            n_rels += len(rows)
+            s.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS").consume()
+        if args.fixtures:
+            fx = load_fixtures(args.fixtures)
+            s.run("CREATE INDEX seed_xid IF NOT EXISTS FOR (n:_Seed) ON (n._xid)").consume()
+            s.run("CALL db.awaitIndexes(300)").consume()
+            groups = defaultdict(list)
+            for i, n in enumerate(fx["nodes"]):
+                groups[tuple(n["l"])].append({**n["p"], "_xid": i})
+            for labels, rows in groups.items():
+                lab = "".join(f":`{x}`" for x in labels)
+                for c in chunks(rows):
+                    s.run(f"UNWIND $rows AS row CREATE (n:_Seed{lab}) SET n = row", rows=c).consume()
+            by_type = defaultdict(list)
+            for r in fx["rels"]:
+                by_type[r["t"]].append({"s": r["s"], "d": r["d"], "p": r["p"]})
+            for typ, rows in by_type.items():
+                for c in chunks(rows):
+                    s.run(f"UNWIND $rows AS row MATCH (a:_Seed {{_xid: row.s}}) MATCH (b:_Seed {{_xid: row.d}}) CREATE (a)-[r:`{typ}`]->(b) SET r = row.p", rows=c).consume()
+            s.run("MATCH (n:_Seed) CALL (n) { REMOVE n:_Seed REMOVE n._xid } IN TRANSACTIONS OF 10000 ROWS").consume()
+            s.run("DROP INDEX seed_xid IF EXISTS").consume()
+            n_nodes, n_rels = len(fx["nodes"]), len(fx["rels"])
+        else:
+            g = build()
+            if args.scale > 1 or args.hub:
+                g = scaled(g, args.scale, args.hub)
+            primaries = sorted({labels[0] for labels in g.nodes})
+            for lab in primaries:  # Cartography creates an index on id for each label
+                s.run(f"CREATE INDEX IF NOT EXISTS FOR (n:`{lab}`) ON (n.id)").consume()
+            for lab in ("AWSPrincipal", "AWSPolicy", "AccountAccessKey"):
+                s.run(f"CREATE INDEX IF NOT EXISTS FOR (n:`{lab}`) ON (n.id)").consume()
+            s.run("CALL db.awaitIndexes(300)").consume()
+            n_nodes = n_rels = 0
+            for labels, rows in g.nodes.items():
+                lab = ":".join(f"`{x}`" for x in labels)
+                rows = [{k: v for k, v in r.items() if v is not None} for r in rows]
+                for c in chunks(rows):
+                    s.run(f"UNWIND $rows AS row MERGE (n:`{labels[0]}` {{id: row.id}}) SET n += row SET n:{lab}", rows=c).consume()
+                n_nodes += len(rows)
+            for (sl, typ, dl), rows in g.rels.items():
+                data = [{"s": a, "d": b, "p": p} for a, b, p in rows]
+                for c in chunks(data):
+                    s.run(f"UNWIND $rows AS row MATCH (a:`{sl}` {{id: row.s}}) MATCH (b:`{dl}` {{id: row.d}}) "
+                          f"MERGE (a)-[r:`{typ}`]->(b) SET r += row.p", rows=c).consume()
+                n_rels += len(rows)
         total = s.run("MATCH (n) RETURN count(n) AS n").single()["n"]
         total_r = s.run("MATCH ()-[r]->() RETURN count(r) AS n").single()["n"]
-    print(f"generated {n_nodes} nodes / {n_rels} relationships; database now holds {total} nodes / {total_r} relationships")
+    print(f"loaded {n_nodes} nodes / {n_rels} relationships in {time.time() - t0:.1f}s; "
+          f"database now holds {total} nodes / {total_r} relationships")
 
 
 if __name__ == "__main__":
