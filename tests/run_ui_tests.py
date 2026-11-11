@@ -63,7 +63,8 @@ def main():
             ctx = b.new_context(viewport={"width": 1440, "height": 860}, accept_downloads=True)
             pg = ctx.new_page()
             pg.on("pageerror", lambda e: errors.append(str(e)))
-            pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+            # the read-only test deliberately gets an HTTP 403 from /api/cypher; Chrome logs that as a console error
+            pg.on("console", lambda m: errors.append(m.text) if m.type == "error" and "status of 403" not in m.text else None)
             run_all(pg, url)
             b.close()
     finally:
@@ -84,9 +85,10 @@ def shot(pg, name):
 def ev(pg, js):
     # Never hand a cytoscape collection back to Playwright: serialising its cyclic object graph
     # made the renderer grow to >3 GB and crash ("Target crashed").
-    wrapped = ("(async () => { const r = await (" + js + "); "
-               "return (r && typeof r === 'object' && (typeof r.cy === 'function' || r instanceof Element)) ? null : r; })()")
-    return pg.evaluate(wrapped)
+    return pg.evaluate("""async (src) => {
+        const r = await (0, eval)(src);
+        return (r && typeof r === 'object' && (typeof r.cy === 'function' || r instanceof Element)) ? null : r;
+    }""", js)
 
 
 def wait_layout(pg, ms=1600):
