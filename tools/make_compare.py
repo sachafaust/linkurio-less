@@ -44,16 +44,17 @@ def compose(title, ref, app):
     font = ImageFont.truetype(FONT, 22)
     small = ImageFont.truetype(FONT, 16)
     a, b = fit(ref), fit(app)
-    W = a.width + b.width + 60
+    col = max(a.width, 340)  # leave room for the caption above narrow reference images
+    W = col + b.width + 60
     out = Image.new("RGB", (W, H + 80), "#ffffff")
     d = ImageDraw.Draw(out)
     d.text((20, 12), title, fill="#303030", font=font)
     d.text((20, 48), "Reference (Linkurious user manual)", fill="#7a7a7a", font=small)
-    d.text((a.width + 40, 48), "Prototype (Neo4j / Cartography test data)", fill="#2365f1", font=small)
+    d.text((col + 40, 48), "Prototype (Neo4j / Cartography test data)", fill="#2365f1", font=small)
     out.paste(a, (20, 70))
-    out.paste(b, (a.width + 40, 70))
+    out.paste(b, (col + 40, 70))
     d.rectangle([19, 69, 20 + a.width, 70 + a.height], outline="#e0e0e0")
-    d.rectangle([a.width + 39, 69, a.width + 40 + b.width, 70 + b.height], outline="#e0e0e0")
+    d.rectangle([col + 39, 69, col + 40 + b.width, 70 + b.height], outline="#e0e0e0")
     return out
 
 
@@ -64,7 +65,7 @@ def main():
         if not (os.path.exists(rp) and os.path.exists(ap)):
             print("skip", key, "(missing", rp if not os.path.exists(rp) else ap, ")")
             continue
-        img = compose(title, Image.open(rp), Image.open(ap))
+        img = compose(title, Image.open(rp).convert("RGBA"), Image.open(ap))
         path = os.path.join(HERE, f"compare-{key}.png")
         img.save(path, optimize=True)
         made.append(img)
