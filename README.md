@@ -4,6 +4,32 @@
 **Source:** Sacha direct
 **Status:** Ready for demo — Explore-phase experiment (v2: real-schema Cartography data, closer Linkurious look, large graphs)
 
+## Run it on your machine
+
+```bash
+git pull && cd prototypes/2026-11-11-linkurious-neo4j
+python3 run_local.py            # or ./run.sh
+```
+
+Needs **Python 3.10+** and **Docker** (Docker Desktop on macOS, running). The first run takes a few minutes (Python packages, the `neo4j:5.26-community` image); after that about 25 s. It:
+1. creates `.venv/` here and installs `requirements.txt` (just the `neo4j` driver);
+2. starts Neo4j 5.26 community in Docker: container `gx-neo4j`, volume `gx-neo4j-data`, ports bound to 127.0.0.1 only (bolt 7687, Neo4j Browser 7474), test password `tinkerlab-test`. Reuses the container on later runs;
+3. wipes it and loads the **Cartography fixture snapshot**, the same mock data used in development: 6,939 nodes / 11,054 relationships built with Cartography's own demo seeds and AWS/GCP/Okta/GitHub test fixtures (see "Real-schema Cartography data" below);
+4. starts the explorer on http://127.0.0.1:8744 and opens your browser. Ctrl+C stops the explorer; Neo4j keeps running.
+
+| Option | What it does |
+|---|---|
+| `--synthetic 50000 [--hub 100000]` | load the synthetic Cartography-shaped generator instead (about N nodes; `--hub` adds a supernode) |
+| `--both` | fixtures + the synthetic estate (1,099 nodes) in one database |
+| `--keep-data` | don't reload |
+| `--test` | install Playwright + Chromium, load `--both`, run the UI suite (33 checks, screenshots in `screenshots/`) plus a quick browser benchmark and an API benchmark (`.run/bench-*.json`), then keep serving (`--no-serve` to stop) |
+| `--neo4j-port 17687 --neo4j-http-port 17474` | if 7687/7474 are taken (the script tells you) |
+| `--neo4j-uri bolt://localhost:7687 --neo4j-password ...` | use your own **local** Neo4j 5 instead of Docker (it gets wiped) |
+| `--port 8755`, `--no-browser`, `--detach` | explorer port, no browser, run in the background |
+| `--status`, `--stop`, `--reset` | show what runs; stop explorer + container; delete container + volume |
+
+Prefer compose? `docker compose up -d neo4j` uses the same container, volume and password (see `docker-compose.yml` for the three follow-up commands). To rebuild the fixture snapshot from a Cartography checkout: `sh tools/cartography_fixtures/regenerate.sh` (clones Cartography, wipes the local Neo4j, runs the demo seeder and the integration tests, exports).
+
 ## Prompt / idea
 
 Sacha (direct, 2026-11-11):

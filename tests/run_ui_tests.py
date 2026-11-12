@@ -101,7 +101,9 @@ def node_pos(pg, node_id):
 
 def run_all(pg, url):
     pg.goto(url)
-    pg.wait_for_function("window.cy !== undefined && document.querySelector('#conn').textContent.length > 0", timeout=20000)
+    # wait for the app to finish booting. (window.cy alone is not enough: before boot it is the <div id="cy">
+    # element via named access, so a slow first schema load let the checks start too early.)
+    pg.wait_for_function("typeof cy !== 'undefined' && !!cy && typeof cy.nodes === 'function' && !!S.schema && document.querySelector('#conn').textContent.length > 0", timeout=90000)
 
     def t_connect():
         st = json.loads(urllib.request.urlopen(url + "api/status").read())
