@@ -88,7 +88,10 @@ def docker(*args, check=True, capture=True):
 
 # ---------------------------------------------------------------- stage 1: bootstrap (system Python)
 def best_python():
-    """Prefer a newer Python for the venv if one is installed (never required): 3.9 works, newer gets newer wheels."""
+    """Prefer a newer Python for the venv if one is installed (never required): 3.9 works, newer gets newer wheels.
+    RUN_LOCAL_PYTHON=/path/to/python forces the interpreter (e.g. RUN_LOCAL_PYTHON=/usr/bin/python3)."""
+    if os.environ.get("RUN_LOCAL_PYTHON"):
+        return os.environ["RUN_LOCAL_PYTHON"]
     cands = [f"python3.{m}" for m in (13, 12, 11, 10)] + ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
     best, best_v = sys.executable, sys.version_info[:2]
     for c in cands:

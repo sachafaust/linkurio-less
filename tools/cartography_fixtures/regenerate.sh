@@ -1,7 +1,7 @@
 #!/bin/sh
 # Rebuild data/cartography-fixtures.json.gz from Cartography's own demo seeds + integration-test fixtures.
 #
-# Needs: git, Python 3.10+, and an EMPTY-able LOCAL Neo4j 5 (it is WIPED). Easiest: the run_local.py container:
+# Needs: git, Python 3.10+ (Cartography itself needs it; the explorer and run_local.py only need 3.9), and an EMPTY-able LOCAL Neo4j 5 (it is WIPED). Easiest: the run_local.py container:
 #   python3 run_local.py --no-browser --detach          # then:
 #   sh tools/cartography_fixtures/regenerate.sh
 # Env: NEO4J_URI (default bolt://127.0.0.1:7687), NEO4J_USER (neo4j), NEO4J_PASSWORD (tinkerlab-test),

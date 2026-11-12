@@ -11,7 +11,7 @@ git pull && cd prototypes/2026-11-11-linkurious-neo4j
 python3 run_local.py            # or ./run.sh
 ```
 
-Needs **Python 3.10+** and **Docker** (Docker Desktop on macOS, running). The first run takes a few minutes (Python packages, the `neo4j:5.26-community` image); after that about 25 s. It:
+Needs **Python 3.9+** (macOS's built-in `/usr/bin/python3`, 3.9.6, is fine; a newer `python3.1x` or Homebrew Python is used for the venv if present, or force one with `RUN_LOCAL_PYTHON=/path/to/python`) and **Docker** (on macOS: Docker Desktop installed and running, `open -a Docker`; Apple Silicon is fine, the image is multi-arch). The first run takes a few minutes (Python packages, the `neo4j:5.26-community` image); after that about 25 s. It:
 1. creates `.venv/` here and installs `requirements.txt` (just the `neo4j` driver);
 2. starts Neo4j 5.26 community in Docker: container `gx-neo4j`, volume `gx-neo4j-data`, ports bound to 127.0.0.1 only (bolt 7687, Neo4j Browser 7474), test password `tinkerlab-test`. Reuses the container on later runs;
 3. wipes it and loads the **Cartography fixture snapshot**, the same mock data used in development: 6,939 nodes / 11,054 relationships built with Cartography's own demo seeds and AWS/GCP/Okta/GitHub test fixtures (see "Real-schema Cartography data" below);
@@ -119,7 +119,7 @@ Why cytoscape.js: it is MIT-licensed and needs no build step, has a good graph m
 
 ## How to run
 
-The requirements are Python 3.10 or later, `pip install neo4j` (tested with driver 6.4.1), and Neo4j 5.x (tested with 5.26.0 community).
+The requirements are Python 3.9 or later, `pip install neo4j` (tested with driver 6.4.1 on 3.13 and 5.28.x on 3.9; driver 6 needs 3.10+, pip picks the right one), and Neo4j 5.x (tested with 5.26.0 community).
 
 Run it against your own Cartography Neo4j:
 
