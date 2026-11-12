@@ -133,6 +133,9 @@ def run_all(pg, url):
     check("search edges by type", t_search_edges_local)
 
     def t_add():
+        # wait for the node results of "acme-prod" to replace the edge results of the previous check (search is
+        # debounced and async; on a bigger or cold database a fixed sleep raced it and Enter picked a stale row)
+        pg.wait_for_function("(() => { const c = document.querySelector('#search-results .sr .cat'); return c && c.textContent.trim().toUpperCase() === 'AWSACCOUNT'; })()", timeout=15000)
         pg.keyboard.press("Enter"); pg.wait_for_timeout(800)
         n = ev(pg, "cy.nodes().length"); sel = ev(pg, "cy.$(':selected').map(e => e.data('category'))")
         assert n == 1 and sel == ["AWSAccount"], (n, sel)
