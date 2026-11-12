@@ -144,6 +144,7 @@ def start_neo4j(args):
             f"(or drop --neo4j-port).")
     if status:
         args.neo4j_port = int(ports.get("7687/tcp", args.neo4j_port))
+        args.neo4j_http_port = int(ports.get("7474/tcp", args.neo4j_http_port))
         if status != "running":
             say(f"starting existing container {CONTAINER}")
             docker("start", CONTAINER)
@@ -193,7 +194,14 @@ def stop_server():
     pidf = RUN / "server.pid"
     if pidf.exists():
         try:
-            os.kill(int(pidf.read_text()), signal.SIGTERM)
+            pid = int(pidf.read_text())
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):  # wait until it has exited and released the port
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
             say("stopped the explorer server")
         except (ProcessLookupError, ValueError):
             pass
