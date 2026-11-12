@@ -1,0 +1,2 @@
+# Runtime: server.py and seed_cartography.py
+neo4j>=5.20,<7
