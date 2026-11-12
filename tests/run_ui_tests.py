@@ -215,7 +215,8 @@ def run_all(pg, url):
         shot(pg, "08-multi-selection")
         pg.click("#leftpanel table.sel th >> nth=1"); pg.wait_for_timeout(100)
         assert head == "Selection Information" and tables >= 2, (head, tables)
-        return f"{ev(pg, 'cy.$(\":selected\").length')} selected, {tables} per-category tables, sortable headers"
+        nsel = ev(pg, "cy.$(':selected').length")
+        return f"{nsel} selected, {tables} per-category tables, sortable headers"
     check("multi-selection table per category (Ctrl+A)", t_multi)
 
     def t_bg_menu():

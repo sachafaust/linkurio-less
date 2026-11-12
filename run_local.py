@@ -4,7 +4,7 @@
     python3 run_local.py                # venv + Neo4j in Docker + Cartography fixture data + server + browser
 
 What it does, in order:
-  1. checks Python 3.10+ and Docker (unless you pass --neo4j-uri to use your own local Neo4j)
+  1. checks Python 3.9+ (macOS's built-in /usr/bin/python3 is fine) and Docker (unless you pass --neo4j-uri to use your own local Neo4j)
   2. creates .venv/ in this folder and installs requirements.txt (+ requirements-tests.txt with --with-tests/--test)
   3. starts Neo4j 5.26 community in Docker: container "gx-neo4j", volume "gx-neo4j-data", ports bound to
      127.0.0.1 only, test password "tinkerlab-test"; reuses the container if it already exists
@@ -67,22 +67,55 @@ def port_in_use(port, host="127.0.0.1"):
         return s.connect_ex((host, port)) == 0
 
 
+def docker_bin():
+    """docker on PATH, or Docker Desktop's usual locations when the shell PATH doesn't include them (macOS)."""
+    found = shutil.which("docker")
+    if found:
+        return found
+    for c in ("/usr/local/bin/docker", "/opt/homebrew/bin/docker", os.path.expanduser("~/.docker/bin/docker"),
+              "/Applications/Docker.app/Contents/Resources/bin/docker"):
+        if os.access(c, os.X_OK):
+            return c
+    return None
+
+
 def docker(*args, check=True, capture=True):
-    r = subprocess.run(["docker", *args], capture_output=capture, text=True)
+    r = subprocess.run([docker_bin() or "docker", *args], capture_output=capture, text=True)
     if check and r.returncode != 0:
         die(f"docker {' '.join(args)} failed:\n{(r.stderr or r.stdout).strip()}")
     return r
 
 
 # ---------------------------------------------------------------- stage 1: bootstrap (system Python)
+def best_python():
+    """Prefer a newer Python for the venv if one is installed (never required): 3.9 works, newer gets newer wheels."""
+    cands = [f"python3.{m}" for m in (13, 12, 11, 10)] + ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+    best, best_v = sys.executable, sys.version_info[:2]
+    for c in cands:
+        exe = shutil.which(c) if not c.startswith("/") else (c if os.access(c, os.X_OK) else None)
+        if not exe:
+            continue
+        try:
+            out = subprocess.run([exe, "-c", "import sys, venv, ensurepip; print('%d.%d' % sys.version_info[:2])"],
+                                 capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0:
+            v = tuple(int(x) for x in out.stdout.strip().split("."))
+            if (3, 9) <= v and v > best_v:
+                best, best_v = exe, v
+    return best
+
+
 def bootstrap(args, argv):
-    if sys.version_info < (3, 10):
-        die(f"Python 3.10+ is needed (this is {sys.version.split()[0]}). On macOS: `brew install python@3.12`.")
+    if sys.version_info < (3, 9):
+        die(f"Python 3.9+ is needed (this is {sys.version.split()[0]}). On macOS: `xcode-select --install` or `brew install python`.")
     want_tests = args.with_tests or args.test
     py = venv_python()
     if not py.exists():
-        say(f"creating virtualenv {VENV}")
-        subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+        base = best_python()
+        say(f"creating virtualenv {VENV} with {base}")
+        subprocess.run([base, "-m", "venv", str(VENV)], check=True)
     stamp = VENV / ".gx-installed"
     reqs = [HERE / "requirements.txt"] + ([HERE / "requirements-tests.txt"] if want_tests else [])
     key = ";".join(f"{r.name}:{r.stat().st_mtime_ns}" for r in reqs)
@@ -118,13 +151,14 @@ def neo4j_ready(uri, password, timeout):
 
 
 def check_docker():
-    if not shutil.which("docker"):
+    if not docker_bin():
         die("Docker is not installed. Install Docker Desktop (macOS: https://docs.docker.com/desktop/setup/install/mac-install/ "
             "or `brew install --cask docker`, then start it) or Docker Engine on Linux.\n"
             "       Or use your own local Neo4j 5: python3 run_local.py --neo4j-uri bolt://localhost:7687 --neo4j-password ...")
     r = docker("info", "--format", "{{.ServerVersion}}", check=False)
     if r.returncode != 0:
-        die("Docker is installed but the daemon is not running (start Docker Desktop, or `sudo systemctl start docker`).\n"
+        die("Docker is installed but the daemon is not running: start Docker Desktop (macOS: `open -a Docker`, wait for the whale "
+            "icon to settle), or `sudo systemctl start docker` on Linux.\n"
             f"       docker said: {(r.stderr or r.stdout).strip()[:300]}")
 
 
@@ -246,7 +280,7 @@ def run_tests(args, env, url):
 def main_in_venv(args):
     if args.stop or args.reset or args.status:
         stop_server() if (args.stop or args.reset) else None
-        if shutil.which("docker"):
+        if docker_bin():
             if args.status:
                 status, ports = container_state()
                 print(f"container {CONTAINER}: {status or 'not created'} {ports or ''}")
