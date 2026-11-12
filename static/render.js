@@ -202,7 +202,7 @@
       if (!simpleEdges && edges.length <= 3000) {
         const fs = Math.min(12, Math.max(8, 10 * z));
         for (const e of edges) {
-          const d = e._private.data; const show = V.edgeCaptionsAlways() || d.meta || e.selected() || e._private.classes.has('hl');
+          const d = e._private.data; const show = V.edgeCaptionsAlways() || d.meta || e.selected(); // Linkurious: no captions on the highlighted neighbourhood
           if (!show || e._private.classes.has('filtered')) continue;
           const txt = V.edgeCaption(d); if (!txt) continue;
           const geo = edgeGeom(e); const m = geoMid(geo); let ang = Math.atan2(geo.y2 - geo.y1, geo.x2 - geo.x1); if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;

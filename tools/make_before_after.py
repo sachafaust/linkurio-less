@@ -29,7 +29,7 @@ def shoot(url, path):
         pg.evaluate(f"void runQueryToGraph({QUERY!r})")
         pg.wait_for_timeout(2500)
         pg.evaluate("void runLayout({ name: 'force', randomize: true, fit: true })")
-        pg.wait_for_timeout(4000)
+        pg.wait_for_timeout(7000)
         # select the account (the hub) the way a user would: click it
         pos = pg.evaluate("""() => { const n = cy.nodes().filter(n => n.data('category') === 'AWSAccount')[0];
             const p = n.renderedPosition(); const r = document.querySelector('#cy').getBoundingClientRect(); return [p.x + r.left, p.y + r.top]; }""")

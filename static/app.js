@@ -312,18 +312,19 @@ function toggleGroup(gid) { const k = 'open:' + gid; S.collapsed.has(k) ? S.coll
 function setAllGroups(open) { cy.nodes().filter(n => n.data('group')).forEach(g => { const k = 'open:' + g.id(); open ? S.collapsed.add(k) : S.collapsed.delete(k); }); applyNodeGrouping(); afterGraphChange(); }
 
 // ---------- layouts ------------------------------------------------------------------
-const FA2_THRESHOLD = 1200; let fa2Run = null;
+// ForceAtlas2 (worker) for every force layout: fCoSE collapsed stars in the headless model
+const FA2_THRESHOLD = 0; let fa2Run = null;
 function runForceLarge(eles, opts, done) {
   // ForceAtlas2 (Barnes-Hut) in a web worker; positions are streamed back into the model every few frames.
   if (fa2Run) fa2Run.stop();
   const { Graph, FA2Layout, inferSettings } = window.GXFA2;
   const nodes = eles.nodes().filter(n => !n.isParent()); const g = new Graph({ type: 'undirected' });
   if (opts.randomize) nodes.forEach((n, i) => { const a = i * 2.399963, r = 34 * Math.sqrt(i); n._private.position.x = r * Math.cos(a); n._private.position.y = r * Math.sin(a); });
-  nodes.forEach(n => { const p = n._private.position; g.addNode(n.id(), { x: p.x / 10, y: p.y / 10, size: 1, fixed: !!(n._private.data.pinned || n.locked() || (opts.onlyNew && !opts.onlyNew.has(n))) }); });
+  nodes.forEach(n => { const p = n._private.position; g.addNode(n.id(), { x: p.x / 10, y: p.y / 10, size: (n._private.data._s || 26) / 20 + 0.6, fixed: !!(n._private.data.pinned || n.locked() || (opts.onlyNew && !opts.onlyNew.has(n))) }); });
   eles.edges().forEach(e => { const a = e._private.data.source, b = e._private.data.target; if (a !== b && g.hasNode(a) && g.hasNode(b) && !g.hasEdge(a, b)) g.addEdge(a, b); });
-  const settings = { ...inferSettings(g), barnesHutOptimize: true, barnesHutTheta: 0.9, scalingRatio: 12, gravity: 0.6, slowDown: 3, strongGravityMode: false, linLogMode: false };
+  const settings = { ...inferSettings(g), barnesHutOptimize: nodes.length > 2000, barnesHutTheta: 0.9, adjustSizes: nodes.length <= 2000, scalingRatio: nodes.length <= 2000 ? 3 : 12, gravity: nodes.length <= 2000 ? 1.5 : 0.6, slowDown: 3, strongGravityMode: false, linLogMode: false };
   const L = new FA2Layout(g, { settings }); L.start(); R.fastMode = true;
-  const t0 = performance.now(), budget = opts.budgetMs ?? Math.min(20000, 2000 + nodes.length * 0.15); let frame = 0, live = true;
+  const t0 = performance.now(), budget = opts.budgetMs ?? Math.min(20000, (nodes.length < 2000 ? 1200 : 2000) + nodes.length * 0.15); let frame = 0, live = true;
   const sync = () => { nodes.forEach(n => { const a = g.getNodeAttributes(n.id()); n._private.position.x = a.x * 10; n._private.position.y = a.y * 10; }); R.positionsChanged(); };
   const tick = () => { if (!live) return; if (++frame % 4 === 0) sync(); if (performance.now() - t0 < budget) requestAnimationFrame(tick); else stop(); };
   const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; R.fastMode = false; sync(); cy.emit('position'); done && done(); };
@@ -345,15 +346,15 @@ function runLayout(opts = {}) {
     S.layout.root = root.id();
     if (name === 'hierarchical') {
       const o = S.layout.orientation;
-      L = eles.layout({ name: 'breadthfirst', roots: root, directed: false, spacingFactor: 1.05, animate: true, animationDuration: 450, avoidOverlap: true,
+      L = eles.layout({ name: 'breadthfirst', roots: root, directed: false, spacingFactor: 1.05, animate: false, avoidOverlap: true,
         transform: (n, p) => o === 'LR' ? { x: p.y, y: p.x } : o === 'RL' ? { x: -p.y, y: p.x } : o === 'BT' ? { x: p.x, y: -p.y } : p });
     } else {
       const dist = {}; const bfs = eles.bfs({ roots: root, directed: false, visit: (v, e, u, i, depth) => { dist[v.id()] = depth; } });
       const maxD = Math.max(0, ...Object.values(dist));
-      L = eles.layout({ name: 'concentric', concentric: n => maxD - (dist[n.id()] ?? maxD + 1) + 1, levelWidth: () => 1, minNodeSpacing: 22, animate: true, animationDuration: 450, startAngle: -Math.PI / 2 });
+      L = eles.layout({ name: 'concentric', concentric: n => maxD - (dist[n.id()] ?? maxD + 1) + 1, levelWidth: () => 1, minNodeSpacing: 22, animate: false, startAngle: -Math.PI / 2 });
     }
   } else {
-    L = eles.layout({ name: 'fcose', quality: opts.randomize ? (S.layout.fast ? 'draft' : 'default') : (S.layout.fast ? 'default' : 'proof'), randomize: !!opts.randomize, animate: true, animationDuration: 500,
+    L = eles.layout({ name: 'fcose', quality: opts.randomize ? (S.layout.fast ? 'draft' : 'default') : (S.layout.fast ? 'default' : 'proof'), randomize: !!opts.randomize, animate: false,
       nodeRepulsion: 22000, idealEdgeLength: 95, edgeElasticity: 0.45, nodeSeparation: 90, nestingFactor: 0.6, gravity: 0.3, numIter: S.layout.fast ? 1200 : 2500, packComponents: true, nodeDimensionsIncludeLabels: false,
       fixedNodeConstraint: pinned.length ? pinned.map(n => ({ nodeId: n.id(), position: { ...n.position() } })) : undefined, fit: !!opts.fit });
   }
