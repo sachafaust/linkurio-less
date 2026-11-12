@@ -1,31 +1,68 @@
 {
  "label": "after",
- "when": "2026-11-11 15:37 PST",
+ "when": "2026-11-11 16:23 PST",
  "browser": "headless Chrome on a CPU-only box (gl=none)",
  "results": [
   {
    "nodes": 10000,
-   "error": "_async(lambda: awaitable)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/box/.local/lib/python3.13/site-packages/playwright/_impl/utils/zones.py\", line 58, in run_async\n    return await func()\n           ^^^^^^^^^^^^\nplaywright._impl._errors.Error: Page.evaluate: Target crashed \n"
-  },
-  {
-   "nodes": 50000,
-   "edges": 99959,
-   "load_ms": 11367,
-   "add_ms": 10260,
-   "on_screen": 50000,
+   "edges": 19991,
+   "load_ms": 680,
+   "add_ms": 369,
+   "on_screen": 10000,
    "pan_preLayout": {
-    "frames": 179,
-    "fps": 59.3,
-    "mean_ms": 16.9,
+    "frames": 181,
+    "fps": 60,
+    "mean_ms": 16.7,
     "p95_ms": 16.7,
-    "max_ms": 33.4
+    "max_ms": 16.8
    },
-   "layout_s": 11.3,
+   "layout_s": 3.7,
    "pan": {
     "frames": 180,
     "fps": 60,
     "mean_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8
+   },
+   "zoom": {
+    "frames": 180,
+    "fps": 60,
+    "mean_ms": 16.7,
     "p95_ms": 16.8,
+    "max_ms": 16.8
+   },
+   "pan_zoomed_in": {
+    "frames": 179,
+    "fps": 59.7,
+    "mean_ms": 16.8,
+    "p95_ms": 16.7,
+    "max_ms": 33.3
+   },
+   "js_heap_mb": 153,
+   "js_heap_after_gc_mb": 97,
+   "renderer_rss_mb": 431,
+   "webgl": false,
+   "errors": []
+  },
+  {
+   "nodes": 50000,
+   "edges": 99959,
+   "load_ms": 2420,
+   "add_ms": 1777,
+   "on_screen": 50000,
+   "pan_preLayout": {
+    "frames": 181,
+    "fps": 60,
+    "mean_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8
+   },
+   "layout_s": 10.4,
+   "pan": {
+    "frames": 180,
+    "fps": 60,
+    "mean_ms": 16.7,
+    "p95_ms": 16.7,
     "max_ms": 16.8
    },
    "zoom": {
@@ -36,21 +73,58 @@
     "max_ms": 16.8
    },
    "pan_zoomed_in": {
-    "frames": 54,
-    "fps": 17.7,
-    "mean_ms": 56.5,
-    "p95_ms": 83.3,
-    "max_ms": 100
+    "frames": 179,
+    "fps": 59.7,
+    "mean_ms": 16.8,
+    "p95_ms": 16.7,
+    "max_ms": 33.3
    },
-   "js_heap_mb": 471,
+   "js_heap_mb": 488,
    "js_heap_after_gc_mb": 465,
-   "renderer_rss_mb": 793,
+   "renderer_rss_mb": 783,
    "webgl": false,
    "errors": []
   },
   {
    "nodes": 100000,
-   "error": "_async(lambda: awaitable)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/box/.local/lib/python3.13/site-packages/playwright/_impl/utils/zones.py\", line 58, in run_async\n    return await func()\n           ^^^^^^^^^^^^\nplaywright._impl._errors.Error: Page.evaluate: Target crashed \n"
+   "edges": 199919,
+   "load_ms": 5895,
+   "add_ms": 4553,
+   "on_screen": 100000,
+   "pan_preLayout": {
+    "frames": 181,
+    "fps": 59.7,
+    "mean_ms": 16.8,
+    "p95_ms": 16.8,
+    "max_ms": 33.4
+   },
+   "layout_s": 18.2,
+   "pan": {
+    "frames": 181,
+    "fps": 60,
+    "mean_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8
+   },
+   "zoom": {
+    "frames": 180,
+    "fps": 60,
+    "mean_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8
+   },
+   "pan_zoomed_in": {
+    "frames": 180,
+    "fps": 59.7,
+    "mean_ms": 16.8,
+    "p95_ms": 16.8,
+    "max_ms": 33.4
+   },
+   "js_heap_mb": 972,
+   "js_heap_after_gc_mb": 927,
+   "renderer_rss_mb": 1558,
+   "webgl": false,
+   "errors": []
   }
  ]
 }

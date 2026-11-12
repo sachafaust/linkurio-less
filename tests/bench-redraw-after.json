@@ -1,0 +1,53 @@
+[
+ {
+  "nodes": 10000,
+  "full_redraw_fit": {
+   "median_ms": 36.2,
+   "max_ms": 139.2,
+   "lod": 0,
+   "visible_nodes": 10000,
+   "visible_edges": 19991
+  },
+  "full_redraw_zoom_1_2": {
+   "median_ms": 6.4,
+   "max_ms": 11.7,
+   "lod": 2,
+   "visible_nodes": 9,
+   "visible_edges": 25
+  }
+ },
+ {
+  "nodes": 50000,
+  "full_redraw_fit": {
+   "median_ms": 225.2,
+   "max_ms": 306.9,
+   "lod": 0,
+   "visible_nodes": 50000,
+   "visible_edges": 99959
+  },
+  "full_redraw_zoom_1_2": {
+   "median_ms": 97,
+   "max_ms": 115.2,
+   "lod": 2,
+   "visible_nodes": 13,
+   "visible_edges": 2563
+  }
+ },
+ {
+  "nodes": 100000,
+  "full_redraw_fit": {
+   "median_ms": 459.6,
+   "max_ms": 490.9,
+   "lod": 0,
+   "visible_nodes": 100000,
+   "visible_edges": 199919
+  },
+  "full_redraw_zoom_1_2": {
+   "median_ms": 75.4,
+   "max_ms": 87.7,
+   "lod": 2,
+   "visible_nodes": 0,
+   "visible_edges": 0
+  }
+ }
+]
