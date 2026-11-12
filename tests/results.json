@@ -1,7 +1,7 @@
 {
- "passed": 32,
- "total": 32,
- "when": "2026-11-11 14:30 PST",
+ "passed": 33,
+ "total": 33,
+ "when": "2026-11-11 16:46 PST",
  "results": [
   {
    "test": "connect to Neo4j and show the landing screen",
@@ -13,7 +13,7 @@
    "test": "full-text search shows ranked results with category chip and highlights",
    "ok": true,
    "detail": "22 results, first category AWSAccount, 65 highlighted matches",
-   "secs": 1.16
+   "secs": 0.63
   },
   {
    "test": "search edges by type",
@@ -31,25 +31,25 @@
    "test": "expand menu filtered by category and edge type (selective expand)",
    "ok": true,
    "detail": "expand menu items: 15; selective expand had 13 category rows; result categories ['AWSAccount', 'AWSRole'], edge types ['RESOURCE']",
-   "secs": 3.14
+   "secs": 3.2
   },
   {
    "test": "double-click a node expands its neighbors",
    "ok": true,
-   "detail": "double-click expanded an AWSRole: 21 -> 27 nodes",
-   "secs": 15.85
+   "detail": "double-click expanded an AWSRole: 21 -> 22 nodes",
+   "secs": 10.94
   },
   {
    "test": "expand all neighbors (limit 60) and lay out",
    "ok": true,
-   "detail": "67 nodes / 127 edges on screen",
-   "secs": 10.83
+   "detail": "82 nodes / 129 edges on screen",
+   "secs": 11.32
   },
   {
    "test": "property panel shows caption, id, categories and searchable properties",
    "ok": true,
-   "detail": "title 'auth-ledger-9 - i-c37e9d2e2d35ac07a', 13 properties, chips ['AWSEC2Instance', 'ComputeInstance', 'EC2Instance'], property search left 1",
-   "secs": 0.83
+   "detail": "title 'worker-notify-3 - i-2ccd015c1ad5900dd', 13 properties, chips ['AWSEC2Instance', 'ComputeInstance', 'EC2Instance'], property search left 1",
+   "secs": 0.76
   },
   {
    "test": "edge selection shows edge type, source and target",
@@ -60,104 +60,104 @@
   {
    "test": "multi-selection table per category (Ctrl+A)",
    "ok": true,
-   "detail": "67 selected, 9 per-category tables, sortable headers",
-   "secs": 1.01
+   "detail": "82 selected, 10 per-category tables, sortable headers",
+   "secs": 0.84
   },
   {
    "test": "background context menu: select leaf nodes",
    "ok": true,
-   "detail": "background menu Select > Leaf nodes selected 13",
-   "secs": 0.9
+   "detail": "background menu Select > Leaf nodes selected 27",
+   "secs": 0.63
   },
   {
    "test": "shift+click selects direct neighbors",
    "ok": true,
-   "detail": "shift+click selected the node and its 64 neighbors",
-   "secs": 0.38
+   "detail": "shift+click selected the node and its 80 neighbors",
+   "secs": 0.27
   },
   {
    "test": "design panel: color, size, icon and caption by category",
    "ok": true,
-   "detail": "color -> rgb(23,190,207), size 26px -> 52px, icon set, caption 'OrganizationAccountAccessRole - AROAEKK6T4EYBC\u2026'; reset gave rgb(198,40,40)",
-   "secs": 2.26
+   "detail": "color -> #17becf, size 26px -> 52px, icon set, caption 'queue-service-role - AROA643HVSDKSRF6EVXU3'; reset gave #c62828",
+   "secs": 1.84
   },
   {
    "test": "design panel: color by property value",
    "ok": true,
-   "detail": "3 stopped instances recolored grey, running stay rgb(247,186,117)",
-   "secs": 1.39
+   "detail": "3 stopped instances recolored grey, running stay #f7ba75",
+   "secs": 1.14
   },
   {
    "test": "design panel: dynamic size by numeric property",
    "ok": true,
    "detail": "21 buckets sized by log(object_count): 16px .. 78px",
-   "secs": 2.91
+   "secs": 2.66
   },
   {
    "test": "filters: category and property value, remove filtered, undo, reset",
    "ok": true,
-   "detail": "category filter greyed 21, + value filter 24, 'Remove filtered items' 91->67, undo -> 91, reset -> 0 filtered",
-   "secs": 1.4
+   "detail": "category filter greyed 21, + value filter 24, 'Remove filtered items' 84->60, undo -> 84, reset -> 0 filtered",
+   "secs": 1.52
   },
   {
    "test": "filters: numeric lower bound",
    "ok": true,
    "detail": "number bound object_count >= 1,000,000 hid 9 buckets (expected 9)",
-   "secs": 0.41
+   "secs": 0.35
   },
   {
    "test": "layouts: hierarchical, radial, force-directed",
    "ok": true,
-   "detail": "hierarchical: 4 layers; radial: root offset from center 2,-15; force re-run",
-   "secs": 6.84
+   "detail": "hierarchical: 4 layers; radial: root offset from center 0,0; force re-run",
+   "secs": 6.35
   },
   {
    "test": "pinned node stays put during force layout",
    "ok": true,
    "detail": "pinned node moved 0.00px during force layout",
-   "secs": 1.61
+   "secs": 1.52
   },
   {
    "test": "node grouping by property (collapse/expand)",
    "ok": true,
-   "detail": "groups ['Region: us-west-2 x20', 'Region: us-east-1 x17', 'Region: eu-west-1 x8']; 45 members collapsed; double-click opened one with 20 members; rule off -> 0 groups",
-   "secs": 3.72
+   "detail": "groups ['Region: us-east-1 x36', 'Region: eu-west-1 x8', 'Region: us-west-2 x17']; 61 members collapsed; double-click opened one with 36 members; rule off -> 0 groups",
+   "secs": 3.36
   },
   {
    "test": "edge grouping of parallel edges (synthetic duplicates)",
    "ok": true,
    "detail": "grouped parallel edges into ['RESOURCE (3)']",
-   "secs": 0.45
+   "secs": 0.41
   },
   {
    "test": "lasso selection (Ctrl+drag)",
    "ok": true,
-   "detail": "ctrl+drag lasso selected 23 nodes",
-   "secs": 10.4
+   "detail": "ctrl+drag lasso selected 82 nodes",
+   "secs": 14.58
   },
   {
    "test": "keyboard shortcuts: hide, undo, redo, pan, zoom",
    "ok": true,
-   "detail": "Ctrl+Backspace 91->68, Ctrl+Z ->91, Ctrl+Y ->68; arrow pans, + zooms",
-   "secs": 1.29
+   "detail": "Ctrl+Backspace 84->2, Ctrl+Z ->84, Ctrl+Y ->2; arrow pans, + zooms",
+   "secs": 1.18
   },
   {
    "test": "export PNG image",
    "ok": true,
-   "detail": "PNG export 800 KB",
-   "secs": 1.24
+   "detail": "PNG export 574 KB",
+   "secs": 1.2
   },
   {
    "test": "export CSV data (nodes + edges)",
    "ok": true,
-   "detail": "nodes-2026-11-11-22-30-08.csv: 91 rows; edges-2026-11-11-22-30-08.csv: 165 rows",
+   "detail": "nodes-2026-11-12-00-45-49.csv: 84 rows; edges-2026-11-12-00-45-49.csv: 129 rows",
    "secs": 1.66
   },
   {
    "test": "save, new and reopen a visualization locally",
    "ok": true,
-   "detail": "saved 'Test viz' (Auto save ON), new -> 0 nodes, reopened -> 91 nodes (localStorage)",
-   "secs": 1.47
+   "detail": "saved 'Test viz' (Auto save ON), new -> 0 nodes, reopened -> 84 nodes (localStorage)",
+   "secs": 1.48
   },
   {
    "test": "read-only Cypher: writes refused, reads added to the graph",
@@ -169,25 +169,31 @@
    "test": "built-in Cartography queries panel",
    "ok": true,
    "detail": "built-in query added 45 nodes",
-   "secs": 2.23
+   "secs": 2.24
   },
   {
    "test": "understand your data model view",
    "ok": true,
    "detail": "data model shows 37 categories",
-   "secs": 2.09
+   "secs": 2.18
   },
   {
    "test": "minimap and dark theme",
    "ok": true,
    "detail": "minimap shown; dark theme toggled",
-   "secs": 1.28
+   "secs": 1.08
+  },
+  {
+   "test": "supernode expand: neighbours grouped per category, paged loading",
+   "ok": true,
+   "detail": "hub with 163 hidden neighbours -> 13 group nodes; loading 10 from AWSEC2Instance left 28",
+   "secs": 4.65
   },
   {
    "test": "workspace overview screenshot",
    "ok": true,
    "detail": "54 nodes in the IAM workspace shot",
-   "secs": 12.21
+   "secs": 25.13
   },
   {
    "test": "no JavaScript errors during the run",
