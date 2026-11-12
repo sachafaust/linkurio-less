@@ -138,6 +138,15 @@ function restyle() { refreshRanges(); syncSizes(); R.redraw(); drawMinimap(); pe
 // ---------- graph data ---------------------------------------------------------------
 function realNodes() { return cy.nodes().filter(n => !n._private.data.group && !n._private.data.hubgroup); }
 function realEdges() { return cy.edges().filter(e => !e._private.data.meta && !e._private.data.virtual); }
+// cytoscape's add() calls edge.parallelEdges() for every new edge only to clear caches; that scan is
+// O(degree), so adding the RESOURCE fan-out of a hub costs O(degree^2) (8.5 s for 100k edges / 20 hubs).
+// We never use cytoscape's parallel-edge cache (render.js indexes parallel edges itself), so skip it
+// during bulk adds; the source/target caches are still cleared by cytoscape.
+function addEdgesFast(edgeEls) {
+  const proto = Object.getPrototypeOf(cy.collection()); const orig = proto.parallelEdges; const empty = cy.collection();
+  proto.parallelEdges = function () { return empty; };
+  try { return cy.add(edgeEls); } finally { proto.parallelEdges = orig; }
+}
 function addGraph(g, around = null) {
   const ext = cy.extent(); const c0 = around ? around.position() : { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 };
   const seen = new Set();
@@ -158,7 +167,7 @@ function addGraph(g, around = null) {
     if (seenE.has(e.id) || cy.getElementById(e.id).nonempty() || cy.getElementById(e.source).empty() || cy.getElementById(e.target).empty()) continue;
     seenE.add(e.id); edgeEls.push({ group: 'edges', data: { id: e.id, type: e.type, source: e.source, target: e.target, props: e.props } });
   }
-  if (edgeEls.length) added = added.union(cy.add(edgeEls));
+  if (edgeEls.length) added = added.union(addEdgesFast(edgeEls));
   const missingDeg = (g.nodes || []).filter(n => n.degree == null).map(n => n.id);
   if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => cy.getElementById(n.id).data('degree', n.degree)); R.redraw(); });
   afterGraphChange();
@@ -313,11 +322,11 @@ function runForceLarge(eles, opts, done) {
   nodes.forEach(n => { const p = n._private.position; g.addNode(n.id(), { x: p.x / 10, y: p.y / 10, size: 1, fixed: !!(n._private.data.pinned || n.locked() || (opts.onlyNew && !opts.onlyNew.has(n))) }); });
   eles.edges().forEach(e => { const a = e._private.data.source, b = e._private.data.target; if (a !== b && g.hasNode(a) && g.hasNode(b) && !g.hasEdge(a, b)) g.addEdge(a, b); });
   const settings = { ...inferSettings(g), barnesHutOptimize: true, barnesHutTheta: 0.9, scalingRatio: 12, gravity: 0.6, slowDown: 3, strongGravityMode: false, linLogMode: false };
-  const L = new FA2Layout(g, { settings }); L.start();
+  const L = new FA2Layout(g, { settings }); L.start(); R.fastMode = true;
   const t0 = performance.now(), budget = opts.budgetMs ?? Math.min(20000, 2000 + nodes.length * 0.15); let frame = 0, live = true;
   const sync = () => { nodes.forEach(n => { const a = g.getNodeAttributes(n.id()); n._private.position.x = a.x * 10; n._private.position.y = a.y * 10; }); R.positionsChanged(); };
   const tick = () => { if (!live) return; if (++frame % 4 === 0) sync(); if (performance.now() - t0 < budget) requestAnimationFrame(tick); else stop(); };
-  const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; sync(); cy.emit('position'); done && done(); };
+  const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; R.fastMode = false; sync(); cy.emit('position'); done && done(); };
   fa2Run = { stop }; requestAnimationFrame(tick);
 }
 function runLayout(opts = {}) {

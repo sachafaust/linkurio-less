@@ -36,9 +36,10 @@
     R.resize = resize;
 
     // ---- spatial grid over node positions (rebuilt lazily) --------------------------------
-    const CELL = 160; let grid = new Map(), gridDirty = true, nodeList = [];
+    const CELL = 160; let grid = new Map(), gridDirty = true, nodeList = [], edgeList = [], parentList = [], listsDirty = true;
+    function rebuildLists() { edgeList = cy.edges().toArray(); parentList = cy.nodes(':parent').toArray(); listsDirty = false; }
     function rebuildGrid() {
-      grid = new Map(); nodeList = [];
+      grid = new Map(); nodeList = []; if (listsDirty) rebuildLists();
       cy.nodes().forEach(n => {
         if (n.isParent()) return;
         nodeList.push(n);
@@ -59,13 +60,13 @@
     R.positionsChanged = () => { gridDirty = true; full(); };
 
     // ---- draw scheduling -------------------------------------------------------------------
-    let queued = false, needFull = true, idleT = null, interacting = false, cacheVP = null, lastVisibleCount = 0;
+    let lastFullMs = 0; let queued = false, needFull = true, idleT = null, interacting = false, cacheVP = null, lastVisibleCount = 0;
     function full() { needFull = true; request(); }
     function request() { if (!queued) { queued = true; requestAnimationFrame(frame); } }
     R.redraw = full;
     function viewportChanged() {
       // big graphs: transform the cached frame while the viewport moves, redraw fully when it settles
-      if (lastVisibleCount > 3000 && cacheVP) { interacting = true; clearTimeout(idleT); idleT = setTimeout(() => { interacting = false; full(); }, 140); request(); }
+      if ((lastVisibleCount > 3000 || lastFullMs > 12) && cacheVP) { /* adaptive: any frame slower than ~12 ms pans the cached bitmap */ interacting = true; clearTimeout(idleT); idleT = setTimeout(() => { interacting = false; full(); }, 140); request(); }
       else full();
     }
     function frame() {
@@ -80,7 +81,7 @@
         needFull = false;
         drawScene(ctx, W, H, DPR, cy.zoom(), cy.pan(), false);
         cctx.setTransform(1, 0, 0, 1, 0, 0); cctx.clearRect(0, 0, cache.width, cache.height); cctx.drawImage(canvas, 0, 0);
-        cacheVP = { z: cy.zoom(), p: { ...cy.pan() } };
+        cacheVP = { z: cy.zoom(), p: { ...cy.pan() } }; lastFullMs = performance.now() - t0;
         R.stats.mode = 'full';
       }
       R.stats.frames++; R.stats.lastMs = performance.now() - t0;
@@ -115,11 +116,11 @@
       lastVisibleCount = vis.length;
       const visSet = new Set(vis);
       const baseR = V.defaultSize() / 2, rs = baseR * z;   // on-screen radius of a default node
-      const lod = rs < 1.6 ? 0 : rs < 5 ? 1 : 2;
+      let lod = rs < 1.6 ? 0 : rs < 5 ? 1 : 2; if (R.fastMode && !exporting) lod = Math.min(lod, 1); // while a layout runs: no labels/icons
       R.stats.visibleNodes = vis.length; R.stats.lod = lod;
 
       // compound parents (open node groups) first
-      cy.nodes(':parent').forEach(p => {
+      parentList.forEach(p => {
         const ch = p.children().filter(visibleEle); if (!ch.length) return;
         let bx1 = Infinity, by1 = Infinity, bx2 = -Infinity, by2 = -Infinity;
         ch.forEach(c => { const q = c._private.position, r = V.nodeSize(c._private.data) / 2; bx1 = Math.min(bx1, q.x - r); by1 = Math.min(by1, q.y - r); bx2 = Math.max(bx2, q.x + r); by2 = Math.max(by2, q.y + r + 16); });
@@ -132,8 +133,9 @@
 
       // edges
       const edges = []; const seenE = new Set();
-      if (vis.length === nodeList.length) cy.edges().forEach(e => { if (visibleEle(e)) edges.push(e); });
-      else for (const n of vis) n.connectedEdges().forEach(e => { if (!seenE.has(e) && visibleEle(e)) { seenE.add(e); edges.push(e); } });
+      // one pass over a cached edge array: no per-frame cytoscape collections (they made ~GBs of garbage)
+      const allVis = vis.length === nodeList.length;
+      for (const e of edgeList) { if (!visibleEle(e)) continue; if (allVis || visSet.has(e._private.source) || visSet.has(e._private.target)) edges.push(e); }
       R.stats.visibleEdges = edges.length;
       const hl = V.highlightActive();
       const simpleEdges = lod < 2 || edges.length > 30000;
@@ -168,7 +170,7 @@
       const order = vis.slice().sort((a, b) => (a.selected() - b.selected()));
       for (const n of order) drawNode(g, n, z, T);
       // labels with decluttering on a screen-space grid
-      const showLabels = rs >= 6 && (vis.length <= 4000 || exporting);
+      const showLabels = (vis.length <= 4000 || exporting); const allLabels = rs >= 10; // zoomed out: like Linkurious, only the selection keeps its label
       if (showLabels) {
         const occ = new Set(); const LC = 18;
         const fs = Math.min(15, Math.max(9, 12.5 * z)); // screen px
@@ -176,6 +178,7 @@
         g.textAlign = 'center'; g.textBaseline = 'top';
         for (const n of ranked) {
           const d = n._private.data; if (n._private.classes.has('filtered')) continue;
+          if (!allLabels && !n.selected()) continue;
           const cap = V.nodeCaption(d); if (!cap) continue;
           const sel = n.selected(), p = n._private.position, r = V.nodeSize(d) / 2;
           const font = `${sel ? 700 : 400} ${fs}px Roboto, Arial, sans-serif`;
@@ -210,13 +213,13 @@
         }
       }
       // badges + pins (screen space)
-      if (rs >= 6 && vis.length <= 6000) {
+      if (rs >= 7 && vis.length <= 6000) {
         for (const n of vis) {
           const d = n._private.data; if (n._private.classes.has('filtered')) continue;
           const p = n._private.position, r = V.nodeSize(d) / 2; const sx = p.x * z + pan.x, sy = p.y * z + pan.y, sr = r * z;
           g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
           const h = V.hiddenCount(n);
-          if (h > 0 && !d.hubgroup) badge(g, sx + sr * 0.72, sy - sr * 0.72, Math.max(6, sr * 0.38), h > 999 ? '999+' : String(h), tint(nodeFill(n, T), 0.38), T.text);
+          if (h > 0 && !d.hubgroup) { const bc = nodeFill(n, T); badge(g, sx + sr * 0.72, sy - sr * 0.72, Math.max(6, sr * 0.4), h > 999 ? '999+' : String(h), bc, isLight(bc) ? '#303030' : '#ffffff', T.nodeBorder); }
           if (d.group && !d.hubgroup) badge(g, sx + sr * 0.72, sy - sr * 0.72, Math.max(7, sr * 0.42), 'x' + d.count, T.groupBadge, '#fff');
           if (d.pinned) { const br = Math.max(6, sr * 0.34); const bx = sx + sr * 0.72, by = sy + sr * 0.72; badge(g, bx, by, br, '', nodeFill(n, T), '#fff'); g.strokeStyle = T.nodeBorder; g.lineWidth = 1; g.stroke(); g.translate(bx - br * 0.7, by - br * 0.7); const s = br * 1.4 / 24; g.scale(s, s); g.fillStyle = '#fff'; g.fill(new Path2D(window.ICONS.Pin || window.ICONS.PinOutline)); }
           g.restore();
@@ -239,9 +242,10 @@
       }
       if (n.selected()) { g.strokeStyle = T.select; g.lineWidth = Math.max(2.2 / z, r * 0.12); g.beginPath(); g.arc(p.x, p.y, r + Math.max(3 / z, r * 0.16), 0, TAU); g.stroke(); }
     }
-    function badge(g, x, y, br, label, color, textColor) {
+    function isLight(c) { const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return false; const n = parseInt(m[1], 16); return ((n >> 16) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 > 170; }
+    function badge(g, x, y, br, label, color, textColor, ring) {
       g.font = `500 ${Math.max(7, br * 0.95)}px Roboto, Arial, sans-serif`; const tw2 = label ? g.measureText(label).width : 0; const half = Math.max(0, tw2 / 2 + 2 - br);
-      g.fillStyle = color; g.beginPath(); if (half > 0) roundRect(g, x - br - half, y - br, 2 * (br + half), 2 * br, br); else g.arc(x, y, br, 0, TAU); g.fill();
+      g.fillStyle = color; g.beginPath(); if (half > 0) roundRect(g, x - br - half, y - br, 2 * (br + half), 2 * br, br); else g.arc(x, y, br, 0, TAU); g.fill(); if (ring) { g.strokeStyle = ring; g.lineWidth = 1.5; g.stroke(); }
       if (br >= 6 && label) { g.fillStyle = textColor || '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(label, x, y + 0.5); }
     }
     const tintCache = new Map();
@@ -402,7 +406,7 @@
 
     // ---- model events -> redraw ---------------------------------------------------------------
     cy.on('viewport', viewportChanged);
-    cy.on('add remove', () => { gridDirty = true; full(); });
+    cy.on('add remove move', () => { gridDirty = true; listsDirty = true; full(); });
     cy.on('position', () => { gridDirty = true; full(); });
     cy.on('select unselect data class', () => full());
     new ResizeObserver(resize).observe(container);

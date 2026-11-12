@@ -101,7 +101,7 @@ def bench_size(b, url, n, layout_timeout):
     res["add_ms"] = round(t["add_ms"])
     res["on_screen"] = pg.evaluate("cy.nodes(':visible').length")
     try:
-        pg.evaluate("cy.fit(undefined, 40)")
+        pg.evaluate("void cy.fit(undefined, 40)")
     except Exception:  # noqa: BLE001
         pass
     res["pan_preLayout"] = pg.evaluate(MEASURE_FRAMES, {"mode": "pan", "ms": 3000})
@@ -116,12 +116,12 @@ def bench_size(b, url, n, layout_timeout):
         res["layout_s"] = round(time.time() - t0, 1)
     except Exception as e:  # noqa: BLE001
         res["layout_s"] = f">{layout_timeout} (timed out)" if "timeout" in str(e) else f"error: {str(e)[:80]}"
-    pg.evaluate("cy.fit(undefined, 40)")
+    pg.evaluate("void cy.fit(undefined, 40)")
     pg.wait_for_timeout(500)
     res["pan"] = pg.evaluate(MEASURE_FRAMES, {"mode": "pan", "ms": 3000})
     res["zoom"] = pg.evaluate(MEASURE_FRAMES, {"mode": "zoom", "ms": 3000})
     # zoomed in (labels and icons drawn): pan around one region
-    pg.evaluate("cy.zoom({ level: 1.2, renderedPosition: { x: innerWidth / 2, y: innerHeight / 2 } })")
+    pg.evaluate("void cy.zoom({ level: 1.2, renderedPosition: { x: innerWidth / 2, y: innerHeight / 2 } })")
     pg.wait_for_timeout(300)
     res["pan_zoomed_in"] = pg.evaluate(MEASURE_FRAMES, {"mode": "pan", "ms": 3000})
     res["js_heap_mb"] = pg.evaluate("Math.round(performance.memory.usedJSHeapSize / 1048576)")
