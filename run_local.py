@@ -4,7 +4,7 @@
     python3 run_local.py                # venv + Neo4j in Docker + Cartography fixture data + server + browser
 
 What it does, in order:
-  1. checks Python 3.9+ (macOS's built-in /usr/bin/python3 is fine) and Docker (unless you pass --neo4j-uri to use your own local Neo4j)
+  1. checks Python 3.9+ (macOS's built-in /usr/bin/python3 is fine) and Docker (unless you pass --neo4j-uri to use your own Neo4j)
   2. creates .venv/ in this folder and installs requirements.txt (+ requirements-tests.txt with --with-tests/--test)
   3. starts Neo4j 5.26 community in Docker: container "gx-neo4j", volume "gx-neo4j-data", ports bound to
      127.0.0.1 only, test password "tinkerlab-test"; reuses the container if it already exists
@@ -22,6 +22,11 @@ Other commands:
   --stop        stop the server and the Neo4j container (data kept)
   --reset       remove the container and its volume (all data)
   --status      show what is running
+
+Your own / live Neo4j (local or remote; no Docker, data is NOT touched unless you add --load-data):
+  python3 run_local.py --neo4j-uri neo4j+s://host:7687 --neo4j-user neo4j [--neo4j-password ...] [--neo4j-database neo4j]
+  Leave out --neo4j-password (and NEO4J_PASSWORD) to be prompted, so it stays out of your shell history.
+  The explorer opens the database read-only.
 
 Everything stays on your machine: Neo4j and the explorer listen on 127.0.0.1 only, the data is fake/fixture data.
 """
@@ -137,16 +142,19 @@ def bootstrap(args, argv):
 
 
 # ---------------------------------------------------------------- stage 2: inside the venv
-def neo4j_ready(uri, password, timeout):
+def neo4j_ready(uri, password, timeout, user="neo4j", database=None):
     from neo4j import GraphDatabase
+    from neo4j.exceptions import AuthError, ConfigurationError
     t0, last = time.time(), None
     while time.time() - t0 < timeout:
         try:
-            with GraphDatabase.driver(uri, auth=("neo4j", password)) as d:
+            with GraphDatabase.driver(uri, auth=(user, password)) as d:
                 d.verify_connectivity()
-                with d.session() as s:
+                with d.session(database=database) as s:
                     s.run("RETURN 1").consume()
             return True
+        except (AuthError, ConfigurationError, ValueError) as e:
+            die(f"cannot use Neo4j at {uri} as user {user}: {e}")
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(2)
@@ -298,12 +306,22 @@ def main_in_venv(args):
         return 0
 
     if args.neo4j_uri:
-        uri, password = args.neo4j_uri, args.neo4j_password or os.environ.get("NEO4J_PASSWORD", "")
-        say(f"using your Neo4j at {uri} (no Docker)")
-        neo4j_ready(uri, password, args.wait)
+        uri = args.neo4j_uri
+        password = args.neo4j_password or os.environ.get("NEO4J_PASSWORD")
+        if password is None:
+            import getpass
+            password = getpass.getpass(f"Neo4j password for {args.neo4j_user} at {uri}: ")
+        say(f"using your Neo4j at {uri} as {args.neo4j_user}, database {args.neo4j_database} (no Docker)")
+        neo4j_ready(uri, password, args.wait, args.neo4j_user, args.neo4j_database)
+        if not args.load_data:
+            if args.test:
+                die("--test needs the mock data; with --neo4j-uri add --load-data (local databases only, it wipes them)")
+            args.keep_data = True
+            say("leaving your data untouched (add --load-data to wipe a LOCAL database and load the mock data)")
     else:
         uri, password = start_neo4j(args)
-    env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": args.neo4j_user, "NEO4J_PASSWORD": password, "QUIET": "1"}
+    env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": args.neo4j_user, "NEO4J_PASSWORD": password,
+           "NEO4J_DATABASE": args.neo4j_database, "QUIET": "1"}
     if args.test and args.synthetic is None and not args.keep_data and not args.both:
         say("--test: loading fixtures + the synthetic estate (--both); the UI tests are written for the synthetic data")
         args.both = True
@@ -346,9 +364,11 @@ def parse(argv):
     n.add_argument("--neo4j-port", type=int, default=7687, help="host bolt port for the Docker container (default 7687)")
     n.add_argument("--neo4j-http-port", type=int, default=7474, help="host port for Neo4j Browser (default 7474)")
     n.add_argument("--neo4j-heap", default="2G", help="Neo4j max heap in the container (default 2G)")
-    n.add_argument("--neo4j-uri", help="use your own LOCAL Neo4j 5 instead of Docker, e.g. bolt://localhost:7687")
-    n.add_argument("--neo4j-user", default="neo4j")
-    n.add_argument("--neo4j-password", help="password for --neo4j-uri (or set NEO4J_PASSWORD)")
+    n.add_argument("--neo4j-uri", help="use your own Neo4j (local or remote) instead of Docker, e.g. neo4j+s://host:7687 or bolt://localhost:7687; its data is left untouched")
+    n.add_argument("--neo4j-user", default="neo4j", help="user for --neo4j-uri (default neo4j)")
+    n.add_argument("--neo4j-password", help="password for --neo4j-uri (or set NEO4J_PASSWORD; prompted if neither)")
+    n.add_argument("--neo4j-database", default="neo4j", help="database name (default neo4j)")
+    n.add_argument("--load-data", action="store_true", help="with --neo4j-uri: wipe it and load the mock data (refused for non-local servers)")
     n.add_argument("--wait", type=int, default=180, help="seconds to wait for Neo4j (default 180)")
     s = ap.add_argument_group("explorer")
     s.add_argument("--port", type=int, default=8744, help="explorer port on 127.0.0.1 (default 8744)")

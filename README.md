@@ -24,7 +24,8 @@ Needs **Python 3.9+** (macOS's built-in `/usr/bin/python3`, 3.9.6, is fine; a ne
 | `--keep-data` | don't reload |
 | `--test` | install Playwright + Chromium, load `--both`, run the UI suite (33 checks, screenshots in `screenshots/`) plus a quick browser benchmark and an API benchmark (`.run/bench-*.json`), then keep serving (`--no-serve` to stop) |
 | `--neo4j-port 17687 --neo4j-http-port 17474` | if 7687/7474 are taken (the script tells you) |
-| `--neo4j-uri bolt://localhost:7687 --neo4j-password ...` | use your own **local** Neo4j 5 instead of Docker (it gets wiped) |
+| `--neo4j-uri neo4j+s://host:7687 --neo4j-user neo4j` | use your own Neo4j, local or remote, instead of Docker. Its data is left untouched and opened read-only. Password via `--neo4j-password`, `NEO4J_PASSWORD`, or a prompt. Also `--neo4j-database`. |
+| `--neo4j-uri ... --load-data` | wipe that database and load the mock data (refused for non-local servers) |
 | `--port 8755`, `--no-browser`, `--detach` | explorer port, no browser, run in the background |
 | `--status`, `--stop`, `--reset` | show what runs; stop explorer + container; delete container + volume |
 
