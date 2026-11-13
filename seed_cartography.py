@@ -7,10 +7,15 @@ data model (checked against cartography/models via its introspection API, Nov 20
 Usage:
     NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=... \
         python3 seed_cartography.py --wipe
+    The same variables can live in a gitignored .env. The environment wins over that file.
 
 Options: --fixtures loads the real-schema snapshot exported from Cartography's own demo seeds and
 test fixtures (data/cartography-fixtures.json.gz); --scale N replicates the synthetic estate N times
 and --hub N adds a supernode, for large-graph benchmarks.
+
+--live-scale loads the minimum graph this explorer is meant to stay usable on:
+15,000,000 nodes and 60,000,000 relationships, streamed in batches (nothing is held in memory).
+--nodes and --edges override those totals. --dry-run prints the plan and does not connect.
 
 --wipe deletes every node in the target database first. It refuses to run unless
 NEO4J_URI points at localhost/127.0.0.1, so it cannot touch a remote database.
@@ -24,6 +29,30 @@ import sys
 import time
 from collections import defaultdict
 from urllib.parse import urlparse
+
+# The smallest graph the explorer is expected to stay usable on. The browser never
+# loads it; the server returns a working set. This seeder builds that graph in batches.
+LIVE_NODES = 15_000_000
+LIVE_EDGES = 60_000_000
+LIVE_ACCOUNTS = 1_500
+LIVE_SUPER = 2_000_000  # resources owned by account 0, so expand hits a real hub
+# Weights sum to LIVE_NODES - LIVE_ACCOUNTS. plan_live_scale scales them for other sizes.
+LABEL_WEIGHTS = [
+    ("AWSEC2Instance", ("AWSEC2Instance", "EC2Instance", "ComputeInstance"), 6_500_000),
+    ("AWSS3Bucket", ("AWSS3Bucket",), 1_500_000),
+    ("AWSRole", ("AWSRole", "AWSPrincipal"), 900_000),
+    ("AWSPolicy", ("AWSPolicy",), 600_000),
+    ("AWSVpc", ("AWSVpc",), 400_000),
+    ("EC2SecurityGroup", ("EC2SecurityGroup",), 1_200_000),
+    ("IpPermissionInbound", ("IpPermissionInbound",), 800_000),
+    ("GitHubRepository", ("GitHubRepository", "CodeRepository"), 700_000),
+    ("GitHubUser", ("GitHubUser", "UserAccount"), 748_500),
+    ("GCPInstance", ("GCPInstance", "ComputeInstance", "Instance"), 600_000),
+    ("GCPBucket", ("GCPBucket", "ObjectStorage"), 400_000),
+    ("OktaUser", ("OktaUser", "UserAccount"), 650_000),
+]
+EXTRA_TYPES = ("STS_ASSUMEROLE_ALLOW", "MEMBER_OF", "POLICY", "TAGGED")
+_STRIDE_CACHE = {}
 
 from neo4j import GraphDatabase
 
@@ -350,6 +379,218 @@ def build() -> G:
     return g
 
 
+def _split_counts(total, weights):
+    """Split `total` in proportion to `weights`. The canonical 14,998,500 split is exact."""
+    denom = sum(weights)
+    raw = [total * w // denom for w in weights]
+    rem = total - sum(raw)
+    order = sorted(range(len(weights)), key=lambda i: (-weights[i], i))
+    i = 0
+    while rem > 0:
+        raw[order[i % len(order)]] += 1
+        rem -= 1
+        i += 1
+    return raw
+
+
+def plan_live_scale(n_nodes=LIVE_NODES, n_edges=LIVE_EDGES):
+    """A Cartography-shaped graph whose node and relationship totals are exact.
+
+    Every resource has one RESOURCE edge to an AWSAccount. Further edges run from
+    resource to resource on distinct strides, so the loader can stream them.
+    Account 0 is a supernode. One response from the explorer still returns a page,
+    not this graph.
+    """
+    n_nodes, n_edges = int(n_nodes), int(n_edges)
+    if n_nodes < 4:
+        raise ValueError("live-scale needs at least 4 nodes")
+    if n_nodes == LIVE_NODES:
+        accounts = LIVE_ACCOUNTS
+    else:
+        accounts = max(2, min(n_nodes // 5, max(2, n_nodes // 10_000)))
+    if accounts >= n_nodes - 1:
+        accounts = max(2, n_nodes // 2)
+    resources = n_nodes - accounts
+    if resources < 2:
+        raise ValueError("live-scale needs at least 2 resources besides the accounts")
+    if n_edges < resources:
+        raise ValueError(f"need at least {resources:,} edges (one RESOURCE per resource); got {n_edges:,}")
+    max_extra = resources * (resources - 1)
+    if n_edges - resources > max_extra:
+        raise ValueError(
+            f"cannot place {n_edges:,} edges on {resources:,} resources without repeating an endpoint "
+            f"(maximum is {resources + max_extra:,})")
+    counts = _split_counts(resources, [w for _, _, w in LABEL_WEIGHTS])
+    labels, start = [], 0
+    for (label, labs, _), count in zip(LABEL_WEIGHTS, counts):
+        if count <= 0:
+            continue
+        labels.append({"label": label, "labels": labs, "start": start, "count": count})
+        start += count
+    if n_nodes == LIVE_NODES and resources == LIVE_NODES - LIVE_ACCOUNTS:
+        super_n = LIVE_SUPER
+    else:
+        super_n = max(1, min(resources - (accounts - 1), max(1, resources // 7)))
+    extra = n_edges - resources
+    base, rem = divmod(extra, resources)
+    plan = {
+        "nodes": n_nodes, "edges": n_edges, "accounts": accounts, "resources": resources,
+        "super_resources": super_n, "labels": labels, "extra_base": base, "extra_rem": rem,
+    }
+    if node_total(plan) != n_nodes or edge_total(plan) != n_edges:
+        raise ValueError(f"plan missed the requested totals: {node_total(plan)} nodes / {edge_total(plan)} edges")
+    return plan
+
+
+def node_total(plan):
+    return plan["accounts"] + sum(s["count"] for s in plan["labels"])
+
+
+def edge_total(plan):
+    return plan["resources"] + plan["extra_base"] * plan["resources"] + plan["extra_rem"]
+
+
+def owner_index(i, plan):
+    if i < plan["super_resources"]:
+        return 0
+    others = plan["accounts"] - 1
+    return 1 + (i - plan["super_resources"]) % others
+
+
+def label_at(plan, i):
+    lo, hi = 0, len(plan["labels"]) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        spec = plan["labels"][mid]
+        if i < spec["start"]:
+            hi = mid - 1
+        elif i >= spec["start"] + spec["count"]:
+            lo = mid + 1
+        else:
+            return spec
+    raise IndexError(i)
+
+
+def extra_strides(k, mod):
+    """k distinct non-zero steps modulo `mod`, so a node's extra edges do not share a target."""
+    k = int(k)
+    if k <= 0:
+        return []
+    key = (k, mod)
+    hit = _STRIDE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    got, s, guard = [], 1, 0
+    while len(got) < k and guard < mod + k + 5:
+        stride = s % mod
+        if stride and stride not in got:
+            got.append(stride)
+        s += 997
+        guard += 1
+    if len(got) < k:
+        raise ValueError(f"need {k} distinct strides modulo {mod}, found {len(got)}")
+    _STRIDE_CACHE[key] = tuple(got)
+    return _STRIDE_CACHE[key]
+
+
+def iter_edges(plan):
+    """Every relationship as (src_label, src_id, type, dst_label, dst_id), in load order."""
+    for spec in plan["labels"]:
+        for i in range(spec["start"], spec["start"] + spec["count"]):
+            yield ("AWSAccount", f"aws-account:{owner_index(i, plan)}", "RESOURCE", spec["label"], f"{spec['label']}:{i}")
+    if plan["extra_base"] == 0 and plan["extra_rem"] == 0:
+        return
+    resources = plan["resources"]
+    base = extra_strides(plan["extra_base"], resources)
+    hi = extra_strides(plan["extra_base"] + (1 if plan["extra_rem"] else 0), resources)
+    for i in range(resources):
+        src = label_at(plan, i)
+        strides = hi if i < plan["extra_rem"] else base
+        for n, stride in enumerate(strides):
+            j = (i + stride) % resources
+            dst = label_at(plan, j)
+            yield (src["label"], f"{src['label']}:{i}", EXTRA_TYPES[n % len(EXTRA_TYPES)], dst["label"], f"{dst['label']}:{j}")
+
+
+def plan_summary(plan):
+    return {
+        "nodes": plan["nodes"], "edges": plan["edges"], "accounts": plan["accounts"],
+        "resources": plan["resources"], "super_resources": plan["super_resources"],
+        "extra_per_resource": plan["extra_base"], "resources_with_one_more_edge": plan["extra_rem"],
+        "labels": [{"label": s["label"], "count": s["count"]} for s in plan["labels"]],
+    }
+
+
+def load_live_scale(session, plan, batch=5000):
+    """Stream the plan into Neo4j. Nodes are created first, then indexes, then edges."""
+    def run(q, **params):
+        session.run(q, **params).consume()
+
+    t0 = time.time()
+    accounts = [{
+        "id": f"aws-account:{a}",
+        "name": "supernode" if a == 0 else f"account-{a}",
+        "accountid": f"{a:012d}",
+    } for a in range(plan["accounts"])]
+    for c in chunks(accounts, batch):
+        run("UNWIND $rows AS row CREATE (n:AWSAccount) SET n = row", rows=c)
+    print(f"  accounts: {plan['accounts']:,}", flush=True)
+
+    created = plan["accounts"]
+    for spec in plan["labels"]:
+        lab = ":".join(f"`{x}`" for x in spec["labels"])
+        buf = []
+        for i in range(spec["start"], spec["start"] + spec["count"]):
+            buf.append({
+                "id": f"{spec['label']}:{i}",
+                "name": f"{spec['label'].lower()}-{i}",
+                "account": f"aws-account:{owner_index(i, plan)}",
+                "region": REGIONS[i % len(REGIONS)],
+            })
+            if len(buf) >= batch:
+                run(f"UNWIND $rows AS row CREATE (n:{lab}) SET n = row", rows=buf)
+                created += len(buf)
+                buf = []
+                if created % 100_000 < batch:
+                    print(f"  nodes {created:,} / {plan['nodes']:,}  ({time.time() - t0:.0f}s)", flush=True)
+        if buf:
+            run(f"UNWIND $rows AS row CREATE (n:{lab}) SET n = row", rows=buf)
+            created += len(buf)
+    print(f"  nodes done: {created:,} in {time.time() - t0:.0f}s", flush=True)
+
+    for lab in ["AWSAccount", *[s["label"] for s in plan["labels"]]]:
+        run(f"CREATE INDEX live_{lab}_id IF NOT EXISTS FOR (n:`{lab}`) ON (n.id)")
+    print("  building id indexes (this waits until they are online) ...", flush=True)
+    run("CALL db.awaitIndexes(7200)")
+
+    n_edges = 0
+    buckets = defaultdict(list)
+
+    def flush(key):
+        nonlocal n_edges
+        rows = buckets.pop(key, None)
+        if not rows:
+            return
+        sl, typ, dl = key
+        run(
+            f"UNWIND $rows AS row MATCH (a:`{sl}` {{id: row.s}}) MATCH (b:`{dl}` {{id: row.d}}) "
+            f"CREATE (a)-[:`{typ}`]->(b)",
+            rows=rows)
+        n_edges += len(rows)
+        if n_edges // 100_000 != (n_edges - len(rows)) // 100_000:
+            print(f"  edges {n_edges:,} / {plan['edges']:,}  ({time.time() - t0:.0f}s)", flush=True)
+
+    for sl, sid, typ, dl, did in iter_edges(plan):
+        key = (sl, typ, dl)
+        buckets[key].append({"s": sid, "d": did})
+        if len(buckets[key]) >= batch:
+            flush(key)
+    for key in list(buckets):
+        flush(key)
+    print(f"  loaded {created:,} nodes / {n_edges:,} edges in {time.time() - t0:.0f}s", flush=True)
+    return created, n_edges
+
+
 def is_local(uri: str) -> bool:
     host = urlparse(uri).hostname or ""
     return host in ("localhost", "127.0.0.1", "::1")
@@ -395,13 +636,33 @@ def main() -> None:
                     help="load the real-schema Cartography fixture snapshot instead of the synthetic estate")
     ap.add_argument("--scale", type=int, default=1, help="replicate the synthetic estate N times (~1.1k nodes / 2.4k rels each)")
     ap.add_argument("--hub", type=int, default=0, help="add N EC2 instances to the first AWS account (supernode test)")
+    ap.add_argument("--live-scale", action="store_true",
+                    help=f"stream the minimum supported graph: {LIVE_NODES:,} nodes and {LIVE_EDGES:,} relationships")
+    ap.add_argument("--nodes", type=int, default=None, help="with --live-scale, exact node count (default 15000000)")
+    ap.add_argument("--edges", type=int, default=None, help="with --live-scale, exact relationship count (default 60000000)")
+    ap.add_argument("--dry-run", action="store_true", help="with --live-scale, print the plan and do not connect")
     args = ap.parse_args()
-    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    if args.live_scale and args.fixtures:
+        sys.exit("--live-scale loads its own graph; do not combine it with --fixtures")
+    if args.live_scale and (args.scale != 1 or args.hub):
+        sys.exit("--live-scale loads its own graph; do not combine it with --scale or --hub")
+    if (args.nodes is not None or args.edges is not None or args.dry_run) and not args.live_scale:
+        sys.exit("--nodes, --edges, and --dry-run are only used with --live-scale")
+    if args.dry_run:
+        import json
+        plan = plan_live_scale(args.nodes or LIVE_NODES, args.edges or LIVE_EDGES)
+        print(json.dumps(plan_summary(plan), indent=2))
+        return
+    from neo4j_env import Neo4jConfigError, neo4j_settings
+    try:
+        settings = neo4j_settings()
+    except Neo4jConfigError as e:
+        sys.exit(str(e))
+    uri = settings.uri
     if not is_local(uri):
         sys.exit("Refusing to seed a non-local database: " + uri)
-    auth = (os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", ""))
     t0 = time.time()
-    with GraphDatabase.driver(uri, auth=auth) as drv, drv.session(database=os.environ.get("NEO4J_DATABASE", "neo4j")) as s:
+    with GraphDatabase.driver(uri, auth=(settings.user, settings.password)) as drv, drv.session(database=settings.database) as s:
         if args.wipe:
             s.run("MATCH (n) CALL (n) { DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS").consume()
         if args.fixtures:
@@ -424,6 +685,11 @@ def main() -> None:
             s.run("MATCH (n:_Seed) CALL (n) { REMOVE n:_Seed REMOVE n._xid } IN TRANSACTIONS OF 10000 ROWS").consume()
             s.run("DROP INDEX seed_xid IF EXISTS").consume()
             n_nodes, n_rels = len(fx["nodes"]), len(fx["rels"])
+        elif args.live_scale:
+            plan = plan_live_scale(args.nodes or LIVE_NODES, args.edges or LIVE_EDGES)
+            print(f"live-scale plan: {plan['nodes']:,} nodes / {plan['edges']:,} relationships "
+                  f"({plan['accounts']:,} accounts, account 0 owns {plan['super_resources']:,} resources)", flush=True)
+            n_nodes, n_rels = load_live_scale(s, plan)
         else:
             g = build()
             if args.scale > 1 or args.hub:

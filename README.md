@@ -1,8 +1,8 @@
 # linkurio-less
 
-A Linkurious-style graph explorer for Neo4j, built for Cartography data. It's Linkurious with less: just Neo4j, the graph view and browsing.
+A Linkurious-style read-only graph explorer for any Neo4j database. It's Linkurious with less: the graph view and browsing. The page calls a JSON API, and that API runs read-only Cypher over Bolt. Cartography is the bundled sample graph, the default styles, and the built-in queries.
 
-**Idea:** Linkurious-style graph explorer for a Cartography Neo4j (view and browse only)
+**Idea:** Linkurious-style graph explorer for Neo4j (view and browse only). Cartography is the sample graph.
 **Source:** Sacha direct
 **Status:** Kept. Sacha approved it at the Nov 13, 2026 demo, and it moved here from its prototype folder in [grok-tinker-lab](https://github.com/sachafaust/grok-tinker-lab/tree/main/prototypes/2026-11-11-linkurious-neo4j), with full git history.
 
@@ -23,10 +23,12 @@ Needs **Python 3.9+** (macOS's built-in `/usr/bin/python3`, 3.9.6, is fine; a ne
 |---|---|
 | `--synthetic 50000 [--hub 100000]` | load the synthetic Cartography-shaped generator instead (about N nodes; `--hub` adds a supernode) |
 | `--both` | fixtures + the synthetic estate (1,099 nodes) in one database |
+| `--live-scale` | load the minimum supported graph: exactly 15,000,000 nodes and 60,000,000 edges, streamed in batches. About 16 GB of RAM for Docker and about 30 GB of disk. `--nodes` and `--edges` override the totals. |
 | `--keep-data` | don't reload |
-| `--test` | install Playwright + Chromium, load `--both`, run the UI suite (33 checks, screenshots in `screenshots/`) plus a quick browser benchmark and an API benchmark (`.run/bench-*.json`), then keep serving (`--no-serve` to stop) |
+| `--max-nodes N --max-edges M` | safety ceiling for one response. Omit both and the ceiling follows this machine's RAM. The first launch writes a working set to `gx.local.json` from CPU and RAM. The page can add the GPU and save a new one for the next launch. That file is gitignored. |
+| `--test` | install Playwright + Chromium, load `--both`, run the budget tests and the UI suite (33 checks, screenshots in `screenshots/`) plus a quick browser benchmark and an API benchmark (`.run/bench-*.json`), then keep serving (`--no-serve` to stop). With `--live-scale`, run the budget tests and the 15M/60M checks instead of the UI suite. |
 | `--neo4j-port 17687 --neo4j-http-port 17474` | if 7687/7474 are taken (the script tells you) |
-| `--neo4j-uri neo4j+s://host:7687 --neo4j-user neo4j` | use your own Neo4j, local or remote, instead of Docker. Its data is left untouched and opened read-only. Password via `--neo4j-password`, `NEO4J_PASSWORD`, or a prompt. Also `--neo4j-database`. |
+| `--neo4j-uri neo4j+s://host:7687` | use your own Neo4j, local or remote, instead of Docker. `NEO4J_URI` in the environment or in a gitignored `.env` does the same. Its data is left untouched and opened read-only. Password from `NEO4J_PASSWORD`, `.env`, or a prompt. Also `NEO4J_USER` and `NEO4J_DATABASE`. |
 | `--neo4j-uri ... --load-data` | wipe that database and load the mock data (refused for non-local servers) |
 | `--port 8755`, `--no-browser`, `--detach` | explorer port, no browser, run in the background |
 | `--status`, `--stop`, `--reset` | show what runs; stop explorer + container; delete container + volume |
@@ -62,8 +64,8 @@ Enterprise visualization workspace. Since v2, [cytoscape.js](https://js.cytoscap
 - **Server:** `server.py`, stdlib `http.server` and the official `neo4j` driver.
 - **UI:** `static/`. The libraries are vendored in `static/vendor`, with licenses in `vendor/LICENSES.md`.
 
-It is built for Cartography's graph:
-- **Display category:** Cartography nodes carry several labels (e.g. `AWSEC2Instance:EC2Instance:ComputeInstance`). The server picks one display category per node, using a priority list in `cartography_styles.json`, then the longest non-generic label.
+The same explorer opens any Neo4j 5 database. The bundled styles know Cartography's labels, and any other database still gets a display category.
+- **Display category:** A node can carry several labels (Cartography uses forms such as `AWSEC2Instance:EC2Instance:ComputeInstance`). The server picks one display category per node, using a priority list in `cartography_styles.json`, then the longest non-generic label.
 - **Defaults:** each category has a default color, icon and caption.
 - **Built-in queries:** `queries.json` holds 9 read-only security queries, such as internet-exposed instances, cross-account role trusts, public buckets, and GitHub outside collaborators.
 
@@ -71,7 +73,7 @@ Why cytoscape.js: it is MIT-licensed and needs no build step, has a good graph m
 - **`static/render.js`:** a spatial grid, three levels of detail (dots, batched circles, full detail with icons, labels and badges), label decluttering, a cached bitmap that is transformed while the view moves (used above 3,000 visible nodes or when a full frame takes more than 12 ms; a full redraw follows 140 ms after the view settles), and cytoscape-style events (tap, dbltap, cxttap, drag, hover) on the model.
 - **Linkurious look:** white ring around nodes, hidden-neighbor badge at the top-right in the node color, labels only when zoomed in (the selection always keeps a bold label on a white box), white halos on the selected neighborhood, grey 2 px edges with arrows, no edge captions unless asked, no connection-status line under the search bar.
 - **Layout:** ForceAtlas2 (graphology, Barnes-Hut above 2,000 nodes) in a web worker, time-boxed (1.2 s for small graphs, up to 20 s at 100k nodes), streaming positions to the canvas. fCoSE is still vendored but no longer used: in the headless model it collapsed star-shaped graphs.
-- **Supernodes:** double-clicking a node with more than 300 hidden neighbors adds one group node per (category, edge type) with its count, instead of hundreds of nodes. Double-click a group (or use its menu) to load 200, 1,000 or up to 5,000 members at a time. Icons are Material Design paths (@mdi/js, Apache-2.0), built by `tools/build_icons.py`. The font is Roboto (OFL).
+- **Supernodes:** double-clicking a node with more hidden neighbors than the expand cap (50) adds one group node per (category, edge type). The caption is the label, the relationship type, and the count, for example `AWSS3Bucket · RESOURCE ×4,213`. Double-click a group, or its menu, to load the next 50 members, or filter them by name, tag, id, or account. Icons are Material Design paths (@mdi/js, Apache-2.0), built by `tools/build_icons.py`. The font is Roboto (OFL).
 
 ### Parity with the Linkurious workspace
 
@@ -99,7 +101,7 @@ Why cytoscape.js: it is MIT-licensed and needs no build step, has a good graph m
 | Legend | Partial | The Design panel serves as the legend, as in Linkurious. There is no separate floating legend widget |
 | Filters | Done | Categories, edge types, string values with counts, numeric bounds with a histogram, applied filters, reset, filtered items greyed out, remove filtered items |
 | Layouts | Done | Force (ForceAtlas2 in a web worker since v2), hierarchical (root and orientation), radial (root, ≤1500 nodes) |
-| Large graphs (Linkurious handles supernodes with an expand limit) | Done (v2) | 100k nodes / 200k edges load in 6 s and pan at 60 FPS (cached bitmap) on a CPU-only box; supernode neighbors grouped per category; server queries capped and paginated |
+| Large graphs (Linkurious handles supernodes with an expand limit) | Done (v2) | The canvas holds a working set suggested from this machine's CPU, RAM, and GPU. The server enforces it. Hubs are grouped per label. A separate data-model view reads whole-graph counts. The renderer bench still stands: 100k nodes / 200k edges load in 6 s and pan at 60 FPS (cached bitmap) on a CPU-only box. |
 | Layout preferences | Done | Pin on drag, incremental expand |
 | Node grouping | Done | By property, with category scope; one active rule; grey compound bubble with xN; double-click to collapse or expand |
 | Edge grouping | Done | Parallel edges of the same type merged, toggled per type |
@@ -124,23 +126,53 @@ Why cytoscape.js: it is MIT-licensed and needs no build step, has a good graph m
 
 The requirements are Python 3.9 or later, `pip install neo4j` (tested with driver 6.4.1 on 3.13 and 5.28.x on 3.9; driver 6 needs 3.10+, pip picks the right one), and Neo4j 5.x (tested with 5.26.0 community).
 
-Run it against your own Cartography Neo4j:
+Run it against your own Neo4j:
 
 ```bash
 cd linkurio-less
-export NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=...   # ideally a reader-role user
-export NEO4J_DATABASE=neo4j          # optional
+cp .env.example .env                 # gitignored. Or export the same variables in the shell.
+# NEO4J_URI=bolt://localhost:7687
+# NEO4J_USER=neo4j                   # ideally a reader-role user
+# NEO4J_PASSWORD=...
+# NEO4J_DATABASE=neo4j               # optional
 export SEARCH_FULLTEXT_INDEX=...     # optional: name of a full-text index for faster search
-python3 server.py                    # http://127.0.0.1:8744 (HOST, PORT, EXPAND_LIMIT, QUIET env vars)
+python3 server.py                    # http://127.0.0.1:8744
+                                     # HOST, PORT, QUIET, EDGE_WALK_MAX (2000)
+                                     # MAX_NODES, MAX_EDGES, EXPAND_LIMIT, CYPHER_ROW_LIMIT
+                                     # are safety ceilings; omit them and they follow RAM
 ```
 
-To try it without Cartography, seed a **local** test database with synthetic, Cartography-shaped data.
+The environment wins over `.env`. Keep the password in one of those two places. `gx.local.json` stores the canvas working set. A bolt URI with a user or password in it is refused. `GX_ENV` points at a different env file.
+
+### API
+
+The page calls these JSON endpoints on the same host. Each graph read runs in a Neo4j READ transaction. `POST /api/cypher` takes one read-only Cypher statement and returns the nodes, relationships, and rows it produced.
+
+| Method | Path | What it returns |
+|---|---|---|
+| GET | `/api/status` | connection, counts, the working set, and the safety ceiling |
+| GET | `/api/schema` | labels, relationship types, and counts |
+| GET | `/api/styles` | default colors, icons, and captions |
+| GET | `/api/queries` | the built-in saved queries |
+| GET | `/api/search` | nodes or relationships matching a string |
+| POST | `/api/nodes` | nodes by element id |
+| POST | `/api/neighbors` | neighbor counts for the selection |
+| POST | `/api/expand` | one page of neighbors |
+| POST | `/api/edges-between` | relationships among the nodes already on screen |
+| POST | `/api/cypher` | the result of one read-only Cypher query |
+| POST | `/api/budget/suggest` | a working set for the reported CPU, RAM, and GPU |
+| POST | `/api/budget/refine` | writes the browser GPU into an automatic working set once |
+| POST | `/api/budget` | saves the working set to `gx.local.json` for the next launch |
+
+To try it on this machine, seed a **local** test database. The synthetic set is Cartography-shaped. The fixture snapshot is Cartography's own demo data.
 - **What it creates:** 1,099 nodes and 2,430 relationships covering AWS, GCP, GitHub and Okta. The data is deterministic (seed 42), and all names and ids are fake.
 - **Safety:** the seeder refuses non-localhost URIs. `--wipe` empties the database first.
 
 ```bash
 NEO4J_PASSWORD=... python3 seed_cartography.py --wipe
 ```
+
+`seed_cartography.py` reads the same environment and `.env`. It still refuses a URI that is not localhost.
 
 ### Real-schema Cartography data (no cloud credentials)
 
@@ -151,9 +183,30 @@ A snapshot of that data (demo seeds plus the AWS, GCP, Okta and GitHub integrati
 ```bash
 NEO4J_PASSWORD=... python3 seed_cartography.py --wipe --fixtures      # real Cartography schema
 NEO4J_PASSWORD=... python3 seed_cartography.py --wipe --scale 100 --hub 100000   # big synthetic graph + a supernode
+NEO4J_PASSWORD=... python3 seed_cartography.py --live-scale --dry-run            # print the 15M / 60M plan, no connection
 ```
 
-To rebuild it from a Cartography checkout, see `tools/cartography_fixtures/` (`run_demo.py`, `keep_data_plugin.py`, `export_graph.py`).
+To rebuild the fixture snapshot from a Cartography checkout, see `tools/cartography_fixtures/` (`run_demo.py`, `keep_data_plugin.py`, `export_graph.py`).
+
+### Minimum environment
+
+The explorer has to stay usable on a Cartography graph of at least **15,000,000 nodes and 60,000,000 relationships**. The server keeps a working set in `gx.local.json`. That file is not in git. The first launch creates it from this machine's CPU count and RAM, and the first browser open adds the GPU when the page can see one (a software GPU gets a smaller set). Canvas budget in the status bar edits it, Suggest for this machine fills the fields again, and Save writes the file so the next launch uses it. The server stops each response at the room left in that working set, and will not go past its RAM ceiling (or past `--max-nodes` / `--max-edges` when you pass them). The data-model view reads label counts and relationship counts, so its cost stays flat as the graph grows.
+
+The default `python3 run_local.py` still loads the 6,939-node fixture snapshot. The large graph is its own command:
+
+```bash
+python3 run_local.py --live-scale
+```
+
+Neo4j is started with a 4G heap and an 8G page cache (about 16 GB of RAM for Docker, about 30 GB of disk). Nodes are created in batches of 5,000, then id indexes, then relationships. Account 0 is a supernode that owns 2,000,000 resources, so expand meets a real hub and still returns one page. An existing `gx-neo4j` container whose heap is under 2G or whose page cache is under 4G is left in place; the command stops and tells you to run `python3 run_local.py --reset` first, which deletes the local volume.
+
+```bash
+python3 run_local.py --live-scale --test --no-serve
+```
+
+runs `tests/test_budget.py` and `tests/test_live_scale.py` against that database. The 33 UI checks stay on the small synthetic estate (`python3 run_local.py --test`), because they look for the acme-prod account.
+
+`tests/test_budget.py` checks the budget math on its own, and the plan totals (15,000,000 / 60,000,000 exactly, plus a 400-node graph whose 1,600 edges are unique). When a local Neo4j is already up it also starts a second server with a 6-node budget and checks the caps. It does not wipe. `tests/test_live_scale.py` skips unless `REQUIRE_LIVE_SCALE=1`, and then it requires the connected database to be at least this size. The full ingest was not run as part of the unit tests.
 
 Faster search on a big database: `python3 tools/create_fulltext_index.py` prints the `CREATE FULLTEXT INDEX gx_search ...` statement (dry run); `--yes` creates it. It is the only script that changes the database; the server picks the index up automatically.
 
@@ -231,13 +284,15 @@ $0. No paid services. Everything runs locally: Neo4j community in a tarball, ope
   2. Every query runs in a READ-mode transaction with a timeout.
 
   A regex screen is not a parser. For real use, also connect as a Neo4j user with the `reader` role.
-- **No auth on the web UI.** It binds to 127.0.0.1 by default. Don't expose it.
+- **No auth on the web UI.** It binds to 127.0.0.1 by default. Don't expose it. Neo4j credentials come from `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE`. A gitignored `.env` fills whichever of those are unset. The page and `gx.local.json` do not store the password.
 - **Search speed.** Without a full-text index, search scans at most 200,000 nodes, so on a bigger database it can miss matches (the result says the total is capped). Create the index with `tools/create_fulltext_index.py --yes`.
-- **Supernodes.** AWSAccount and GCPProject fan out through RESOURCE edges. v2 groups them per category, but the hierarchical and radial layouts of an expanded supernode still give wide, flat fans.
+- **Working set.** Each response stops at the room left on the canvas. With no `gx.local.json` yet, the first launch writes one from CPU cores and RAM: an 8 GB machine starts at 2,000 nodes and 5,000 edges, and a larger machine starts higher. The first browser open adds the GPU. A software GPU (SwiftShader, llvmpipe) cuts the suggestion down. Canvas budget lets you change nodes, edges, neighbors per expand, and rows per query, up to the server ceiling, and Save writes `gx.local.json` for the next launch. The file is gitignored. `GX_CONFIG` points somewhere else when a test should keep its own file. `--max-nodes`, `--max-edges`, `MAX_NODES`, `MAX_EDGES`, `EXPAND_LIMIT`, and `CYPHER_ROW_LIMIT` set that ceiling when you want a fixed one. User Cypher is wrapped in `CALL { ... LIMIT n }` so a query with no LIMIT stops at the row cap. Edge fill skips a node with more than 2,000 relationships (`EDGE_WALK_MAX`), which is the call that used to time out on a hub. When the canvas is full the page refuses the add and offers to remove filtered nodes or collapse a hub. A saved option can drop the oldest unpinned nodes instead. The status bar shows the working set.
+- **Supernodes.** AWSAccount and GCPProject fan out through RESOURCE edges. Above the expand cap they become one group node per label and edge type (`AWSS3Bucket · RESOURCE ×4,213`). Opening a group loads 50 members, or filters by name, tag, id, or account. Hierarchical and radial layouts of an expanded hub still give wide, flat fans.
+- **Minimum graph.** `python3 run_local.py --live-scale` loads 15,000,000 nodes and 60,000,000 edges. See "Minimum environment" above. The renderer stays Canvas2D at this working-set size.
 - **Big-graph rendering** is tuned for a CPU-only machine; see the caveats under the v2 results.
 - **Saving.** Saved visualizations live in the browser (localStorage). They are not shared and not on a server.
 - **Not built:** the timeline, the no-code query builder, SVG/PDF/Excel/GEXF/GraphML export, and the geo mode (see the parity table).
 
 ## Status
 
-Ready for demo — Explore-phase experiment. A good next step: point it at a real Cartography Neo4j, using a reader-role user, and see which default styles and queries need tuning.
+Ready for demo — Explore-phase experiment. Point it at any Neo4j database with a reader-role user. The Cartography styles and queries are the starting set for that kind of graph.

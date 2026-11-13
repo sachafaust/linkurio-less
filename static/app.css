@@ -41,6 +41,9 @@ body.dark #watermark { color: rgba(255,255,255,.08); }
 .chip.warn i { color: #f39c12; } .chip.ok i { color: #43a047; }
 #statusbar .chip + .chip { border-left: 0; border-radius: 0 3px 3px 0; } #viz-title { border-radius: 3px 0 0 3px; }
 #save-chip { cursor: pointer; }
+#budget-chip { margin-left: 8px; border-radius: 3px; cursor: pointer; }
+#budget-chip.warn { border-color: #ff8a3d; }
+.btn:disabled { opacity: .45; cursor: default; }
 #conn { display: none; } /* connection info lives in the search box tooltip and the gear menu; Linkurious shows nothing here */
 /* landing */
 #landing { position: absolute; top: 26%; left: 50%; transform: translateX(-210px); display: flex; flex-direction: column; align-items: flex-start; gap: 10px; z-index: 2; }

@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.request
@@ -44,7 +45,9 @@ def check(name, fn):
 def main():
     SHOTS.mkdir(exist_ok=True); DL.mkdir(parents=True, exist_ok=True)
     port = free_port()
-    env = {**os.environ, "PORT": str(port), "QUIET": "1"}
+    # Keep the suite off the machine's gx.local.json. The server writes a config on first launch.
+    env = {**os.environ, "PORT": str(port), "QUIET": "1",
+           "GX_CONFIG": str(Path(tempfile.mkdtemp(prefix="gx-ui-config-")) / "gx.local.json")}
     srv = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     url = f"http://127.0.0.1:{port}/"
     for _ in range(60):
@@ -493,7 +496,7 @@ def run_all(pg, url):
         gid = f"hub:{hub}:{big[0]}:{big[1]}"
         ev(pg, f"loadHubGroup(cy.getElementById({json.dumps(gid)}), 10)"); pg.wait_for_timeout(1500)
         real1 = ev(pg, "realNodes().length"); left = ev(pg, f"cy.getElementById({json.dumps(gid)}).data('count')")
-        ev(pg, "HUB_THRESHOLD = 300")
+        ev(pg, "HUB_THRESHOLD = S.budget.expand_limit")
         assert hidden > 100 and len(groups) >= 2 and sum(g[2] for g in groups) == hidden and real0 == 1 and real1 == 11 and left == big[2] - 10, (hidden, groups, real0, real1, left)
         return f"hub with {hidden} hidden neighbours -> {len(groups)} group nodes; loading 10 from {big[0]} left {left}"
     check("supernode expand: neighbours grouped per category, paged loading", t_hub_groups)

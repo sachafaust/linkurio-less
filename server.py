@@ -4,16 +4,27 @@ Serves ./static and a small JSON API. Every Cypher statement runs in a READ
 transaction (session default_access_mode=READ + execute_read), and user-written
 Cypher is also screened for write clauses before it is sent.
 
-Config (environment variables):
-    NEO4J_URI       bolt://localhost:7687
+Config (environment variables; a gitignored .env fills any of the four that are unset):
+    NEO4J_URI       bolt://localhost:7687   (host only: put the user and password in the variables below)
     NEO4J_USER      neo4j
     NEO4J_PASSWORD  (required)
     NEO4J_DATABASE  neo4j
+    GX_ENV          path to a different .env file
     HOST / PORT     127.0.0.1 / 8744
     SEARCH_FULLTEXT_INDEX  name of a Neo4j full-text index for search (auto-detects "gx_search",
                     made by tools/create_fulltext_index.py)
-    EXPAND_LIMIT    default neighbor limit per expand (50); EXPAND_MAX caps one page (5000)
+    MAX_NODES / MAX_EDGES   safety ceiling for one response. When unset, the ceiling comes
+                    from this machine's RAM. The working set lives in gx.local.json (or
+                    GX_CONFIG). The first launch creates that file from CPU and RAM. The
+                    page can add the GPU and save a new working set, up to the ceiling.
+    EXPAND_LIMIT    hard maximum neighbors per expand. When unset, it comes from RAM.
+                    EXPAND_MAX can only lower that. The page's budget.expand_limit can
+                    lower it further.
+    CYPHER_ROW_LIMIT  hard row cap for /api/cypher. When unset, it comes from RAM. The
+                    statement is wrapped so a query with no LIMIT cannot stream the graph.
+                    The page's budget.cypher_limit can lower it.
     HUB_SAMPLE      neighbors read per node for summaries / degree ranking (20000)
+    EDGE_WALK_MAX   edge fill will not walk a node with more relationships than this (2000)
     SEARCH_SCAN_CAP nodes scanned per search without a full-text index (200000)
     CACHE_TTL / SCHEMA_TTL  seconds to cache neighbor summaries (60) / the schema (600)
 """
@@ -33,6 +44,8 @@ from urllib.parse import parse_qs, urlparse
 import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
 from neo4j.graph import Node, Path as NPath, Relationship
+
+from neo4j_env import Neo4jConfigError, neo4j_settings
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -130,18 +143,519 @@ class TTLCache:
 # (O(1) in Neo4j's degree store) plus a sample of neighbors instead of reading every neighbor.
 HUB_SAMPLE = int(os.environ.get("HUB_SAMPLE", 20000))
 SCAN_CAP = int(os.environ.get("SEARCH_SCAN_CAP", 200000))
-EXPAND_MAX = int(os.environ.get("EXPAND_MAX", 5000))
+# Edge fill starts at an endpoint and walks its relationships. Past this degree the walk
+# is skipped (a hub would time out) and the edge is kept only if the other end is small.
+EDGE_WALK_MAX = int(os.environ.get("EDGE_WALK_MAX", 2000))
+FILTER_FIELDS = list(dict.fromkeys([*SEARCH_FIELDS, "account", "tags", "tag"]))
+_GIB = 1024 ** 3
+_SOFTWARE_GPU = re.compile(r"swiftshader|llvmpipe|softpipe|software|basic render", re.I)
 
 
 def cyq(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
 
+def _as_int(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name):
+    """A positive integer from the environment, or None when the variable is unset."""
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n >= 1 else None
+
+
+def machine_resources():
+    """CPU count and physical RAM of the machine running the server."""
+    cpu = os.cpu_count() or 1
+    ram = 0
+    try:
+        ram = int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+    except (ValueError, OSError, AttributeError):
+        ram = 0
+    if ram <= 0:
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        ram = int(line.split()[1]) * 1024
+                        break
+        except (OSError, ValueError, IndexError):
+            ram = 0
+    if ram <= 0:
+        ram = 8 * _GIB
+    return {"cpu": int(cpu), "ram_bytes": int(ram)}
+
+
+def hardware_ceiling(ram_bytes):
+    """The most one response may return on a machine with this much RAM.
+
+    The working-set suggestion sits under this, so the page can raise the
+    suggestion without a single call being able to pull in the whole graph.
+    """
+    gb = max(1.0, float(ram_bytes) / _GIB)
+    nodes = min(50_000, max(2_000, int(gb * 1_000)))
+    edges = min(150_000, max(5_000, nodes * 3))
+    if gb < 8:
+        nodes, edges, expand, cypher = min(nodes, 4_000), min(edges, 10_000), 100, 1_000
+    elif gb < 16:
+        nodes, edges, expand, cypher = min(nodes, 8_000), min(edges, 20_000), 200, 2_000
+    elif gb < 32:
+        nodes, edges, expand, cypher = min(nodes, 16_000), min(edges, 40_000), 300, 2_000
+    else:
+        expand, cypher = 500, 5_000
+    return {"max_nodes": int(nodes), "max_edges": int(edges), "expand_limit": int(expand), "cypher_limit": int(cypher)}
+
+
+def _round_step(n, step):
+    n = max(step, int(n))
+    return ((n + step // 2) // step) * step
+
+
+def suggest_limits(cpu, ram_bytes, gpu="unknown"):
+    """A working set for an interactive canvas on this hardware.
+
+    RAM picks the tier. Fewer CPU cores shrink it. A software GPU shrinks it
+    again. A hardware GPU on a 16 GB, 8-core machine raises the node count.
+    Edges are 2.5 per node. Expand and query caps stay a page, not a dump.
+    """
+    cpu = max(1, int(cpu or 1))
+    gb = max(1.0, float(ram_bytes) / _GIB)
+    if gpu not in ("hardware", "software", "unknown"):
+        gpu = "unknown"
+    if gb < 8:
+        nodes, expand, cypher = 1_000, 25, 200
+    elif gb < 16:
+        nodes, expand, cypher = 2_000, 50, 500
+    elif gb < 32:
+        nodes, expand, cypher = 4_000, 50, 500
+    elif gb < 64:
+        nodes, expand, cypher = 8_000, 100, 1_000
+    else:
+        nodes, expand, cypher = 12_000, 100, 1_000
+    if cpu <= 2:
+        nodes = max(500, nodes // 2)
+        expand = min(expand, 25)
+        cypher = min(cypher, 200)
+    elif cpu <= 4:
+        nodes = max(500, (nodes * 3) // 4)
+        expand = min(expand, 50)
+    if gpu == "software":
+        nodes = max(500, nodes // 2)
+        expand = min(expand, 25)
+        cypher = min(cypher, 200)
+    elif gpu == "hardware" and cpu >= 8 and gb >= 16:
+        nodes = min(nodes + nodes // 4, 16_000)
+    nodes = _round_step(nodes, 100)
+    edges = _round_step((nodes * 5) // 2, 100)
+    return {"nodes": nodes, "edges": edges, "expand_limit": int(expand), "cypher_limit": int(cypher)}
+
+
+def clamp_suggestion(limits, ceilings):
+    nodes = max(1, min(int(ceilings["max_nodes"]), int(limits["nodes"])))
+    edges = max(1, min(int(ceilings["max_edges"]), int(limits["edges"])))
+    expand = max(1, min(int(ceilings["expand_limit"]), int(limits["expand_limit"]), nodes))
+    cypher = max(1, min(int(ceilings["cypher_limit"]), int(limits["cypher_limit"]), nodes))
+    return {"nodes": nodes, "edges": edges, "expand_limit": expand, "cypher_limit": cypher}
+
+
+def classify_gpu(kind, renderer):
+    renderer = str(renderer or "").strip()[:120]
+    if _SOFTWARE_GPU.search(renderer):
+        return "software", renderer
+    if kind in ("hardware", "software", "unknown"):
+        return kind, renderer
+    return "unknown", renderer
+
+
+def _combine_resources(body):
+    """Server RAM and CPU, tightened by what the browser reports.
+
+    navigator.deviceMemory is capped at 8 and only a smaller value is a real
+    measurement. A reported 8 means "8 or more", so the server's RAM stands.
+    """
+    base = machine_resources()
+    cpu, ram = base["cpu"], base["ram_bytes"]
+    body = body or {}
+    client_cpu = _as_int(body.get("cpu"), 0)
+    if client_cpu > 0:
+        cpu = max(1, min(cpu, client_cpu))
+    try:
+        device_gb = float(body.get("device_memory_gb") or 0)
+    except (TypeError, ValueError):
+        device_gb = 0
+    if 0 < device_gb < 8:
+        ram = min(ram, int(device_gb * _GIB))
+    gpu, renderer = classify_gpu(body.get("gpu"), body.get("renderer"))
+    return cpu, ram, gpu, renderer
+
+
+def _suggest_reason(cpu, ram_bytes, gpu, renderer, limits, raw):
+    gb = ram_bytes / _GIB
+    gb_s = f"{gb:.0f}" if abs(gb - round(gb)) < 0.05 else f"{gb:.1f}"
+    gpu_s = {"hardware": "a hardware GPU", "software": "a software GPU", "unknown": "no GPU details"}[gpu]
+    if renderer and gpu != "unknown":
+        gpu_s += f" ({renderer})"
+    text = (f"{cpu} CPU cores, {gb_s} GB RAM, {gpu_s}. "
+            f"Suggested {limits['nodes']:,} nodes, {limits['edges']:,} edges, "
+            f"{limits['expand_limit']} neighbors per expand, {limits['cypher_limit']:,} rows per query.")
+    if limits != raw:
+        text += (f" This process allows {MAX_NODES:,} nodes and {MAX_EDGES:,} edges, "
+                 f"so the suggestion stays inside that.")
+    return text
+
+
+def suggest_for(body=None):
+    """Suggestion for the browser that called, clamped to this process's ceiling."""
+    cpu, ram, gpu, renderer = _combine_resources(body)
+    raw = suggest_limits(cpu, ram, gpu)
+    ceilings = {"max_nodes": MAX_NODES, "max_edges": MAX_EDGES,
+                "expand_limit": EXPAND_MAX, "cypher_limit": CYPHER_ROW_LIMIT}
+    limits = clamp_suggestion(raw, ceilings)
+    gb = ram / _GIB
+    return {**limits, "reason": _suggest_reason(cpu, ram, gpu, renderer, limits, raw),
+            "resources": {"cpu": cpu, "ram_bytes": ram, "ram_gb": round(gb, 1), "gpu": gpu, "renderer": renderer},
+            "ceiling": ceilings}
+
+
+def budget_payload(consume_created=False):
+    """Ceilings, the machine, and the working set stored in the config file.
+
+    consume_created is for the HTTP status call. The startup probe also reads
+    status, and it must leave the flag for the first page load.
+    """
+    created = False
+    with _CONFIG_LOCK:
+        if _WORKING is None:
+            _ensure_config_locked()
+        created = _take_config_created() if consume_created else _CONFIG_CREATED
+        cfg = dict(_WORKING)
+    base = machine_resources()
+    gb = base["ram_bytes"] / _GIB
+    return {"max_nodes": MAX_NODES, "max_edges": MAX_EDGES,
+            "expand_limit": EXPAND_MAX, "cypher_limit": CYPHER_ROW_LIMIT,
+            "resources": {"cpu": base["cpu"], "ram_bytes": base["ram_bytes"], "ram_gb": round(gb, 1)},
+            "suggestion": suggest_for({}),
+            "config": cfg, "config_file": config_path().name, "config_created": created}
+
+
+_HW = hardware_ceiling(machine_resources()["ram_bytes"])
+MAX_NODES = _env_int("MAX_NODES") or _HW["max_nodes"]
+MAX_EDGES = _env_int("MAX_EDGES") or _HW["max_edges"]
+EXPAND_LIMIT = _env_int("EXPAND_LIMIT") or _HW["expand_limit"]
+_expand_max_env = _env_int("EXPAND_MAX")
+if _expand_max_env:
+    EXPAND_LIMIT = min(EXPAND_LIMIT, _expand_max_env)
+# A page can be smaller than EXPAND_LIMIT, never larger.
+EXPAND_MAX = EXPAND_LIMIT
+CYPHER_ROW_LIMIT = _env_int("CYPHER_ROW_LIMIT") or _HW["cypher_limit"]
+
+# The working set. None until the first launch creates gx.local.json, or until a
+# saved file is read. A request may lower it. It cannot rise past the ceiling.
+_CONFIG_LOCK = threading.RLock()
+_WORKING = None
+_CONFIG_CREATED = False
+
+
+def config_path():
+    raw = (os.environ.get("GX_CONFIG") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return ROOT / "gx.local.json"
+
+
+def _ceilings():
+    return {"max_nodes": MAX_NODES, "max_edges": MAX_EDGES,
+            "expand_limit": EXPAND_MAX, "cypher_limit": CYPHER_ROW_LIMIT}
+
+
+def _pos_int(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 1 else None
+
+
+def _normalize_config(data):
+    """Clamp a stored working set onto this process's ceiling.
+
+    Returns None when nodes and edges are not usable, so a foreign JSON file
+    is left on disk instead of being replaced. Credential fields are dropped.
+    Neo4j auth comes from the environment.
+    """
+    if not isinstance(data, dict):
+        return None
+    nodes, edges = _pos_int(data.get("nodes")), _pos_int(data.get("edges"))
+    if not nodes or not edges:
+        return None
+    ceilings = _ceilings()
+    expand = _pos_int(data.get("expand_limit")) or min(50, ceilings["expand_limit"])
+    cypher = _pos_int(data.get("cypher_limit")) or min(500, ceilings["cypher_limit"])
+    clamped = clamp_suggestion(
+        {"nodes": nodes, "edges": edges, "expand_limit": expand, "cypher_limit": cypher}, ceilings)
+    gpu = data.get("gpu") if data.get("gpu") in ("hardware", "software", "unknown") else "unknown"
+    source = data.get("source") if data.get("source") in ("auto", "user") else "user"
+    reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
+    return {**clamped, "lru": bool(data.get("lru")), "reason": reason[:500],
+            "source": source, "gpu": gpu, "renderer": str(data.get("renderer") or "")[:120]}
+
+
+def _config_from_suggestion(sug, source, gpu, renderer):
+    return _normalize_config({
+        "nodes": sug["nodes"], "edges": sug["edges"],
+        "expand_limit": sug["expand_limit"], "cypher_limit": sug["cypher_limit"],
+        "lru": False, "reason": sug.get("reason") or "", "source": source,
+        "gpu": gpu, "renderer": renderer or "",
+    })
+
+
+def _write_config(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _ensure_config_locked():
+    """Load gx.local.json, or create it from CPU and RAM the first time."""
+    global _WORKING, _CONFIG_CREATED
+    path = config_path()
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        norm = _normalize_config(raw) if isinstance(raw, dict) else None
+        if norm:
+            _WORKING = norm
+            _CONFIG_CREATED = False
+            return norm
+        print(f"WARNING: {path} is not a working-set config. It was left unchanged.")
+    sug = suggest_for({})
+    data = _config_from_suggestion(sug, "auto", "unknown", "")
+    if not path.is_file():
+        try:
+            _write_config(path, data)
+            _CONFIG_CREATED = True
+        except OSError as e:
+            print(f"WARNING: could not write {path}: {e}")
+            _CONFIG_CREATED = False
+    else:
+        _CONFIG_CREATED = False
+    _WORKING = data
+    return data
+
+
+def ensure_config():
+    with _CONFIG_LOCK:
+        return dict(_ensure_config_locked())
+
+
+def _take_config_created():
+    global _CONFIG_CREATED
+    created = _CONFIG_CREATED
+    _CONFIG_CREATED = False
+    return created
+
+
+def _store_config_locked(body, source):
+    global _WORKING
+    current = _WORKING or _ensure_config_locked()
+    body = body or {}
+    reason = body["reason"] if isinstance(body.get("reason"), str) else (current.get("reason") or "")
+    gpu = current.get("gpu") or "unknown"
+    renderer = current.get("renderer") or ""
+    if source == "auto":
+        if body.get("gpu") in ("hardware", "software", "unknown"):
+            gpu = body.get("gpu")
+        if isinstance(body.get("renderer"), str):
+            renderer = body.get("renderer")
+    merged = {
+        "nodes": body.get("nodes", current["nodes"]),
+        "edges": body.get("edges", current["edges"]),
+        "expand_limit": body.get("expand_limit", current["expand_limit"]),
+        "cypher_limit": body.get("cypher_limit", current["cypher_limit"]),
+        "lru": body["lru"] if "lru" in body else current.get("lru"),
+        "reason": reason, "source": source, "gpu": gpu, "renderer": renderer,
+    }
+    norm = _normalize_config(merged)
+    if norm is None:
+        raise ValueError("nodes and edges must be at least 1")
+    norm["source"] = source if source in ("auto", "user") else "user"
+    path = config_path()
+    if path.is_file():
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path.name} is not valid JSON, so it was left unchanged") from e
+        except OSError as e:
+            raise ValueError(f"could not read {path.name}") from e
+    try:
+        _write_config(path, norm)
+    except OSError as e:
+        raise ValueError(f"could not write {path.name}") from e
+    _WORKING = norm
+    return dict(norm)
+
+
+def save_config(body):
+    """Store the working set the UI saved. The next launch reads the same file."""
+    with _CONFIG_LOCK:
+        return _store_config_locked(body, "user")
+
+
+def refine_config(body):
+    """Fold the browser GPU into a config that the first launch wrote without one.
+
+    A working set saved from the UI, or one that already names a GPU, stays as it is.
+    """
+    sug = suggest_for(body or {})
+    gpu = (sug.get("resources") or {}).get("gpu") or "unknown"
+    with _CONFIG_LOCK:
+        if _WORKING is None:
+            _ensure_config_locked()
+        current = _WORKING
+        if current.get("source") != "auto" or current.get("gpu") != "unknown" or gpu == "unknown":
+            return {"updated": False, "config": dict(current)}
+        saved = _store_config_locked({
+            "nodes": sug["nodes"], "edges": sug["edges"],
+            "expand_limit": sug["expand_limit"], "cypher_limit": sug["cypher_limit"],
+            "lru": False, "reason": sug.get("reason") or "",
+            "gpu": gpu, "renderer": (sug.get("resources") or {}).get("renderer") or "",
+        }, "auto")
+        return {"updated": True, "config": saved}
+
+
+def _active_cap(hard, key):
+    """The configured working set, when one is loaded, else the hard ceiling."""
+    cfg = _WORKING or {}
+    raw = cfg.get(key)
+    if raw is None or raw == "":
+        return hard
+    value = _as_int(raw, hard)
+    floor = 1 if key in ("expand_limit", "cypher_limit") else 0
+    return max(floor, min(hard, value))
+
+
+def session_caps(body, max_nodes=None, max_edges=None):
+    """What this call may still return.
+
+    The hard ceilings are MAX_NODES, MAX_EDGES, EXPAND_MAX, and CYPHER_ROW_LIMIT.
+    A loaded config file lowers those to the saved working set. The page may
+    send a still lower session budget. on_screen is what the canvas already
+    holds, so the call receives only the room that is left. A missing or
+    hostile count still cannot make one response larger than that cap.
+    """
+    body = body or {}
+    hard_n = MAX_NODES if max_nodes is None else max_nodes
+    hard_e = MAX_EDGES if max_edges is None else max_edges
+    ceil_n = _active_cap(hard_n, "nodes") if max_nodes is None else hard_n
+    ceil_e = _active_cap(hard_e, "edges") if max_edges is None else hard_e
+    sess = body.get("budget") or {}
+
+    def lower(ceiling, key):
+        if sess.get(key) is None or sess.get(key) == "":
+            return ceiling
+        return max(0, min(ceiling, _as_int(sess.get(key), ceiling)))
+
+    cap_n, cap_e = lower(ceil_n, "nodes"), lower(ceil_e, "edges")
+    on = body.get("on_screen") or {}
+    have_n = max(0, _as_int(on.get("nodes"), 0))
+    have_e = max(0, _as_int(on.get("edges"), 0))
+    expand_hard = _active_cap(EXPAND_MAX, "expand_limit")
+    cypher_hard = _active_cap(CYPHER_ROW_LIMIT, "cypher_limit")
+    return {"max_nodes": cap_n, "max_edges": cap_e,
+            "remain_nodes": max(0, cap_n - have_n), "remain_edges": max(0, cap_e - have_e),
+            "expand_limit": max(1, lower(expand_hard, "expand_limit")),
+            "cypher_limit": max(1, lower(cypher_hard, "cypher_limit"))}
+
+
+def truncation(message, reasons, **extra):
+    reasons = [r for r in reasons if r]
+    out = {"truncated": bool(reasons), "message": message if reasons else None, "reasons": reasons}
+    out.update(extra)
+    return out
+
+
+def mask_cypher(q: str) -> str:
+    """Copy of q with comments and string contents blanked. Length and indexes stay the same."""
+    out = list(q)
+    i, n = 0, len(q)
+    while i < n:
+        if q.startswith("//", i):
+            j = q.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if q.startswith("/*", i):
+            j = q.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if q[i] in "'\"":
+            quote, j = q[i], i + 1
+            while j < n:
+                if q[j] == "\\":
+                    j += 2
+                    continue
+                if q[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            for k in range(i + 1, max(i + 1, j - 1)):
+                out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def apply_hard_limit(query: str, limit: int) -> str:
+    """Wrap one read statement so Neo4j itself stops after `limit` rows.
+
+    A LIMIT already on the statement is kept when it is smaller, and lowered
+    when it is larger. The outer LIMIT is a second cap in case the inner one
+    binds only to the last UNION part.
+    """
+    q = query.strip()
+    if q.endswith(";"):
+        q = q[:-1].rstrip()
+    if not q:
+        raise ValueError("Empty query")
+    masked = mask_cypher(q)
+    if ";" in masked:
+        raise PermissionError("Read-only explorer: one statement at a time")
+    limit = int(limit)
+    m = re.search(r"\bLIMIT\s+(\d+)\s*$", masked, re.IGNORECASE)
+    if m:
+        if int(m.group(1)) > limit:
+            q = q[:m.start(1)] + str(limit) + q[m.end(1):]
+        inner = q
+    else:
+        inner = q + f"\nLIMIT {limit}"
+    return f"CALL {{\n{inner}\n}}\nRETURN * LIMIT {limit}"
+
+
 class Graph:
-    def __init__(self):
-        self.uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-        self.db = os.environ.get("NEO4J_DATABASE", "neo4j")
-        self.driver = GraphDatabase.driver(self.uri, auth=(os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", "")))
+    def __init__(self, settings=None):
+        settings = settings or neo4j_settings()
+        self.uri = settings.uri
+        self.db = settings.database
+        self.driver = GraphDatabase.driver(self.uri, auth=(settings.user, settings.password))
         self._fulltext = os.environ.get("SEARCH_FULLTEXT_INDEX") or None
         self._ft_checked = bool(self._fulltext)
         self.cache = TTLCache(ttl=float(os.environ.get("CACHE_TTL", 60)))
@@ -167,12 +681,13 @@ class Graph:
         return self._fulltext
 
     # ---- API ---------------------------------------------------------------
-    def status(self):
+    def status(self, consume_config_created=False):
         info = self.driver.get_server_info()
         n = self.read("MATCH (n) RETURN count(n) AS n")[0]["n"]          # count store: O(1)
         r = self.read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
         return {"connected": True, "uri": self.uri, "database": self.db, "server": info.agent,
-                "nodes": n, "edges": r, "read_only": True, "fulltext_index": self.fulltext}
+                "nodes": n, "edges": r, "read_only": True, "fulltext_index": self.fulltext,
+                "budget": budget_payload(consume_created=consume_config_created)}
 
     def schema(self, refresh=False):
         hit = None if refresh else self.schema_cache.get("schema")
@@ -272,51 +787,128 @@ class Graph:
             total += n
         return {"total": total, "categories": cats, "types": types, "combos": combos, "approximate": scale > 1, "degree": base["deg"]}
 
-    def expand(self, ids, visible, categories=None, types=None, limit=50, order="neighbors", offset=0):
-        limit, offset = max(1, min(int(limit), EXPAND_MAX)), max(0, int(offset))
+    def expand(self, ids, visible, categories=None, types=None, limit=None, order="neighbors", offset=0, q=None, body=None):
+        caps = session_caps(body)
+        offset = max(0, _as_int(offset, 0))
+        if not ids or caps["remain_nodes"] <= 0:
+            msg = None if ids and caps["remain_nodes"] > 0 else (
+                f"canvas is full ({caps['max_nodes']:,} nodes, {caps['max_edges']:,} edges)" if ids else None)
+            return {"nodes": [], "edges": [], "offset": offset, "more": False, "truncated": bool(msg),
+                    "truncation": truncation(msg, ["node_budget"] if msg else [])}
+        # One extra row tells us whether the page is complete without a count of a hub.
+        page = max(1, min(_as_int(limit, caps["expand_limit"]), caps["expand_limit"], caps["remain_nodes"]))
         vis = list({*visible, *ids})
+        text = ""
+        params = dict(ids=ids, types=types or None, cats=categories or None, vis=vis, off=offset, lim=page + 1)
+        if q and str(q).strip():
+            text = " AND any(k IN $fields WHERE toLower(toStringOrNull(m[k])) CONTAINS $q)"
+            params["q"] = str(q).strip().lower()
+            params["fields"] = FILTER_FIELDS
         filt = ("($types IS NULL OR type(r) IN $types) AND ($cats IS NULL OR any(l IN labels(m) WHERE l IN $cats)) "
-                "AND NOT elementId(m) IN $vis")
+                "AND NOT elementId(m) IN $vis" + text)
         if order in ("most", "least"):
             # Rank by degree, but only among the first HUB_SAMPLE candidates (degree lookups are O(1) each).
+            params["cap"] = HUB_SAMPLE
             recs = self.read(
                 "UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id "
                 f"CALL (n) {{ MATCH (n)-[r]-(m) WHERE {filt} RETURN DISTINCT m LIMIT $cap }} "
                 "WITH DISTINCT m WITH m, COUNT { (m)--() } AS deg "
                 f"ORDER BY deg {'DESC' if order == 'most' else 'ASC'} SKIP $off LIMIT $lim RETURN m, deg",
-                ids=ids, types=types, cats=categories, vis=vis, lim=limit, off=offset, cap=HUB_SAMPLE)
+                **params)
         else:
             # Streamed: no global ORDER BY, so a hub with millions of neighbors returns the first page at once.
             recs = self.read(
                 "UNWIND $ids AS id MATCH (n) WHERE elementId(n) = id "
                 f"MATCH (n)-[r]-(m) WHERE {filt} "
                 "WITH DISTINCT m SKIP $off LIMIT $lim RETURN m, COUNT { (m)--() } AS deg",
-                ids=ids, types=types, cats=categories, vis=vis, lim=limit, off=offset)
+                **params)
+        more = len(recs) > page
+        recs = recs[:page]
         new_nodes = [node_json(r["m"], r["deg"]) for r in recs]
         new_ids = [n["id"] for n in new_nodes]
-        edges = self.edges_for(new_ids, ids, vis, types)
-        return {"nodes": new_nodes, "edges": edges, "offset": offset, "more": len(new_nodes) == limit}
+        edge_cap = caps["remain_edges"]
+        edges, edges_more = self.edges_for(new_ids, ids, vis, types, edge_cap)
+        reasons = []
+        message = None
+        if more:
+            reasons.append("node_budget" if page >= caps["remain_nodes"] and page < caps["expand_limit"] else "expand_limit")
+            message = f"showing {len(new_nodes):,} of more neighbors"
+        if edges_more:
+            reasons.append("edge_budget")
+            extra = f"edges stopped at {len(edges):,}"
+            message = f"{message}; {extra}" if message else extra
+        report = truncation(message, reasons, nodes_returned=len(new_nodes), edges_returned=len(edges))
+        return {"nodes": new_nodes, "edges": edges, "offset": offset, "more": more,
+                "truncated": report["truncated"], "truncation": report}
 
-    def edges_for(self, new_ids, src_ids, visible, types=None):
-        """Edges between the new nodes and anything on screen, anchored on the new nodes (index lookups)."""
-        if not new_ids:
-            return []
+    def edges_for(self, new_ids, src_ids, visible, types=None, edge_limit=None):
+        """Edges between the new nodes and anything already on screen.
+
+        The walk starts at an endpoint whose degree is <= EDGE_WALK_MAX, so a hub
+        (the call that times out when it is scanned) is never the start of the scan.
+        The result stops at the edge budget.
+        """
+        if edge_limit is None:
+            edge_limit = MAX_EDGES
+        if not new_ids or edge_limit <= 0:
+            return [], bool(new_ids and edge_limit <= 0)
+        ends = list({*visible, *src_ids, *new_ids})
+        lim = int(edge_limit) + 1
         recs = self.read(
-            "UNWIND $new AS id MATCH (a) WHERE elementId(a) = id "
-            "MATCH (a)-[r]-(b) WHERE (elementId(b) IN $all) "
-            "AND ($types IS NULL OR type(r) IN $types OR NOT (elementId(b) IN $src)) RETURN DISTINCT r",
-            new=new_ids, src=src_ids, all=list({*visible, *new_ids}), types=types)
-        return [rel_json(r["r"]) for r in recs]
+            "UNWIND $new AS id MATCH (a) WHERE elementId(a) = id AND COUNT { (a)--() } <= $walk "
+            "MATCH (a)-[r]-(b) WHERE elementId(b) IN $ends "
+            "AND ($types IS NULL OR type(r) IN $types OR NOT elementId(b) IN $src) "
+            "RETURN DISTINCT r LIMIT $lim",
+            new=new_ids, src=list(src_ids), ends=ends, types=types or None, walk=EDGE_WALK_MAX, lim=lim)
+        # New nodes that are themselves hubs were skipped above. Pick those edges up
+        # from the other end, and only when that end is small enough to walk.
+        if len(recs) <= edge_limit:
+            more_recs = self.read(
+                "UNWIND $src AS id MATCH (b) WHERE elementId(b) = id AND COUNT { (b)--() } <= $walk "
+                "MATCH (b)-[r]-(a) WHERE elementId(a) IN $new "
+                "AND ($types IS NULL OR type(r) IN $types) "
+                "RETURN DISTINCT r LIMIT $lim",
+                src=list(src_ids), new=new_ids, types=types or None, walk=EDGE_WALK_MAX, lim=lim)
+            seen = {r["r"].element_id for r in recs}
+            for r in more_recs:
+                if r["r"].element_id not in seen:
+                    recs.append(r)
+                    seen.add(r["r"].element_id)
+        more = len(recs) > edge_limit
+        return [rel_json(r["r"]) for r in recs[:edge_limit]], more
 
-    def edges_between(self, ids):
+    def edges_between(self, ids, body=None):
+        caps = session_caps(body)
+        edge_limit = caps["remain_edges"]
+        if len(ids) < 2 or edge_limit <= 0:
+            msg = None if edge_limit > 0 else f"canvas is full ({caps['max_edges']:,} edges)"
+            report = truncation(msg, ["edge_budget"] if msg else [])
+            return {"edges": [], "truncated": report["truncated"], "truncation": report}
         recs = self.read(
-            "UNWIND $ids AS id MATCH (a) WHERE elementId(a) = id MATCH (a)-[r]->(b) WHERE elementId(b) IN $ids RETURN r", ids=ids)
-        return {"edges": [rel_json(r["r"]) for r in recs]}
+            "UNWIND $ids AS id MATCH (a) WHERE elementId(a) = id AND COUNT { (a)--() } <= $walk "
+            "MATCH (a)-[r]-(b) WHERE elementId(b) IN $ids "
+            "RETURN DISTINCT r LIMIT $lim",
+            ids=list(ids), walk=EDGE_WALK_MAX, lim=int(edge_limit) + 1)
+        more = len(recs) > edge_limit
+        edges = [rel_json(r["r"]) for r in recs[:edge_limit]]
+        message = f"edges stopped at {len(edges):,}" if more else None
+        report = truncation(message, ["edge_budget"] if more else [], edges_returned=len(edges))
+        return {"edges": edges, "truncated": report["truncated"], "truncation": report}
 
-    def cypher(self, query: str, params=None, limit=500):
+    def cypher(self, query: str, params=None, limit=None, body=None):
         check_read_only(query)
-        recs = self.read(query, **(params or {}))
+        caps = session_caps(body)
+        if caps["remain_nodes"] <= 0:
+            report = truncation(
+                f"canvas is full ({caps['max_nodes']:,} nodes, {caps['max_edges']:,} edges)", ["node_budget"])
+            return {"nodes": [], "edges": [], "columns": [], "rows": [], "truncated": True, "truncation": report}
+        row_cap = max(1, min(_as_int(limit, caps["cypher_limit"]), caps["cypher_limit"], caps["remain_nodes"]))
+        wrapped = apply_hard_limit(query, row_cap + 1)
+        recs = self.read(wrapped, **(params or {}))
+        row_more = len(recs) > row_cap
+        recs = recs[:row_cap]
         nodes, edges, rows, cols = {}, {}, [], []
+
         def walk(v):
             if isinstance(v, Node):
                 nodes[v.element_id] = v
@@ -332,18 +924,41 @@ class Graph:
             elif isinstance(v, (list, tuple)):
                 for x in v:
                     walk(x)
-        for rec in recs[:limit]:
+
+        for rec in recs:
             cols = list(rec.keys())
             for v in rec.values():
                 walk(v)
             rows.append([jsonable(v) if not isinstance(v, (Node, Relationship, NPath)) else f"<{type(v).__name__}>" for v in rec.values()])
+        node_ids = list(nodes)
+        node_more = len(node_ids) > caps["remain_nodes"]
+        if node_more:
+            node_ids = node_ids[:caps["remain_nodes"]]
+            keep = set(node_ids)
+            edges = {i: r for i, r in edges.items() if r.start_node.element_id in keep and r.end_node.element_id in keep}
+            nodes = {i: n for i, n in nodes.items() if i in keep}
+        edge_ids = list(edges)
+        edge_more = len(edge_ids) > caps["remain_edges"]
+        if edge_more:
+            edge_ids = edge_ids[:caps["remain_edges"]]
+            edges = {i: edges[i] for i in edge_ids}
         degs = {}
         if nodes:
             for r in self.read("MATCH (n) WHERE elementId(n) IN $ids RETURN elementId(n) AS id, COUNT { (n)--() } AS d", ids=list(nodes)):
                 degs[r["id"]] = r["d"]
-        return {"nodes": [node_json(n, degs.get(i)) for i, n in nodes.items()],
-                "edges": [rel_json(r) for r in edges.values() if r.start_node is not None],
-                "columns": cols, "rows": rows[:50], "truncated": len(recs) > limit}
+        reasons = []
+        message = None
+        if row_more or node_more:
+            reasons.append("row_limit" if row_more else "node_budget")
+            message = f"query stopped at {len(rows):,} of more rows"
+        if edge_more:
+            reasons.append("edge_budget")
+            extra = f"edges stopped at {len(edges):,}"
+            message = f"{message}; {extra}" if message else extra
+        report = truncation(message, reasons, rows_returned=len(rows), nodes_returned=len(nodes), edges_returned=len(edges))
+        return {"nodes": [node_json(nodes[i], degs.get(i)) for i in node_ids if i in nodes],
+                "edges": [rel_json(edges[i]) for i in edge_ids if edges[i].start_node is not None],
+                "columns": cols, "rows": rows[:50], "truncated": report["truncated"], "truncation": report}
 
 
 GRAPH: Graph | None = None
@@ -376,7 +991,7 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
             if u.path == "/api/status":
-                return self._json(GRAPH.status())
+                return self._json(GRAPH.status(consume_config_created=True))
             if u.path == "/api/schema":
                 return self._json(GRAPH.schema(refresh=q.get("refresh") == "1"))
             if u.path == "/api/styles":
@@ -403,15 +1018,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(GRAPH.nodes(b["ids"]))
             if u.path == "/api/neighbors":
                 return self._json(GRAPH.neighbor_summary(b["ids"], b.get("visible", [])))
+            if u.path == "/api/budget/suggest":
+                return self._json(suggest_for(b))
+            if u.path == "/api/budget/refine":
+                return self._json(refine_config(b))
+            if u.path == "/api/budget":
+                return self._json({"config": save_config(b), "config_file": config_path().name})
             if u.path == "/api/expand":
-                return self._json(GRAPH.expand(b["ids"], b.get("visible", []), b.get("categories"), b.get("types"),
-                                               b.get("limit", int(os.environ.get("EXPAND_LIMIT", 50))), b.get("order", "neighbors"), b.get("offset", 0)))
+                return self._json(GRAPH.expand(b.get("ids") or [], b.get("visible") or [], b.get("categories"), b.get("types"),
+                                               b.get("limit", EXPAND_LIMIT), b.get("order", "neighbors"), b.get("offset", 0),
+                                               b.get("q") or None, b))
             if u.path == "/api/edges-between":
-                return self._json(GRAPH.edges_between(b["ids"]))
+                return self._json(GRAPH.edges_between(b.get("ids") or [], b))
             if u.path == "/api/cypher":
-                return self._json(GRAPH.cypher(b["query"], b.get("params"), int(b.get("limit", 500))))
+                return self._json(GRAPH.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
         except PermissionError as e:
             return self._json({"error": str(e)}, 403)
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
         except neo4j.exceptions.Neo4jError as e:
             return self._json({"error": f"{e.code}: {e.message}"}, 400)
         except Exception as e:  # noqa: BLE001
@@ -421,7 +1045,15 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global GRAPH
-    GRAPH = Graph()
+    try:
+        settings = neo4j_settings()
+    except Neo4jConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    cfg = ensure_config()
+    print(f"Working set: {cfg['nodes']} nodes / {cfg['edges']} edges "
+          f"({cfg['source']}) from {config_path()}.")
+    GRAPH = Graph(settings)
     try:
         st = GRAPH.status()
         print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")

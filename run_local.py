@@ -13,19 +13,25 @@ What it does, in order:
                       real Cartography schema, produced from Cartography's own demo seeds + test fixtures)
        --synthetic N  the synthetic Cartography-shaped generator, about N nodes (what the UI tests are written for)
        --both         fixtures + synthetic estate in one database
+       --live-scale   the minimum supported graph: 15,000,000 nodes and 60,000,000 edges
        --keep-data    don't touch the data
   5. starts server.py on http://127.0.0.1:8744 and opens the browser (Ctrl+C stops the server; Neo4j keeps running)
 
 Other commands:
-  --test        run the UI test suite (33 checks) and a quick browser + API benchmark, then keep serving
-                (the tests need the synthetic estate, so --test loads --both unless you chose a dataset)
+  --test        run the budget tests, the UI suite (33 checks) and a quick browser + API benchmark,
+                then keep serving. The UI tests need the synthetic estate, so --test loads --both
+                unless you chose a dataset. With --live-scale, --test runs the budget tests and the
+                live-scale checks against the 15M / 60M graph instead of the UI suite.
   --stop        stop the server and the Neo4j container (data kept)
   --reset       remove the container and its volume (all data)
   --status      show what is running
 
 Your own / live Neo4j (local or remote; no Docker, data is NOT touched unless you add --load-data):
-  python3 run_local.py --neo4j-uri neo4j+s://host:7687 --neo4j-user neo4j [--neo4j-password ...] [--neo4j-database neo4j]
-  Leave out --neo4j-password (and NEO4J_PASSWORD) to be prompted, so it stays out of your shell history.
+  export NEO4J_URI=neo4j+s://host:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=... NEO4J_DATABASE=neo4j
+  python3 run_local.py
+  The same four variables can live in a gitignored .env (copy .env.example). The environment wins over that file.
+  Flags still work: --neo4j-uri, --neo4j-user, --neo4j-database, --neo4j-password.
+  Leave the password out of the command to be prompted, so it stays out of your shell history.
   The explorer opens the database read-only.
 
 Everything stays on your machine: Neo4j and the explorer listen on 127.0.0.1 only, the data is fake/fixture data.
@@ -118,7 +124,7 @@ def best_python():
 def bootstrap(args, argv):
     if sys.version_info < (3, 9):
         die(f"Python 3.9+ is needed (this is {sys.version.split()[0]}). On macOS: `xcode-select --install` or `brew install python`.")
-    want_tests = args.with_tests or args.test
+    want_tests = args.with_tests or (args.test and not args.live_scale)
     py = venv_python()
     if not py.exists():
         base = best_python()
@@ -145,6 +151,8 @@ def bootstrap(args, argv):
 def neo4j_ready(uri, password, timeout, user="neo4j", database=None):
     from neo4j import GraphDatabase
     from neo4j.exceptions import AuthError, ConfigurationError
+    from neo4j_env import redact_uri
+    shown = redact_uri(uri)
     t0, last = time.time(), None
     while time.time() - t0 < timeout:
         try:
@@ -154,18 +162,18 @@ def neo4j_ready(uri, password, timeout, user="neo4j", database=None):
                     s.run("RETURN 1").consume()
             return True
         except (AuthError, ConfigurationError, ValueError) as e:
-            die(f"cannot use Neo4j at {uri} as user {user}: {e}")
+            die(f"cannot use Neo4j at {shown} as user {user}: {e}")
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(2)
-    die(f"Neo4j at {uri} did not become ready in {timeout}s: {last}")
+    die(f"Neo4j at {shown} did not become ready in {timeout}s: {last}")
 
 
 def check_docker():
     if not docker_bin():
         die("Docker is not installed. Install Docker Desktop (macOS: https://docs.docker.com/desktop/setup/install/mac-install/ "
             "or `brew install --cask docker`, then start it) or Docker Engine on Linux.\n"
-            "       Or use your own local Neo4j 5: python3 run_local.py --neo4j-uri bolt://localhost:7687 --neo4j-password ...")
+            "       Or use your own local Neo4j 5: set NEO4J_URI and NEO4J_PASSWORD, then python3 run_local.py")
     r = docker("info", "--format", "{{.ServerVersion}}", check=False)
     if r.returncode != 0:
         die("Docker is installed but the daemon is not running: start Docker Desktop (macOS: `open -a Docker`, wait for the whale "
@@ -181,9 +189,44 @@ def container_state():
     return status, dict(p.split("=") for p in ports.split())
 
 
+def mem_mb(text):
+    """Parse a Neo4j size like 512M or 4G into megabytes. Unknown text is 0."""
+    if not text:
+        return 0
+    s = str(text).strip().upper()
+    mult = 1.0
+    if s.endswith("G"):
+        mult, s = 1024.0, s[:-1]
+    elif s.endswith("M"):
+        s = s[:-1]
+    elif s.endswith("K"):
+        mult, s = 1 / 1024, s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return 0
+
+
+def container_mem():
+    r = docker("inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", CONTAINER, check=False)
+    env = {}
+    for line in (r.stdout or "").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            env[k] = v
+    return env.get("NEO4J_server_memory_heap_max__size"), env.get("NEO4J_server_memory_pagecache_size")
+
+
 def start_neo4j(args):
     check_docker()
     status, ports = container_state()
+    if args.live_scale and status:
+        heap, page = container_mem()
+        if mem_mb(page) < 4096 or mem_mb(heap) < 2048:
+            die(f"container {CONTAINER} was created with heap {heap or 'default'} and page cache {page or 'default'}. "
+                "A 15M node / 60M edge graph needs a new container (heap 4G, page cache 8G). "
+                "That wants about 16 GB of RAM for Docker and about 30 GB of free disk. "
+                f"Run `python3 run_local.py --reset` first. That deletes the local database volume.")
     if status and ports.get("7687/tcp") and int(ports["7687/tcp"]) != args.neo4j_port and args.neo4j_port_set:
         die(f"container {CONTAINER} already exists on bolt port {ports['7687/tcp']}; run --reset first to change the port "
             f"(or drop --neo4j-port).")
@@ -205,8 +248,9 @@ def start_neo4j(args):
                "-p", f"127.0.0.1:{args.neo4j_port}:7687", "-p", f"127.0.0.1:{args.neo4j_http_port}:7474",
                "-v", f"{VOLUME}:/data",
                "-e", f"NEO4J_AUTH=neo4j/{PASSWORD}",
-               "-e", "NEO4J_server_memory_heap_initial__size=1G", "-e", f"NEO4J_server_memory_heap_max__size={args.neo4j_heap}",
-               "-e", "NEO4J_server_memory_pagecache_size=1G",
+               "-e", f"NEO4J_server_memory_heap_initial__size={args.neo4j_heap_initial}",
+               "-e", f"NEO4J_server_memory_heap_max__size={args.neo4j_heap}",
+               "-e", f"NEO4J_server_memory_pagecache_size={args.neo4j_pagecache}",
                IMAGE, capture=True)
     uri = f"bolt://127.0.0.1:{args.neo4j_port}"
     say(f"waiting for Neo4j at {uri} ...")
@@ -225,7 +269,11 @@ def seed(env, *flags):
 def load_data(args, env):
     if args.keep_data:
         return say("keeping the existing data (--keep-data)")
-    if args.synthetic is not None:
+    if args.live_scale:
+        say(f"loading the live-scale graph: {args.nodes:,} nodes / {args.edges:,} edges. "
+            "This streams in batches and takes a long time at the full size (disk for the store, and Docker RAM for the page cache).")
+        seed(env, "--wipe", "--live-scale", "--nodes", str(args.nodes), "--edges", str(args.edges))
+    elif args.synthetic is not None:
         scale = max(1, math.ceil(args.synthetic / SYNTH_UNIT))
         seed(env, "--wipe", "--scale", str(scale), *(["--hub", str(args.hub)] if args.hub else []))
     elif args.both:
@@ -258,6 +306,12 @@ def start_server(args, env, detach):
         die(f"port {args.port} is already in use (an explorer already running? `python3 run_local.py --stop`), or use --port 8755")
     RUN.mkdir(exist_ok=True)
     env = {**env, "PORT": str(args.port), "HOST": "127.0.0.1"}
+    # Omit these and the server sizes the ceiling from the machine. The first launch
+    # writes the working set to gx.local.json. The page can change it for the next launch.
+    if args.max_nodes is not None:
+        env["MAX_NODES"] = str(args.max_nodes)
+    if args.max_edges is not None:
+        env["MAX_EDGES"] = str(args.max_edges)
     log = open(RUN / "server.log", "a")
     p = subprocess.Popen([str(venv_python()), str(HERE / "server.py")], env=env, stdout=log, stderr=subprocess.STDOUT,
                          start_new_session=detach)
@@ -276,6 +330,13 @@ def start_server(args, env, detach):
 
 def run_tests(args, env, url):
     py = str(venv_python())
+    say("budget tests (tests/test_budget.py)")
+    b = subprocess.run([py, str(HERE / "tests" / "test_budget.py")], env=env)
+    if args.live_scale:
+        say("live-scale tests (tests/test_live_scale.py): the database must hold at least 15M nodes and 60M edges")
+        t = subprocess.run([py, str(HERE / "tests" / "test_live_scale.py")],
+                           env={**env, "REQUIRE_LIVE_SCALE": "1", "GX_URL": url.rstrip("/")})
+        return b.returncode or t.returncode
     say("UI test suite (tests/run_ui_tests.py): starts its own server on a free port and drives headless Chromium")
     t = subprocess.run([py, str(HERE / "tests" / "run_ui_tests.py")], env=env)
     say(f"browser benchmark (tests/bench_ui.py --sizes {args.bench_sizes})")
@@ -285,7 +346,37 @@ def run_tests(args, env, url):
     subprocess.run([py, str(HERE / "tests" / "bench_server.py"), "--url", url.rstrip("/"), "--repeat", "3",
                     "--out", str(RUN / "bench-server.json")], env=env)
     say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, screenshots/app-*.png")
-    return t.returncode
+    return b.returncode or t.returncode
+
+
+def credential_target(args, environ=None):
+    """Apply CLI credential flags over the environment. Empty means start the local Docker Neo4j."""
+    environ = os.environ if environ is None else environ
+    if args.neo4j_uri:
+        environ["NEO4J_URI"] = args.neo4j_uri
+    if args.neo4j_user is not None:
+        environ["NEO4J_USER"] = args.neo4j_user
+    if args.neo4j_database is not None:
+        environ["NEO4J_DATABASE"] = args.neo4j_database
+    if args.neo4j_password is not None:
+        environ["NEO4J_PASSWORD"] = args.neo4j_password
+    return (environ.get("NEO4J_URI") or "").strip()
+
+
+def _settings_or_prompt():
+    """Read Neo4j settings. On a terminal, ask for a missing password once."""
+    from neo4j_env import Neo4jConfigError, neo4j_settings, redact_uri
+    try:
+        return neo4j_settings()
+    except Neo4jConfigError as e:
+        if not e.missing_password or not sys.stdin.isatty():
+            raise
+        import getpass
+        os.environ.pop("NEO4J_PASSWORD", None)
+        user = (os.environ.get("NEO4J_USER") or "neo4j").strip() or "neo4j"
+        host = redact_uri((os.environ.get("NEO4J_URI") or "").strip())
+        os.environ["NEO4J_PASSWORD"] = getpass.getpass(f"Neo4j password for {user} at {host}: ")
+        return neo4j_settings()
 
 
 def main_in_venv(args):
@@ -305,24 +396,31 @@ def main_in_venv(args):
                 say(f"stopped container {CONTAINER} (data kept in volume {VOLUME})")
         return 0
 
-    if args.neo4j_uri:
-        uri = args.neo4j_uri
-        password = args.neo4j_password or os.environ.get("NEO4J_PASSWORD")
-        if password is None:
-            import getpass
-            password = getpass.getpass(f"Neo4j password for {args.neo4j_user} at {uri}: ")
-        say(f"using your Neo4j at {uri} as {args.neo4j_user}, database {args.neo4j_database} (no Docker)")
-        neo4j_ready(uri, password, args.wait, args.neo4j_user, args.neo4j_database)
+    from neo4j_env import Neo4jConfigError, load_credential_env
+    load_credential_env()
+    using_own = bool(credential_target(args))
+    if using_own:
+        try:
+            settings = _settings_or_prompt()
+        except Neo4jConfigError as e:
+            die(str(e))
+        uri, user, password, database = settings.uri, settings.user, settings.password, settings.database
+        say(f"using your Neo4j at {uri} as {user}, database {database} (no Docker)")
+        neo4j_ready(uri, password, args.wait, user, database)
         if not args.load_data:
-            if args.test:
-                die("--test needs the mock data; with --neo4j-uri add --load-data (local databases only, it wipes them)")
+            if args.test and not args.live_scale:
+                die("--test needs the mock data; with your own Neo4j add --load-data (local databases only, it wipes them)")
             args.keep_data = True
-            say("leaving your data untouched (add --load-data to wipe a LOCAL database and load the mock data)")
+            if args.live_scale and args.test:
+                say("leaving your data untouched and checking it against the 15M node / 60M edge minimum")
+            else:
+                say("leaving your data untouched (add --load-data to wipe a LOCAL database and load the mock data)")
     else:
         uri, password = start_neo4j(args)
-    env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": args.neo4j_user, "NEO4J_PASSWORD": password,
-           "NEO4J_DATABASE": args.neo4j_database, "QUIET": "1"}
-    if args.test and args.synthetic is None and not args.keep_data and not args.both:
+        user, database = "neo4j", args.neo4j_database or "neo4j"
+    env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": user, "NEO4J_PASSWORD": password,
+           "NEO4J_DATABASE": database, "QUIET": "1"}
+    if args.test and not args.live_scale and args.synthetic is None and not args.keep_data and not args.both:
         say("--test: loading fixtures + the synthetic estate (--both); the UI tests are written for the synthetic data")
         args.both = True
     load_data(args, env)
@@ -330,8 +428,10 @@ def main_in_venv(args):
     stop_server()
     serve_after = not args.no_serve
     proc, url = start_server(args, env, detach=args.detach or not serve_after)
-    say(f"Graph Explorer is up: {url}   (Neo4j Browser: http://127.0.0.1:{args.neo4j_http_port}  user neo4j / {password})"
-        if not args.neo4j_uri else f"Graph Explorer is up: {url}")
+    if using_own:
+        say(f"Graph Explorer is up: {url}")
+    else:
+        say(f"Graph Explorer is up: {url}   (Neo4j Browser: http://127.0.0.1:{args.neo4j_http_port}  user neo4j / {PASSWORD})")
     rc = 0
     if args.test:
         rc = run_tests(args, env, url)
@@ -358,26 +458,33 @@ def parse(argv):
     d = ap.add_argument_group("data (the database is wiped first)")
     d.add_argument("--synthetic", type=int, metavar="N", help="synthetic Cartography-shaped graph of about N nodes instead of the fixtures")
     d.add_argument("--both", action="store_true", help="fixtures + one synthetic estate (1,099 nodes)")
+    d.add_argument("--live-scale", action="store_true",
+                   help="load the minimum supported graph: 15,000,000 nodes and 60,000,000 edges, and size Neo4j for it")
+    d.add_argument("--nodes", type=int, default=15_000_000, help="with --live-scale, exact node count (default 15000000)")
+    d.add_argument("--edges", type=int, default=60_000_000, help="with --live-scale, exact relationship count (default 60000000)")
     d.add_argument("--hub", type=int, default=0, metavar="N", help="add a supernode with N EC2 instances (with --synthetic/--both)")
     d.add_argument("--keep-data", action="store_true", help="don't reload data")
     n = ap.add_argument_group("Neo4j")
     n.add_argument("--neo4j-port", type=int, default=7687, help="host bolt port for the Docker container (default 7687)")
     n.add_argument("--neo4j-http-port", type=int, default=7474, help="host port for Neo4j Browser (default 7474)")
-    n.add_argument("--neo4j-heap", default="2G", help="Neo4j max heap in the container (default 2G)")
-    n.add_argument("--neo4j-uri", help="use your own Neo4j (local or remote) instead of Docker, e.g. neo4j+s://host:7687 or bolt://localhost:7687; its data is left untouched")
-    n.add_argument("--neo4j-user", default="neo4j", help="user for --neo4j-uri (default neo4j)")
-    n.add_argument("--neo4j-password", help="password for --neo4j-uri (or set NEO4J_PASSWORD; prompted if neither)")
-    n.add_argument("--neo4j-database", default="neo4j", help="database name (default neo4j)")
+    n.add_argument("--neo4j-heap", default=None, help="Neo4j max heap in the container (default 2G, or 4G with --live-scale)")
+    n.add_argument("--neo4j-pagecache", default=None, help="Neo4j page cache in the container (default 1G, or 8G with --live-scale)")
+    n.add_argument("--neo4j-uri", help="use your own Neo4j instead of Docker. NEO4J_URI in the environment or in .env does the same. Example: neo4j+s://host:7687 or bolt://localhost:7687. Data is left untouched")
+    n.add_argument("--neo4j-user", default=None, help="Neo4j user (default: NEO4J_USER, otherwise neo4j)")
+    n.add_argument("--neo4j-password", default=None, help="password. Prefer NEO4J_PASSWORD or .env so it stays out of shell history. Prompted when neither is set")
+    n.add_argument("--neo4j-database", default=None, help="database name (default: NEO4J_DATABASE, otherwise neo4j)")
     n.add_argument("--load-data", action="store_true", help="with --neo4j-uri: wipe it and load the mock data (refused for non-local servers)")
     n.add_argument("--wait", type=int, default=180, help="seconds to wait for Neo4j (default 180)")
     s = ap.add_argument_group("explorer")
     s.add_argument("--port", type=int, default=8744, help="explorer port on 127.0.0.1 (default 8744)")
+    s.add_argument("--max-nodes", type=int, default=None, help="safety ceiling for nodes on screen (default: from this machine's RAM)")
+    s.add_argument("--max-edges", type=int, default=None, help="safety ceiling for edges on screen (default: from this machine's RAM)")
     s.add_argument("--no-browser", action="store_true", help="don't open the browser")
     s.add_argument("--detach", action="store_true", help="run the server in the background and return")
     s.add_argument("--no-serve", action="store_true", help="stop the server when done (useful with --test in CI)")
     t = ap.add_argument_group("tests")
     t.add_argument("--with-tests", action="store_true", help="also install Playwright + Chromium")
-    t.add_argument("--test", action="store_true", help="run the UI tests and benchmarks (implies --with-tests)")
+    t.add_argument("--test", action="store_true", help="run the budget tests and the UI suite, or with --live-scale the 15M/60M checks")
     t.add_argument("--bench-sizes", default="10000", help="graph sizes for the browser benchmark (default 10000)")
     c = ap.add_argument_group("commands")
     c.add_argument("--stop", action="store_true", help="stop the server and the Neo4j container")
@@ -385,9 +492,22 @@ def parse(argv):
     c.add_argument("--status", action="store_true", help="show what is running")
     ap.add_argument("--_in-venv", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
-    args.neo4j_port_set = "--neo4j-port" in " ".join(argv)
+    joined = " ".join(argv)
+    args.neo4j_port_set = "--neo4j-port" in joined
+    if args.live_scale and (args.synthetic is not None or args.both):
+        ap.error("use either --live-scale or --synthetic/--both")
     if args.synthetic is not None and args.both:
         ap.error("use either --synthetic N or --both")
+    if (args.max_nodes is not None and args.max_nodes < 1) or (args.max_edges is not None and args.max_edges < 1):
+        ap.error("--max-nodes and --max-edges must be at least 1")
+    if args.nodes < 4 or args.edges < 1:
+        ap.error("--nodes must be at least 4 and --edges at least 1")
+    # Defaults differ for the 15M/60M graph: heap 4G and page cache 8G, set only when the flag is omitted.
+    if args.neo4j_heap is None:
+        args.neo4j_heap = "4G" if args.live_scale else "2G"
+    if args.neo4j_pagecache is None:
+        args.neo4j_pagecache = "8G" if args.live_scale else "1G"
+    args.neo4j_heap_initial = "2G" if args.live_scale else "1G"
     return args
 
 
