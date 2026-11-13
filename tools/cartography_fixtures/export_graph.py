@@ -4,7 +4,11 @@ Used once after loading Cartography's demo seeds and integration-test fixtures, 
 prototype can reload real-schema mock data without cloning Cartography. Read-only.
 """
 import gzip, json, os, sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from neo4j import GraphDatabase
+from neo4j_env import Neo4jConfigError, neo4j_settings
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "..", "data", "cartography-fixtures.json.gz")
 
@@ -18,9 +22,12 @@ def plain(v):
 
 
 def main():
-    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    auth = (os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", ""))
-    with GraphDatabase.driver(uri, auth=auth) as d, d.session(default_access_mode="READ") as s:
+    try:
+        settings = neo4j_settings()
+    except Neo4jConfigError as e:
+        sys.exit(str(e))
+    with GraphDatabase.driver(settings.uri, auth=(settings.user, settings.password)) as d, \
+            d.session(database=settings.database, default_access_mode="READ") as s:
         nodes = [{"k": r["k"], "l": r["l"], "p": {k: plain(v) for k, v in r["p"].items()}}
                  for r in s.run("MATCH (n) RETURN elementId(n) AS k, labels(n) AS l, properties(n) AS p")]
         rels = [{"s": r["s"], "d": r["d"], "t": r["t"], "p": {k: plain(v) for k, v in r["p"].items()}}

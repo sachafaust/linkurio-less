@@ -28,6 +28,9 @@ const S = {
   undo: [], redo: [], viz: { id: null, title: null, saved: false, autosave: true },
   searchKind: 'node', searchScope: 'all', selPanelOpen: false, lasso: null, lassoMode: null, clipboard: null,
   rightPanel: null, minimap: false,
+  // Ceilings come from the server. The working set is gx.local.json on the server.
+  budget: { serverNodes: 2000, serverEdges: 5000, nodes: 2000, edges: 5000, expand_limit: 50, cypher_limit: 500, expand_max: 50, cypher_max: 500, lru: false, resources: null, suggestion: null, reason: '' },
+  db: { nodes: 0, edges: 0 }, seq: 1, canvasRefused: false,
 };
 const DEFAULT_SIZE = 26;
 let cy, R;
@@ -138,6 +141,22 @@ function restyle() { refreshRanges(); syncSizes(); R.redraw(); drawMinimap(); pe
 // ---------- graph data ---------------------------------------------------------------
 function realNodes() { return cy.nodes().filter(n => !n._private.data.group && !n._private.data.hubgroup); }
 function realEdges() { return cy.edges().filter(e => !e._private.data.meta && !e._private.data.virtual); }
+function canvasNodes() { return cy.nodes().filter(n => !n._private.data.group).length; }
+function canvasEdges() { return cy.edges().filter(e => !e._private.data.meta).length; }
+function graphBody(extra = {}) {
+  return Object.assign({}, extra, {
+    on_screen: { nodes: canvasNodes(), edges: canvasEdges() },
+    budget: { nodes: S.budget.nodes, edges: S.budget.edges, expand_limit: S.budget.expand_limit, cypher_limit: S.budget.cypher_limit },
+  });
+}
+function updateBudgetChip() {
+  const el = $('#budget-chip'); if (!el || !cy) return;
+  const n = canvasNodes(), e = canvasEdges();
+  el.textContent = `${n.toLocaleString()} / ${S.budget.nodes.toLocaleString()} nodes · ${e.toLocaleString()} / ${S.budget.edges.toLocaleString()} edges`;
+  el.classList.toggle('warn', n >= S.budget.nodes || e >= S.budget.edges);
+  const file = S.budget.configFile || 'gx.local.json';
+  el.title = `Working set on screen, saved in ${file} and used the next time the server starts. This machine allows up to ${S.budget.serverNodes.toLocaleString()} nodes and ${S.budget.serverEdges.toLocaleString()} edges. The whole graph stays in Neo4j.`;
+}
 // cytoscape's add() calls edge.parallelEdges() for every new edge only to clear caches; that scan is
 // O(degree), so adding the RESOURCE fan-out of a hub costs O(degree^2) (8.5 s for 100k edges / 20 hubs).
 // We never use cytoscape's parallel-edge cache (render.js indexes parallel edges itself), so skip it
@@ -147,36 +166,98 @@ function addEdgesFast(edgeEls) {
   proto.parallelEdges = function () { return empty; };
   try { return cy.add(edgeEls); } finally { proto.parallelEdges = orig; }
 }
-function addGraph(g, around = null) {
-  const ext = cy.extent(); const c0 = around ? around.position() : { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 };
+function evictOldest(needN, needE, keepIds) {
+  // Least-recently-added nodes that are not pinned. Off unless the session asked for it.
+  if (!S.budget.lru) return 0;
+  const keep = new Set(keepIds || []);
+  let dropped = 0;
+  while (canvasNodes() + needN > S.budget.nodes || canvasEdges() + needE > S.budget.edges) {
+    let best = null, bestSeq = Infinity;
+    cy.nodes().forEach(n => {
+      const d = n._private.data;
+      if (d.group || d.pinned || keep.has(n.id())) return;
+      const seq = d._seq ?? 0;
+      if (seq < bestSeq) { bestSeq = seq; best = n; }
+    });
+    if (!best) break;
+    best.remove();
+    dropped++;
+    if (dropped > S.budget.nodes + 10) break;
+  }
+  return dropped;
+}
+function offerCanvasRoom(why) {
+  const filtered = cy.nodes('.filtered').filter(n => !n.data('group')).length;
+  const bg = modal('Canvas is full', `<div class="warnbox">${ico('AlertCircleOutline')} ${esc(why || 'The working set is full.')}</div>
+    <div class="section-d">The canvas holds at most ${S.budget.nodes.toLocaleString()} nodes and ${S.budget.edges.toLocaleString()} edges. Remove filtered nodes, or collapse the largest hub, to free room. The rest of the graph stays in Neo4j.</div>`,
+    `<button class="btn outline" data-close="1">Close</button><button class="btn outline" data-room="collapse">Collapse a hub</button><button class="btn primary" data-room="filtered" ${filtered ? '' : 'disabled'}>Remove filtered nodes (${filtered})</button>`);
+  const filteredBtn = $('[data-room=filtered]', bg);
+  if (filteredBtn) filteredBtn.onclick = () => { if (!filtered) return; removeFiltered(); bg.remove(); };
+  $('[data-room=collapse]', bg).onclick = () => { collapseLargestHub(); bg.remove(); };
+}
+function collapseLargestHub() {
+  const ranked = realNodes().toArray().map(n => ({ n, k: n.connectedEdges().filter(e => !e.data('virtual') && !e.data('meta')).length }))
+    .filter(x => x.k > 0).sort((a, b) => b.k - a.k);
+  if (!ranked.length) return toast('Nothing to collapse');
+  const hub = ranked[0].n;
+  const drop = hub.neighborhood('node').filter(n => !n.data('pinned') && !n.data('hubgroup') && !n.data('group'));
+  const groups = cy.nodes().filter(n => n.data('hubgroup') && n.data('hub') === hub.id());
+  if (!drop.length && !groups.length) return toast('The largest hub has only pinned neighbors');
+  pushUndo();
+  drop.remove();
+  groups.connectedEdges().remove();
+  groups.remove();
+  afterGraphChange();
+  toast(`Collapsed ${nodeCaption(hub.data())}`);
+  if (hiddenCount(hub) > HUB_THRESHOLD) groupHub(hub, { undo: false });
+}
+function addGraph(g, around = null, opts = {}) {
+  S.canvasRefused = false;
+  const ext = cy.extent(); const c0 = around && around.nonempty && around.nonempty() ? around.position() : { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 };
   const seen = new Set();
-  const fresh = (g.nodes || []).filter(n => !seen.has(n.id) && seen.add(n.id) && cy.getElementById(n.id).empty());
+  let fresh = (g.nodes || []).filter(n => n && !seen.has(n.id) && seen.add(n.id) && cy.getElementById(n.id).empty());
+  const keep = around ? [around.id()] : [];
+  const dropped = evictOldest(fresh.length, (g.edges || []).length, keep);
+  if (dropped) toast(`Dropped ${dropped.toLocaleString()} oldest unpinned node${dropped === 1 ? '' : 's'}`);
+  const roomN = Math.max(0, S.budget.nodes - canvasNodes());
+  const roomE = Math.max(0, S.budget.edges - canvasEdges());
+  const asked = fresh.length;
+  let trimmed = fresh.length > roomN;
+  fresh = fresh.slice(0, roomN);
+  S.canvasRefused = asked > 0 && fresh.length === 0;
+  const have = new Set(cy.nodes().map(n => n.id()));
+  fresh.forEach(n => have.add(n.id));
   const k = fresh.length;
   const nodeEls = fresh.map((n, i) => {
     // small batches: a ring around the expanded node; big batches: a sunflower spiral (no overlaps, O(n))
     const big = k > 60; const a = big ? i * 2.399963 : (2 * Math.PI * i) / Math.max(1, k);
     const r = big ? 34 * Math.sqrt(i + (around ? 4 : 0)) : around ? 90 + 6 * Math.sqrt(k) : 30 * Math.sqrt(i);
-    const data = { id: n.id, labels: n.labels, category: n.category, props: n.props, degree: n.degree ?? 0 };
+    const data = { id: n.id, labels: n.labels, category: n.category, props: n.props, degree: n.degree ?? 0, _seq: S.seq++ };
     data._s = nodeSize(data);
     return { group: 'nodes', data, position: { x: c0.x + r * Math.cos(a), y: c0.y + r * Math.sin(a) } };
   });
   let added = nodeEls.length ? cy.add(nodeEls) : cy.collection();
-  for (const n of g.nodes || []) { if (n.degree == null) continue; const ex = cy.getElementById(n.id); if (ex.nonempty() && ex._private.data.degree !== n.degree) ex.data('degree', n.degree); }
+  for (const n of g.nodes || []) { if (!n || n.degree == null) continue; const ex = cy.getElementById(n.id); if (ex.nonempty() && ex._private.data.degree !== n.degree) ex.data('degree', n.degree); }
   const edgeEls = []; const seenE = new Set();
   for (const e of g.edges || []) {
-    if (seenE.has(e.id) || cy.getElementById(e.id).nonempty() || cy.getElementById(e.source).empty() || cy.getElementById(e.target).empty()) continue;
+    if (!e || seenE.has(e.id) || cy.getElementById(e.id).nonempty() || !have.has(e.source) || !have.has(e.target)) continue;
     seenE.add(e.id); edgeEls.push({ group: 'edges', data: { id: e.id, type: e.type, source: e.source, target: e.target, props: e.props } });
   }
+  if (edgeEls.length > roomE) { edgeEls.length = roomE; trimmed = true; }
   if (edgeEls.length) added = added.union(addEdgesFast(edgeEls));
-  const missingDeg = (g.nodes || []).filter(n => n.degree == null).map(n => n.id);
-  if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => cy.getElementById(n.id).data('degree', n.degree)); R.redraw(); });
+  const missingDeg = fresh.filter(n => n.degree == null).map(n => n.id);
+  if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => { const el = cy.getElementById(n.id); if (el.nonempty()) el.data('degree', n.degree); }); R.redraw(); });
+  let message = g.truncation?.message || null;
+  if (trimmed && !S.canvasRefused) message = message || `Stopped at the canvas budget (${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges).`;
+  if (S.canvasRefused) offerCanvasRoom(message || `Canvas is full (${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges).`);
+  else if (message && opts.toastTruncation !== false) toast(message, 4500);
   afterGraphChange();
   return added;
 }
 function afterGraphChange() {
   $('#landing').classList.toggle('hidden', cy.nodes().length > 0);
   applyEdgeGrouping(); applyFilters(); if (Object.values(S.cat).some(c => c.sizeRule?.prop)) { refreshRanges(); syncSizes(); } R.indexParallel(); updateHighlight(); R.redraw(); drawMinimap();
-  if (S.rightPanel) renderRightPanel(); markDirty();
+  if (S.rightPanel) renderRightPanel(); updateBudgetChip(); markDirty();
 }
 
 // ---------- undo / redo / snapshots ----------------------------------------------------
@@ -363,47 +444,101 @@ function runLayout(opts = {}) {
 }
 
 // ---------- expand -------------------------------------------------------------------
-const EXPAND_THRESHOLD = 50;
+let EXPAND_THRESHOLD = 50;
+let HUB_THRESHOLD = 50; // hidden neighbours above the expand cap are grouped, not drawn (tests may lower it)
+function noteTruncation(g, hiddenBefore) {
+  const got = (g.nodes || []).length;
+  if (!g.truncation) g.truncation = { truncated: false, reasons: [], message: null };
+  const reasons = g.truncation.reasons || [];
+  if (reasons.includes('node_budget') && got === 0) return g;
+  if (hiddenBefore != null && got < hiddenBefore) {
+    let message = `showing ${got.toLocaleString()} of ${hiddenBefore.toLocaleString()} neighbors`;
+    if (reasons.includes('edge_budget')) message += `; edges stopped at ${(g.edges || []).length.toLocaleString()}`;
+    g.truncation.message = message;
+    g.truncation.truncated = true;
+  }
+  return g;
+}
 async function expand(nodes, { categories = null, types = null, limit = EXPAND_THRESHOLD, order = 'neighbors' } = {}) {
-  nodes = nodes.filter(n => !n.data('group')); if (!nodes.length) return;
-  const visible = realNodes().map(n => n.id());
+  nodes = nodes.filter(n => !n.data('group') && !n.data('hubgroup')); if (!nodes.length) return;
+  const want = Math.min(limit || EXPAND_THRESHOLD, EXPAND_THRESHOLD);
+  pushUndo();
   try {
-    const g = await api('/api/expand', { ids: nodes.map(n => n.id()), visible, categories, types, limit, order });
-    pushUndo();
+    const dropped = S.budget.lru ? evictOldest(want, want, nodes.map(n => n.id())) : 0;
+    if (dropped) toast(`Dropped ${dropped.toLocaleString()} oldest unpinned node${dropped === 1 ? '' : 's'}`);
+    const page = Math.min(want, Math.max(0, S.budget.nodes - canvasNodes()));
+    if (page <= 0) { S.undo.pop(); updateUndoBtns(); return offerCanvasRoom('No room for more nodes.'); }
+    const hiddenBefore = nodes.length === 1 ? hiddenCount(nodes[0]) : null;
+    const visible = realNodes().map(n => n.id());
+    const g = noteTruncation(await api('/api/expand', graphBody({ ids: nodes.map(n => n.id()), visible, categories, types, limit: page, order })), hiddenBefore);
     const added = addGraph(g, nodes.length === 1 ? nodes[0] : null);
     const newNodes = added.nodes();
-    if (!newNodes.length && !added.edges().length) { S.undo.pop(); updateUndoBtns(); return toast('No more neighbors to show'); }
+    if (S.canvasRefused || (!newNodes.length && !added.edges().length)) {
+      S.undo.pop(); updateUndoBtns();
+      if (!S.canvasRefused) toast(g.truncation?.message || 'No more neighbors to show');
+      return;
+    }
     if (S.activeRule) { applyNodeGrouping(); afterGraphChange(); }
     runLayout(S.prefs.incremental ? { name: 'force', onlyNew: newNodes } : { name: 'force' });
-    toast(`Added ${newNodes.length} node${newNodes.length === 1 ? '' : 's'}`);
-  } catch (e) { toast('Expand failed: ' + e.message, 4000); }
+    if (!g.truncation?.message) toast(`Added ${newNodes.length} node${newNodes.length === 1 ? '' : 's'}`);
+  } catch (e) { S.undo.pop(); updateUndoBtns(); toast('Expand failed: ' + e.message, 4000); }
 }
-let HUB_THRESHOLD = 300; // hidden neighbours above this are grouped per category (tests lower it)
-async function groupHub(hub) {
-  // A hub with hundreds+ hidden neighbors is shown as one group node per (category, edge type).
+async function groupHub(hub, opts = {}) {
+  // More hidden neighbors than one expand page: one group node per label and edge type.
   const sum = await api('/api/neighbors', { ids: [hub.id()], visible: realNodes().map(n => n.id()) });
-  pushUndo();
-  const nodes = [], edges = []; const c = hub.position(); let k = 0; const total = Object.values(sum.combos).reduce((a, t) => a + Object.keys(t).length, 0);
-  for (const [cat, types] of Object.entries(sum.combos)) for (const [t, cnt] of Object.entries(types)) {
+  const groups = [];
+  for (const [cat, types] of Object.entries(sum.combos)) for (const [t, cnt] of Object.entries(types)) groups.push([cat, t, cnt]);
+  const fresh = groups.filter(([cat, t]) => cy.getElementById(`hub:${hub.id()}:${cat}:${t}`).empty()).length;
+  if (opts.undo !== false) pushUndo();
+  if (canvasNodes() + fresh > S.budget.nodes && S.budget.lru) evictOldest(fresh, fresh, [hub.id()]);
+  if (canvasNodes() + fresh > S.budget.nodes) {
+    if (opts.undo !== false) { S.undo.pop(); updateUndoBtns(); }
+    return offerCanvasRoom('No room for hub groups.');
+  }
+  const nodes = [], edges = []; const c = hub.position(); let k = 0;
+  for (const [cat, t, cnt] of groups) {
     const id = `hub:${hub.id()}:${cat}:${t}`; const ex = cy.getElementById(id);
-    const caption = `${cat} (${sum.approximate ? '~' : ''}${cnt.toLocaleString()})`;
+    const caption = `${cat}${t ? ' · ' + t : ''} ×${sum.approximate ? '~' : ''}${cnt.toLocaleString()}`;
     if (ex.nonempty()) { ex.data({ count: cnt, caption }); continue; }
-    const a = (2 * Math.PI * k++) / Math.max(1, total), r = 150 + 8 * total;
-    nodes.push({ group: 'nodes', data: { id, hubgroup: true, hub: hub.id(), category: cat, type: t, count: cnt, caption, labels: [cat], props: {}, degree: 0, _s: nodeSize({ hubgroup: true, count: cnt }) }, position: { x: c.x + r * Math.cos(a), y: c.y + r * Math.sin(a) } });
+    const a = (2 * Math.PI * k++) / Math.max(1, groups.length), r = 150 + 8 * groups.length;
+    nodes.push({ group: 'nodes', data: { id, hubgroup: true, hub: hub.id(), category: cat, type: t, count: cnt, caption, labels: [cat], props: {}, degree: 0, _seq: S.seq++, _s: nodeSize({ hubgroup: true, count: cnt }) }, position: { x: c.x + r * Math.cos(a), y: c.y + r * Math.sin(a) } });
     edges.push({ group: 'edges', data: { id: id + ':e', source: hub.id(), target: id, type: t, virtual: true, props: {} } });
   }
-  cy.add(nodes); cy.add(edges); afterGraphChange();
-  toast(`${sum.total.toLocaleString()} neighbors grouped by category: double-click a group to load its nodes`, 4000);
+  if (nodes.length) cy.add(nodes);
+  if (edges.length) cy.add(edges);
+  afterGraphChange();
+  toast(`${sum.total.toLocaleString()} neighbors grouped by label. Double-click a group to load ${EXPAND_THRESHOLD} at a time.`, 4000);
 }
-async function loadHubGroup(g, n = 200) {
+async function loadHubGroup(g, n) {
   const d = g.data();
+  const want = Math.max(1, Math.min(n || EXPAND_THRESHOLD, EXPAND_THRESHOLD));
+  pushUndo();
   try {
-    const r = await api('/api/expand', { ids: [d.hub], visible: realNodes().map(x => x.id()), categories: [d.category], types: [d.type], limit: n });
-    pushUndo(); const added = addGraph(r, g); const got = added.nodes().length; const left = d.count - got;
-    if (left <= 0 || !r.more) g.remove(); else g.data({ count: left, caption: `${d.category} (${left.toLocaleString()})` });
-    afterGraphChange(); if (got) runLayout({ name: 'force', onlyNew: added.nodes(), fit: false });
-    toast(`Loaded ${got} ${d.category} node${got === 1 ? '' : 's'}${left > 0 && r.more ? `, ${left.toLocaleString()} left in the group` : ''}`);
-  } catch (e) { toast('Load failed: ' + e.message, 4000); }
+    if (S.budget.lru) evictOldest(want, want, [d.hub, g.id()]);
+    const page = Math.min(want, Math.max(0, S.budget.nodes - canvasNodes()));
+    if (page <= 0) { S.undo.pop(); updateUndoBtns(); return offerCanvasRoom('No room for more nodes.'); }
+    const r = await api('/api/expand', graphBody({ ids: [d.hub], visible: realNodes().map(x => x.id()), categories: [d.category], types: d.type ? [d.type] : null, limit: page, q: d.filter || null }));
+    const added = addGraph(r, g, { toastTruncation: false });
+    if (S.canvasRefused || !added.nodes().length) {
+      S.undo.pop(); updateUndoBtns();
+      if (!S.canvasRefused) toast(r.truncation?.message || 'No matching nodes in this group');
+      return;
+    }
+    const got = added.nodes().length; const left = Math.max(0, d.count - got);
+    if (left <= 0 || !r.more) g.remove();
+    else g.data({ count: left, caption: `${d.category}${d.type ? ' · ' + d.type : ''} ×${left.toLocaleString()}` });
+    afterGraphChange();
+    runLayout({ name: 'force', onlyNew: added.nodes(), fit: false });
+    const tail = r.truncation?.message ? ` — ${r.truncation.message}` : (left > 0 && r.more ? `, ${left.toLocaleString()} left in the group` : '');
+    toast(`Loaded ${got} ${d.category} node${got === 1 ? '' : 's'}${tail}`, tail ? 4500 : 2200);
+  } catch (e) { S.undo.pop(); updateUndoBtns(); toast('Load failed: ' + e.message, 4000); }
+}
+function openHubFilter(g) {
+  const d = g.data();
+  const bg = modal(`Open ${d.category}`, `<div class="section-d">${esc(d.caption)}. Filter by name, tag, id, or account, or leave the box blank to page ${EXPAND_THRESHOLD} at a time.</div>
+    <div class="field">Filter<input type="text" data-hf="1" value="${esc(d.filter || '')}" placeholder="name, tag, id, or account"></div>`,
+    `<button class="btn outline" data-close="1">Cancel</button><button class="btn primary" data-hgo="1">Load ${EXPAND_THRESHOLD}</button>`);
+  $('[data-hgo]', bg).onclick = () => { g.data({ filter: $('[data-hf]', bg).value.trim() }); bg.remove(); loadHubGroup(g, EXPAND_THRESHOLD); };
 }
 async function expandDefault(node) {
   if (node.data('hubgroup')) return loadHubGroup(node);
@@ -467,7 +602,7 @@ function pickSearch(i) {
 }
 async function fetchEdgesAmongVisible() {
   const ids = realNodes().map(n => n.id()); if (ids.length < 2) return;
-  const r = await api('/api/edges-between', { ids }); addGraph({ nodes: [], edges: r.edges });
+  const r = await api('/api/edges-between', graphBody({ ids })); addGraph({ nodes: [], edges: r.edges, truncation: r.truncation });
 }
 function closeSearch() { $('#search-dd').classList.add('hidden'); }
 
@@ -749,14 +884,14 @@ function backgroundMenuItems() {
 async function expandSubmenu(nodes) {
   const r = await api('/api/neighbors', { ids: nodes.map(n => n.id()), visible: realNodes().map(n => n.id()) });
   return [
-    { label: 'All neighbors', right: String(r.total), act: () => r.total > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r) : expand(nodes) },
+    { label: 'All neighbors', right: String(r.total), act: () => r.total > HUB_THRESHOLD && nodes.length === 1 ? groupHub(nodes[0]) : r.total > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r) : expand(nodes) },
     '-',
     ...Object.entries(r.categories).sort((a, b) => b[1] - a[1]).map(([c, n]) => ({ html: esc(c), count: n, act: () => n > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r, c) : expand(nodes, { categories: [c] }) })),
     '-', { label: 'More options…', act: () => openSelectiveExpand(nodes, r) },
   ];
 }
 function nodeMenuItems(node) {
-  if (node.data('hubgroup')) return [{ header: node.data('caption') }, { label: 'Load 200 nodes', icon: 'PlayOutline', act: () => loadHubGroup(node, 200) }, { label: 'Load 1,000 nodes', icon: 'PlayOutline', act: () => loadHubGroup(node, 1000) }, { label: 'Load all (up to 5,000)', icon: 'PlayOutline', act: () => loadHubGroup(node, 5000) }, '-', { label: 'Remove group', icon: 'MinusCircleOutline', act: () => removeEles(node) }];
+  if (node.data('hubgroup')) return [{ header: node.data('caption') }, { label: `Load next ${EXPAND_THRESHOLD}`, icon: 'PlayOutline', act: () => loadHubGroup(node) }, { label: 'Filter members…', icon: 'FilterVariant', act: () => openHubFilter(node) }, '-', { label: 'Remove group', icon: 'MinusCircleOutline', act: () => removeEles(node) }];
   const sel = cy.$('node:selected').filter(n => !n.data('group')); const nodes = sel.length ? sel : cy.collection(node);
   const pinned = nodes.every(n => n.data('pinned'));
   const g = node.data('group');
@@ -800,7 +935,8 @@ async function openSelectiveExpand(nodes, summary = null, preCat = null) {
     if (!cats.length) return toast('Select at least one category');
     let types = null;
     if (cats.length === 1) { const row = $(`[data-xcat="${CSS.escape(cats[0])}"]`, bg).closest('.xp-row'); const t = $('input[type=radio]:checked', row)?.value; if (t) types = [t]; }
-    const lim = $('[data-xlim]', bg).checked ? +$('[data-xn]', bg).value || EXPAND_THRESHOLD : 5000;
+    const cap = EXPAND_THRESHOLD;
+    const lim = $('[data-xlim]', bg).checked ? Math.min(cap, +$('[data-xn]', bg).value || cap) : cap;
     bg.remove(); expand(nodes, { categories: cats, types, limit: lim, order: $('[data-xorder]', bg).value });
   };
 }
@@ -841,22 +977,51 @@ function openCodeQuery(text = 'MATCH (a:AWSAccount)-[r:RESOURCE]->(b:AWSS3Bucket
     <textarea class="cypher" data-cq="1" spellcheck="false">${esc(text)}</textarea><div data-cqout="1"></div>`,
     `<input type="text" data-cqname="1" placeholder="Name to save locally" style="margin-right:auto;padding:7px;border:1px solid #c8c8c8;border-radius:3px"><button class="btn outline" data-cqsave="1">Save</button><button class="btn outline" data-cqprev="1">Preview</button><button class="btn primary" data-cqadd="1">Add to visualization</button>`, { width: 820 });
   const out = $('[data-cqout]', bg); const q = () => $('[data-cq]', bg).value;
-  $('[data-cqprev]', bg).onclick = async () => { try { const r = await api('/api/cypher', { query: q() }); out.innerHTML = `<div class="section-d" style="margin-top:8px">${r.nodes.length} nodes · ${r.edges.length} edges · ${r.rows.length} rows${r.truncated ? ' (truncated)' : ''}</div>` + (r.columns.length ? `<div class="tbl-wrap"><table class="sel"><thead><tr>${r.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${r.rows.slice(0, 20).map(row => `<tr>${row.map(v => `<td>${esc(fmt(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''); } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
+  $('[data-cqprev]', bg).onclick = async () => { try { const r = await api('/api/cypher', graphBody({ query: q() })); const note = r.truncation?.message ? ` — ${esc(r.truncation.message)}` : ''; out.innerHTML = `<div class="section-d" style="margin-top:8px">${r.nodes.length} nodes · ${r.edges.length} edges · ${r.rows.length} rows${note}</div>` + (r.columns.length ? `<div class="tbl-wrap"><table class="sel"><thead><tr>${r.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${r.rows.slice(0, 20).map(row => `<tr>${row.map(v => `<td>${esc(fmt(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''); } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
   $('[data-cqadd]', bg).onclick = async () => { const ok = await runQueryToGraph(q(), out); if (ok) bg.remove(); };
   $('[data-cqsave]', bg).onclick = () => { const name = $('[data-cqname]', bg).value.trim() || 'Untitled query'; const l = JSON.parse(localStorage.getItem('gx:queries') || '[]'); l.push({ name, cypher: q(), tags: ['local'] }); localStorage.setItem('gx:queries', JSON.stringify(l)); toast('Query saved locally'); if (S.rightPanel === 'queries') renderRightPanel(); };
 }
 async function runQueryToGraph(cypher, errEl = null) {
+  let pushed = false;
   try {
-    const r = await api('/api/cypher', { query: cypher });
-    if (!r.nodes.length) { (errEl ? (errEl.innerHTML = '<div class="err">The query returned no nodes.</div>') : toast('The query returned no nodes')); return false; }
-    pushUndo(); const added = addGraph(r); await fetchEdgesAmongVisible();
-    runLayout({ fit: true }); toast(`Added ${added.nodes().length} nodes from the query`); return true;
-  } catch (e) { if (errEl) errEl.innerHTML = `<div class="err">${esc(e.message)}</div>`; else toast(e.message, 4000); return false; }
+    const want = Math.min(S.budget.cypher_limit || 500, S.budget.nodes);
+    pushUndo();
+    pushed = true;
+    if (S.budget.lru) evictOldest(want, want);
+    if (canvasNodes() >= S.budget.nodes) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      offerCanvasRoom('No room for query results.');
+      return false;
+    }
+    const r = await api('/api/cypher', graphBody({ query: cypher }));
+    if (!r.nodes.length) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      const msg = r.truncation?.message || 'The query returned no nodes.';
+      if ((r.truncation?.reasons || []).includes('node_budget')) offerCanvasRoom(msg);
+      else if (errEl) errEl.innerHTML = `<div class="err">${esc(msg)}</div>`;
+      else toast(msg);
+      return false;
+    }
+    const added = addGraph(r, null, { toastTruncation: false });
+    await fetchEdgesAmongVisible();
+    if (S.canvasRefused || !added.nodes().length) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      return false;
+    }
+    runLayout({ fit: true });
+    if (!r.truncation?.message) toast(`Added ${added.nodes().length} nodes from the query`);
+    else toast(r.truncation.message, 4500);
+    return true;
+  } catch (e) {
+    if (pushed) { S.undo.pop(); updateUndoBtns(); }
+    if (errEl) errEl.innerHTML = `<div class="err">${esc(e.message)}</div>`; else toast(e.message, 4000);
+    return false;
+  }
 }
 async function openDataModel() {
   const sc = S.schema = await api('/api/schema');
   const bg = modal('Understand your data model', `<div style="display:flex;gap:14px"><div id="dm-cy" style="flex:2"></div><div style="flex:1;max-height:420px;overflow:auto" data-dminfo="1"></div></div>
-    <div class="section-d" style="margin-top:8px">${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} edge types (links sampled from the database). Click a category for its properties.</div>`, '', { width: 1100 });
+    <div class="section-d" style="margin-top:8px">Whole graph: ${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas. ${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} relationship types. Click a category for its properties.</div>`, '', { width: 1100 });
   const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: `${c} (${v.count})`, cat: c } })),
     ...sc.links.filter(l => l.source !== l.target).map((l, i) => ({ data: { id: 'l' + i, source: 'c:' + l.source, target: 'c:' + l.target, label: l.type } }))];
   const dm = cytoscape({ container: $('#dm-cy', bg), elements: els, wheelSensitivity: 0.3, style: [
@@ -1004,6 +1169,7 @@ function mainMenuItems() {
     { label: S.viz.autosave ? 'Switch auto-save off' : 'Switch auto-save on', disabled: !S.viz.saved, act: () => { S.viz.autosave = !S.viz.autosave; updateSaveChip(); } },
     '-', { label: 'Export', icon: 'Download', sub: [{ label: 'Image (PNG)…', icon: 'ImageOutline', act: openExportImage }, { label: 'Data (CSV, JSON)…', icon: 'Table', act: () => openExportData(false) }] },
     '-', { label: 'Understand your data model', icon: 'DatabaseOutline', act: openDataModel },
+    { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: document.body.classList.contains('dark') ? 'Light theme' : 'Dark theme', icon: 'ThemeLightDark', act: toggleTheme },
     { label: 'Keyboard shortcuts & help', icon: 'KeyboardOutline', act: openHelp },
   ];
@@ -1015,7 +1181,7 @@ const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
-  'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch,
+  'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch, 'budget': openBudgetSettings,
   'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
   'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
   'minimap': () => { S.minimap = !S.minimap; $('#minimap').classList.toggle('hidden', !S.minimap); $('#btn-minimap').classList.toggle('on', S.minimap); drawMinimap(); },
@@ -1057,7 +1223,10 @@ $('#rightpanel').addEventListener('click', e => {
   if (d.ewidth) return widthPop(t, d.ewidth);
   if (d.capdel) { const [c, p] = d.capdel.split('|'); catStyle(c).caption = (catStyle(c).caption || []).filter(x => x !== p); restyle(); return renderRightPanel(); }
   if (d.ecapall) { S.edgeCaptionsAlways = !S.edgeCaptionsAlways; restyle(); return renderRightPanel(); }
-  if (d.d === 'gear') return showMenu([{ label: 'Reset styles to default', icon: 'Refresh', act: () => { localStorage.removeItem('gx:styles'); initStyles(true); restyle(); renderRightPanel(); toast('Styles reset to defaults'); } }], t.getBoundingClientRect().left - 200, t.getBoundingClientRect().top - 50);
+  if (d.d === 'gear') return showMenu([
+    { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
+    { label: 'Reset styles to default', icon: 'Refresh', act: () => { localStorage.removeItem('gx:styles'); initStyles(true); restyle(); renderRightPanel(); toast('Styles reset to defaults'); } },
+  ], t.getBoundingClientRect().left - 220, t.getBoundingClientRect().top - 50);
   if (d.pref) { S.prefs[d.pref] = !S.prefs[d.pref]; localStorage.setItem('gx:prefs', JSON.stringify(S.prefs)); return renderRightPanel(); }
   if (d.lay && !e.target.closest('select,button.btn,.switch')) { S.layout.name = d.lay; return renderRightPanel(); }
   if (d.lfast) { S.layout.fast = !S.layout.fast; return renderRightPanel(); }
@@ -1146,13 +1315,142 @@ function startLasso(oe, edge) {
   window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
 }
 
+function detectGpu() {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (!gl) return { kind: 'unknown', renderer: '' };
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : (gl.getParameter(gl.RENDERER) || ''));
+    const software = /swiftshader|llvmpipe|softpipe|software|basic render/i.test(renderer);
+    return { kind: software ? 'software' : (renderer ? 'hardware' : 'unknown'), renderer };
+  } catch (e) { return { kind: 'unknown', renderer: '' }; }
+}
+function clampBudget(v, ceiling, fallback) {
+  const n = parseInt(v, 10);
+  const pick = n > 0 ? n : fallback;
+  return Math.max(1, Math.min(ceiling, pick || ceiling));
+}
+async function fetchSuggestion() {
+  const gpu = detectGpu();
+  try {
+    return await api('/api/budget/suggest', {
+      gpu: gpu.kind, renderer: gpu.renderer,
+      cpu: navigator.hardwareConcurrency || 0,
+      device_memory_gb: navigator.deviceMemory || 0,
+    });
+  } catch (e) {
+    const s = S.budget.suggestion || {};
+    return { nodes: s.nodes || S.budget.serverNodes, edges: s.edges || S.budget.serverEdges, expand_limit: s.expand_limit || S.budget.expand_max, cypher_limit: s.cypher_limit || S.budget.cypher_max, reason: s.reason || '' };
+  }
+}
+function applyBudgetNumbers(saved) {
+  const b = S.budget;
+  b.nodes = clampBudget(saved.nodes, b.serverNodes, b.serverNodes);
+  b.edges = clampBudget(saved.edges, b.serverEdges, b.serverEdges);
+  b.expand_limit = clampBudget(saved.expand_limit, b.expand_max, Math.min(50, b.expand_max));
+  b.cypher_limit = clampBudget(saved.cypher_limit, b.cypher_max, Math.min(500, b.cypher_max));
+  b.lru = !!saved.lru;
+  EXPAND_THRESHOLD = b.expand_limit;
+  HUB_THRESHOLD = b.expand_limit;
+}
+async function applyServerBudget(st) {
+  const b = st.budget || {};
+  S.budget.serverNodes = b.max_nodes || S.budget.serverNodes;
+  S.budget.serverEdges = b.max_edges || S.budget.serverEdges;
+  S.budget.expand_max = b.expand_limit || S.budget.expand_max;
+  S.budget.cypher_max = b.cypher_limit || S.budget.cypher_max;
+  S.budget.resources = b.resources || null;
+  S.budget.suggestion = b.suggestion || null;
+  S.budget.configFile = b.config_file || 'gx.local.json';
+  let cfg = b.config || null;
+  let announce = !!b.config_created;
+  // The file is written at startup from CPU and RAM. The first browser open adds the GPU.
+  if (cfg && cfg.source === 'auto' && (!cfg.gpu || cfg.gpu === 'unknown')) {
+    const gpu = detectGpu();
+    if (gpu.kind && gpu.kind !== 'unknown') {
+      try {
+        const refined = await api('/api/budget/refine', {
+          gpu: gpu.kind, renderer: gpu.renderer,
+          cpu: navigator.hardwareConcurrency || 0,
+          device_memory_gb: navigator.deviceMemory || 0,
+        });
+        if (refined.config) cfg = refined.config;
+        if (refined.updated) announce = true;
+      } catch (e) { /* keep the file the server already wrote */ }
+    }
+  }
+  if (!cfg || !(parseInt(cfg.nodes, 10) > 0)) {
+    const sug = b.suggestion || {};
+    cfg = {
+      nodes: sug.nodes || S.budget.serverNodes, edges: sug.edges || S.budget.serverEdges,
+      expand_limit: sug.expand_limit, cypher_limit: sug.cypher_limit, lru: false, reason: sug.reason || '',
+    };
+    announce = true;
+  }
+  S.budget.reason = cfg.reason || '';
+  applyBudgetNumbers(cfg);
+  S.db = { nodes: st.nodes || 0, edges: st.edges || 0 };
+  updateBudgetChip();
+  if (announce) toast(`Working set set for this machine: ${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges`, 4500);
+}
+function openBudgetSettings() {
+  const b = S.budget;
+  const file = b.configFile || 'gx.local.json';
+  const hw = b.resources ? `${b.resources.cpu} CPU cores, ${Number(b.resources.ram_gb).toLocaleString()} GB RAM on this machine.` : '';
+  const bg = modal('Canvas budget', `<div class="section-d">Saved in ${esc(file)} and used again the next time the server starts. This server accepts up to ${b.serverNodes.toLocaleString()} nodes and ${b.serverEdges.toLocaleString()} edges. The rest of the graph stays in Neo4j.</div>
+    <div class="section-d" data-breason="1">${esc(b.reason || hw)}</div>
+    <div class="field">Nodes<input type="number" data-bn="1" min="1" max="${b.serverNodes}" value="${b.nodes}"></div>
+    <div class="field">Edges<input type="number" data-be="1" min="1" max="${b.serverEdges}" value="${b.edges}"></div>
+    <div class="field">Neighbors per expand<input type="number" data-bx="1" min="1" max="${b.expand_max}" value="${b.expand_limit}"></div>
+    <div class="field">Rows per query<input type="number" data-bc="1" min="1" max="${b.cypher_max}" value="${b.cypher_limit}"></div>
+    <label class="row"><input type="checkbox" data-bl="1" ${b.lru ? 'checked' : ''}> When the canvas is full, drop the oldest nodes that are not pinned</label>`,
+    `<button class="btn outline" data-bsug="1">Suggest for this machine</button><button class="btn outline" data-close="1">Cancel</button><button class="btn primary" data-bsave="1">Save</button>`, { width: 560 });
+  $('[data-bsug]', bg).onclick = async () => {
+    const s = await fetchSuggestion();
+    bg._suggestion = s;
+    $('[data-bn]', bg).value = s.nodes;
+    $('[data-be]', bg).value = s.edges;
+    $('[data-bx]', bg).value = s.expand_limit;
+    $('[data-bc]', bg).value = s.cypher_limit;
+    $('[data-breason]', bg).textContent = s.reason || '';
+  };
+  $('[data-bsave]', bg).onclick = async () => {
+    const saved = {
+      nodes: clampBudget($('[data-bn]', bg).value, b.serverNodes, b.nodes),
+      edges: clampBudget($('[data-be]', bg).value, b.serverEdges, b.edges),
+      expand_limit: clampBudget($('[data-bx]', bg).value, b.expand_max, b.expand_limit),
+      cypher_limit: clampBudget($('[data-bc]', bg).value, b.cypher_max, b.cypher_limit),
+      lru: $('[data-bl]', bg).checked,
+    };
+    const sug = bg._suggestion;
+    const same = (x, y) => Number(x) === Number(y);
+    const unchanged = same(saved.nodes, b.nodes) && same(saved.edges, b.edges) && same(saved.expand_limit, b.expand_limit) && same(saved.cypher_limit, b.cypher_limit);
+    const suggested = sug && same(sug.nodes, saved.nodes) && same(sug.edges, saved.edges) && same(sug.expand_limit, saved.expand_limit) && same(sug.cypher_limit, saved.cypher_limit);
+    saved.reason = suggested ? (sug.reason || '') : (unchanged ? (b.reason || '') : '');
+    try {
+      const res = await api('/api/budget', saved);
+      const cfg = res.config || saved;
+      S.budget.reason = cfg.reason || '';
+      applyBudgetNumbers(cfg);
+      updateBudgetChip(); bg.remove();
+      toast(`Canvas budget: ${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges`);
+    } catch (e) { toast('Could not save the working set: ' + e.message, 4000); }
+  };
+}
+
 // ---------- boot -----------------------------------------------------------------------
 async function boot() {
   paintIcons(); if (localStorage.getItem('gx:theme') === 'dark') document.body.classList.add('dark');
   sizeOverlay();
   S.cfg = await api('/api/styles');
   try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
-  try { const st = await api('/api/status'); $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · read-only`; $('#search-input').title = $('#conn').textContent; }
+  try {
+    const st = await api('/api/status');
+    $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · ${st.edges.toLocaleString()} edges · read-only`;
+    $('#search-input').title = $('#conn').textContent;
+    await applyServerBudget(st);
+  }
   catch (e) { $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`; }
   try { S.schema = await api('/api/schema'); } catch { S.schema = { categories: {}, types: {}, links: [] }; }
   initStyles();

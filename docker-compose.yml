@@ -4,6 +4,8 @@
 #   NEO4J_URI=bolt://127.0.0.1:7687 NEO4J_PASSWORD=tinkerlab-test .venv/bin/python seed_cartography.py --wipe --fixtures
 #   NEO4J_URI=bolt://127.0.0.1:7687 NEO4J_PASSWORD=tinkerlab-test .venv/bin/python server.py   # http://127.0.0.1:8744
 # run_local.py does all of this (and the same container/volume names), so the two are interchangeable.
+# The 15M node / 60M edge graph is `python3 run_local.py --live-scale` (heap 4G, page cache 8G).
+# This file keeps the small defaults.
 services:
   neo4j:
     image: neo4j:5.26-community

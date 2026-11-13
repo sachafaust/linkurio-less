@@ -30,23 +30,34 @@ def main():
     a = ap.parse_args()
     u = a.url.rstrip("/")
     _, st = call(u, "/api/status")
+    budget = st.get("budget") or {}
+    page_cap = int((budget.get("suggestion") or {}).get("expand_limit") or budget.get("expand_limit") or 50)
     _, hub = call(u, "/api/cypher", {"query": "MATCH (a:AWSAccount) RETURN a ORDER BY COUNT { (a)--() } DESC LIMIT 1"})
     hub = hub["nodes"][0]
     _, leaf = call(u, "/api/cypher", {"query": "MATCH (i:EC2Instance) RETURN i LIMIT 1"})
     leaf = leaf["nodes"][0]
-    # a big visible set: the first 5,000 nodes of the hub
-    _, page = call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": 5000})
+    # One page, never a multi-thousand expand. The canvas budget is what a real session holds.
+    _, page = call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": page_cap,
+                                      "on_screen": {"nodes": 1, "edges": 0},
+                                      "budget": {"nodes": budget.get("max_nodes", 2000), "edges": budget.get("max_edges", 5000)}})
+    if len(page["nodes"]) > page_cap:
+        raise SystemExit(f"expand returned {len(page['nodes'])} nodes, above the expand cap {page_cap}")
     visible = [n["id"] for n in page["nodes"]]
     ops = [
         ("schema (cold, then cached)", lambda: call(u, "/api/schema")),
         ("search 'fleet-1234' (no index: scan)", lambda: call(u, "/api/search?" + urllib.parse.urlencode({"q": "fleet-1234"}))),
         ("search 'payments' ", lambda: call(u, "/api/search?" + urllib.parse.urlencode({"q": "payments"}))),
         ("neighbor summary of the hub", lambda: call(u, "/api/neighbors", {"ids": [hub["id"]], "visible": []})),
-        ("expand hub, first 50", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": 50})),
-        ("expand hub, 50 most connected", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": 50, "order": "most"})),
-        ("expand hub, next 50 with 5,000 on screen", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": visible, "limit": 50})),
-        ("expand a leaf (EC2 instance)", lambda: call(u, "/api/expand", {"ids": [leaf["id"]], "visible": [], "limit": 50})),
-        ("edges among 5,000 visible nodes", lambda: call(u, "/api/edges-between", {"ids": visible})),
+        ("expand hub, first page", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": page_cap,
+                                                                        "on_screen": {"nodes": 1, "edges": 0},
+                                                                        "budget": {"nodes": budget.get("max_nodes", 2000), "edges": budget.get("max_edges", 5000)}})),
+        ("expand hub, one page, most connected", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": [], "limit": page_cap, "order": "most",
+                                                                                 "on_screen": {"nodes": 1, "edges": 0},
+                                                                                 "budget": {"nodes": budget.get("max_nodes", 2000), "edges": budget.get("max_edges", 5000)}})),
+        ("expand hub, next page with the first page on screen", lambda: call(u, "/api/expand", {"ids": [hub["id"]], "visible": visible, "limit": page_cap, "on_screen": {"nodes": len(visible) + 1, "edges": len(visible)}})),
+        ("expand a leaf (EC2 instance)", lambda: call(u, "/api/expand", {"ids": [leaf["id"]], "visible": [], "limit": page_cap})),
+        ("edges among the page on screen", lambda: call(u, "/api/edges-between", {"ids": visible, "on_screen": {"nodes": len(visible), "edges": 0}})),
+        ("cypher without a LIMIT stays inside the row cap", lambda: call(u, "/api/cypher", {"query": "MATCH (n) RETURN n"})),
     ]
     out = {"label": a.label, "when": time.strftime("%Y-%m-%d %H:%M %Z"), "db_nodes": st["nodes"], "db_edges": st["edges"],
            "hub_degree": hub.get("degree"), "results": []}

@@ -1,3 +1,12 @@
 .venv/
 .run/
 tests/downloads/
+__pycache__/
+*.pyc
+
+# Working set written on the first server launch. Each machine has its own.
+gx.local.json
+gx.local.json.tmp
+
+# Neo4j credentials. Copy .env.example to .env.
+.env
