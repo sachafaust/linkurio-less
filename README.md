@@ -1,13 +1,15 @@
-# Graph Explorer for Neo4j (Linkurious-style, Cartography data)
+# linkurio-less
+
+A Linkurious-style graph explorer for Neo4j, built for Cartography data. It's Linkurious with less: just Neo4j, the graph view and browsing.
 
 **Idea:** Linkurious-style graph explorer for a Cartography Neo4j (view and browse only)
 **Source:** Sacha direct
-**Status:** Ready for demo — Explore-phase experiment (v2: real-schema Cartography data, closer Linkurious look, large graphs)
+**Status:** Kept. Sacha approved it at the Nov 13, 2026 demo, and it moved here from its prototype folder in [grok-tinker-lab](https://github.com/sachafaust/grok-tinker-lab/tree/main/prototypes/2026-11-11-linkurious-neo4j), with full git history.
 
 ## Run it on your machine
 
 ```bash
-git pull && cd prototypes/2026-11-11-linkurious-neo4j
+git clone https://github.com/sachafaust/linkurio-less.git && cd linkurio-less
 python3 run_local.py            # or ./run.sh
 ```
 
@@ -125,7 +127,7 @@ The requirements are Python 3.9 or later, `pip install neo4j` (tested with drive
 Run it against your own Cartography Neo4j:
 
 ```bash
-cd prototypes/2026-11-11-linkurious-neo4j
+cd linkurio-less
 export NEO4J_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=...   # ideally a reader-role user
 export NEO4J_DATABASE=neo4j          # optional
 export SEARCH_FULLTEXT_INDEX=...     # optional: name of a full-text index for faster search
