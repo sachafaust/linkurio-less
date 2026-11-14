@@ -208,11 +208,17 @@ table.sel tr:hover td { background: var(--hover); cursor: pointer; }
 .modal .mh { display: flex; align-items: center; padding: 18px 22px 10px; font-size: 18px; font-weight: 500; letter-spacing: .3px; text-transform: uppercase; }
 .modal .mh .x { margin-left: auto; } .modal .mh .x + .x { margin-left: 2px; } .modal .mh .x i { width: 26px; height: 26px; }
 .modal.dm .dm-layout { display: flex; gap: 14px; align-items: stretch; }
+.modal.dm .dm-stage { position: relative; flex: 2; min-width: 0; }
 .modal.dm [data-dminfo] { flex: 1; min-width: 180px; max-height: 420px; overflow: auto; }
+.dm-wait { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 18px; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; font-size: 13px; transition: opacity .2s ease; }
+.dm-wait b { font-weight: 500; }
+.dm-wait small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.dm-wait.is-done { opacity: 0; }
 .modal.dm.is-full { width: calc(100vw - 32px); height: calc(100vh - 32px); max-width: none; max-height: none; }
 .modal.dm.is-full .mb { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .modal.dm.is-full .dm-layout { flex: 1; min-height: 0; }
-.modal.dm.is-full #dm-cy { height: auto; min-width: 0; min-height: 0; }
+.modal.dm.is-full .dm-stage { height: 100%; display: flex; flex-direction: column; }
+.modal.dm.is-full #dm-cy { height: auto; flex: 1; min-width: 0; min-height: 0; }
 .modal.dm.is-full [data-dminfo] { max-height: none; }
 .modal .mb { padding: 6px 22px 12px; overflow: auto; }
 .modal .mf { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px 18px; align-items: center; }
