@@ -8,7 +8,11 @@ Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`
 
 ## What it looks like
 
-`docs/screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
+`docs/screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `landing.png` is the empty-canvas start page. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
+
+The empty canvas opens on the start page.
+
+![Start page](docs/screenshots/landing.png)
 
 A hub with its neighbors grouped by category. Double-click a group to load that page.
 
