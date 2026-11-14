@@ -1449,9 +1449,19 @@ async function boot() {
     const st = await api('/api/status');
     $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · ${st.edges.toLocaleString()} edges · read-only`;
     $('#search-input').title = $('#conn').textContent;
+    const landNodes = $('#land-nodes');
+    if (landNodes) {
+      landNodes.textContent = st.nodes.toLocaleString();
+      $('#land-edges').textContent = st.edges.toLocaleString();
+      $('#land-db').textContent = st.database || '';
+    }
     await applyServerBudget(st);
   }
-  catch (e) { $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`; }
+  catch (e) {
+    $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`;
+    const landMeta = $('#land-meta');
+    if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = 'Neo4j is not reachable.'; }
+  }
   try { S.schema = await api('/api/schema'); } catch { S.schema = { categories: {}, types: {}, links: [] }; }
   initStyles();
   cy = cytoscape({ headless: true, styleEnabled: true, elements: [], style: cyStyle(), minZoom: 0.01, maxZoom: 6 });
