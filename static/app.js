@@ -995,19 +995,25 @@ async function openSelectiveExpand(nodes, summary = null, preCat = null) {
 }
 function openAdvancedSearch() {
   closeSearch();
-  const cats = Object.keys(S.schema?.categories || {}).sort(); const types = Object.keys(S.schema?.types || {}).sort();
   const gql = sourceIsGraphQL();
+  const entityTypes = gql && Array.isArray(S.schema?.entities) && S.schema.entities.length ? [...S.schema.entities].sort() : null;
+  const gqlFilters = gql && Array.isArray(S.schema?.filters) && S.schema.filters.length ? [...S.schema.filters].sort() : null;
+  const cats = entityTypes || Object.keys(S.schema?.categories || {}).sort(); const types = Object.keys(S.schema?.types || {}).sort();
+  const catLabel = entityTypes ? 'Any entity type' : 'Any category';
   const bg = modal('Advanced search', `<div class="row" style="gap:12px;flex-wrap:wrap">
       <input type="text" data-aq="1" value="${esc($('#search-input').value)}" placeholder="Search text" style="flex:1;min-width:200px;padding:7px;border:1px solid #c8c8c8;border-radius:3px">
       <select data-akind="1" style="padding:6px"><option value="node">Nodes</option>${gql ? '' : '<option value="edge">Edges</option>'}</select>
-      <select data-acat="1" style="padding:6px"><option value="">Any category</option>${cats.map(c => `<option>${esc(c)}</option>`).join('')}</select>
+      <select data-acat="1" style="padding:6px"><option value="">${esc(catLabel)}</option>${cats.map(c => `<option>${esc(c)}</option>`).join('')}</select>
       <select data-aprop="1" style="padding:6px"><option value="">Property…</option></select><input type="text" data-aval="1" placeholder="exact value" style="width:130px;padding:7px;border:1px solid #c8c8c8;border-radius:3px">
       ${gql ? '' : '<label class="row" title="Uses the full-text index if configured"><input type="checkbox" data-afz="1"> fuzzy</label>'}</div>
     <div data-ares="1" style="margin-top:10px"></div>`, `<span data-atotal="1" style="margin-right:auto;color:var(--muted);font-size:13px"></span><button class="btn outline" data-apage="-1">‹</button><button class="btn outline" data-apage="1">›</button><button class="btn outline" data-aaddsel="1">Add selected</button><button class="btn primary" data-aadd="1">Add all</button>`, { width: 900 });
   let off = 0, res = [];
   const kindSel = $('[data-akind]', bg), catSel = $('[data-acat]', bg), propSel = $('[data-aprop]', bg);
-  const fillCats = () => { const k = kindSel.value; catSel.innerHTML = `<option value="">${k === 'node' ? 'Any category' : 'Any type'}</option>` + (k === 'node' ? cats : types).map(c => `<option>${esc(c)}</option>`).join(''); fillProps(); };
-  const fillProps = () => { const c = catSel.value; const props = c && kindSel.value === 'node' ? Object.keys(S.schema.categories[c]?.props || {}).sort() : []; propSel.innerHTML = '<option value="">Property…</option>' + props.map(p => `<option>${esc(p)}</option>`).join(''); };
+  const fillCats = () => { const k = kindSel.value; const label = k === 'node' ? catLabel : 'Any type'; catSel.innerHTML = `<option value="">${esc(label)}</option>` + (k === 'node' ? cats : types).map(c => `<option>${esc(c)}</option>`).join(''); fillProps(); };
+  const fillProps = () => {
+    const props = gqlFilters || (catSel.value && kindSel.value === 'node' ? Object.keys(S.schema.categories[catSel.value]?.props || {}).sort() : []);
+    propSel.innerHTML = '<option value="">Property…</option>' + props.map(p => `<option>${esc(p)}</option>`).join('');
+  };
   async function go() {
     const k = kindSel.value; const p = new URLSearchParams({ q: $('[data-aq]', bg).value, type: k, limit: 20, offset: off, category: catSel.value, prop: propSel.value, value: $('[data-aval]', bg).value, fuzzy: $('[data-afz]', bg)?.checked ? '1' : '0' });
     try {
@@ -1024,6 +1030,7 @@ function openAdvancedSearch() {
   const add = pick => { if (!pick.length) return toast('Nothing selected'); pushUndo(); if (kindSel.value === 'node') addGraph({ nodes: pick, edges: [] }); else addGraph({ nodes: pick.flatMap(e => [e.sourceNode, e.targetNode]), edges: pick }); fetchEdgesAmongVisible(); bg.remove(); runLayout({ fit: true }); };
   $('[data-aadd]', bg).onclick = () => add(res);
   $('[data-aaddsel]', bg).onclick = () => add($$('[data-ai]', bg).filter(c => c.checked).map(c => res[+c.dataset.ai]));
+  fillProps();
   go();
 }
 function openCodeQuery(text = 'MATCH (a:AWSAccount)-[r:RESOURCE]->(b:AWSS3Bucket)\nRETURN a, r, b LIMIT 50') {

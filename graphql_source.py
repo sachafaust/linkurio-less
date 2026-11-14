@@ -87,8 +87,9 @@ fragment TypeRef on __Type {
 }
 """
 
-# Wiz declares graphSearch.query as GraphEntityQueryInput! A nullable $query is
-# rejected as the wrong type for that variable. $after stays nullable: the first page sends null.
+# Fallback when introspection has not named the graphSearch arguments. A tenant
+# schema replaces the variable type and drops fields that input does not have.
+# $after stays nullable: the first page sends null.
 SEARCH_QUERY = """
 query GraphSearch($query: GraphEntityQueryInput!, $projectId: String!, $first: Int, $after: String) {
   graphSearch(query: $query, projectId: $projectId, first: $first, after: $after) {
@@ -108,6 +109,240 @@ query GraphSearch($query: GraphEntityQueryInput!, $projectId: String!, $first: I
   }
 }
 """
+
+_TEXT_OPS = ("CONTAINS", "contains", "CONTAINS_ANY", "STARTS_WITH", "EQUALS", "equals")
+
+
+def _schema_types(payload):
+    schema = ((payload or {}).get("data") or {}).get("__schema")
+    if not isinstance(schema, dict):
+        return {}, {}
+    types = {}
+    for item in schema.get("types") or []:
+        if isinstance(item, dict) and item.get("name"):
+            types[item["name"]] = item
+    return schema, types
+
+
+def _print_type(type_ref):
+    if not isinstance(type_ref, dict):
+        return ""
+    kind = type_ref.get("kind")
+    if kind == "NON_NULL":
+        inner = _print_type(type_ref.get("ofType"))
+        return f"{inner}!" if inner else ""
+    if kind == "LIST":
+        inner = _print_type(type_ref.get("ofType"))
+        return f"[{inner}]" if inner else ""
+    return str(type_ref.get("name") or "")
+
+
+def _graph_search_field(payload):
+    schema, types = _schema_types(payload)
+    query_name = (schema.get("queryType") or {}).get("name")
+    for field in (types.get(query_name) or {}).get("fields") or []:
+        if isinstance(field, dict) and field.get("name") == "graphSearch" and field.get("args"):
+            return field
+    return None
+
+
+def _field_arg(field, name):
+    for arg in (field or {}).get("args") or []:
+        if isinstance(arg, dict) and arg.get("name") == name:
+            return arg
+    return None
+
+
+def _input_fields(types, type_ref):
+    node = type_ref if isinstance(type_ref, dict) else {}
+    while node.get("kind") in ("NON_NULL", "LIST"):
+        node = node.get("ofType") or {}
+    named = types.get(node.get("name") or "") or {}
+    if named.get("kind") != "INPUT_OBJECT":
+        return {}
+    return {
+        item["name"]: item for item in named.get("inputFields") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+
+
+def _enum_names(types, type_ref):
+    node = type_ref if isinstance(type_ref, dict) else {}
+    while node.get("kind") in ("NON_NULL", "LIST"):
+        node = node.get("ofType") or {}
+    named = types.get(node.get("name") or "") or {}
+    if named.get("kind") != "ENUM":
+        return []
+    return [item["name"] for item in named.get("enumValues") or [] if isinstance(item, dict) and item.get("name")]
+
+
+def _is_list_type(type_ref):
+    node = type_ref if isinstance(type_ref, dict) else {}
+    while node.get("kind") == "NON_NULL":
+        node = node.get("ofType") or {}
+    return node.get("kind") == "LIST"
+
+
+def wiz_search_hints(payload):
+    """Entity types and where-fields graphSearch can filter on. Both may be empty."""
+    field = _graph_search_field(payload)
+    arg = _field_arg(field, "query")
+    if not arg:
+        return [], []
+    _, types = _schema_types(payload)
+    query_fields = _input_fields(types, arg.get("type"))
+    entities = _enum_names(types, (query_fields.get("type") or {}).get("type"))
+    filters = sorted(_input_fields(types, (query_fields.get("where") or {}).get("type")))
+    return sorted(entities), filters
+
+
+def _wiz_document(query_type, full, project):
+    variables = [f"$query: {query_type}", "$first: Int", "$after: String"]
+    arguments = ["query: $query", "first: $first", "after: $after"]
+    if project:
+        variables.insert(1, "$projectId: String!")
+        arguments.insert(1, "projectId: $projectId")
+    body = "id name type properties" if full else "id name type"
+    return (
+        f"query GraphSearch({', '.join(variables)}) {{\n"
+        f"  graphSearch({', '.join(arguments)}) {{\n"
+        f"    totalCount\n"
+        f"    pageInfo {{ hasNextPage endCursor }}\n"
+        f"    nodes {{ entities {{ {body} }} }}\n"
+        f"  }}\n"
+        f"}}\n"
+    )
+
+
+def _clean_value(types, type_ref, value):
+    """Keep only values the input type accepts. A list and a single value coerce either way."""
+    if not isinstance(type_ref, dict):
+        return value
+    kind = type_ref.get("kind")
+    if kind == "NON_NULL":
+        if value is None:
+            return None
+        return _clean_value(types, type_ref.get("ofType"), value)
+    if kind == "LIST":
+        items = value if isinstance(value, list) else [value]
+        cleaned = []
+        for item in items:
+            one = _clean_value(types, type_ref.get("ofType"), item)
+            if one is not None:
+                cleaned.append(one)
+        return cleaned
+    name = type_ref.get("name")
+    named = types.get(name or "") or {}
+    named_kind = named.get("kind") or kind
+    if named_kind == "ENUM":
+        allowed = {item.get("name") for item in named.get("enumValues") or [] if isinstance(item, dict)}
+        if isinstance(value, list):
+            value = value[0] if len(value) == 1 else None
+        return value if value in allowed else None
+    if named_kind == "INPUT_OBJECT":
+        if not isinstance(value, dict):
+            return None
+        fields = _input_fields(types, type_ref)
+        out = {}
+        for key, item in value.items():
+            if key not in fields:
+                continue
+            cleaned = _clean_value(types, fields[key].get("type"), item)
+            if cleaned in (None, [], {}):
+                continue
+            out[key] = cleaned
+        return out
+    if name == "Boolean":
+        return value if isinstance(value, bool) else None
+    if name == "Int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+    if name in ("String", "ID"):
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        if value is None:
+            return None
+        return str(value)
+    return value
+
+
+def _comparison_value(op_type, raw):
+    """Keep every value when the operator is a list. A single-value operator takes the first."""
+    if isinstance(raw, list):
+        items = [item for item in raw if item not in (None, "")]
+    elif raw in (None, ""):
+        items = []
+    else:
+        items = [raw]
+    if not items:
+        return None
+    if _is_list_type(op_type):
+        return items
+    return items[0]
+
+
+def _rewrite_comparisons(types, query_type, query):
+    """Point name and property filters at an operator the where-input actually has."""
+    if not isinstance(query, dict):
+        return query
+    where = query.get("where")
+    if not isinstance(where, dict):
+        return query
+    fields = _input_fields(types, (_input_fields(types, query_type).get("where") or {}).get("type"))
+    rewritten = {}
+    for key, spec in where.items():
+        field = fields.get(key)
+        if not field:
+            continue
+        if not isinstance(spec, dict) or len(spec) != 1:
+            rewritten[key] = spec
+            continue
+        op, raw = next(iter(spec.items()))
+        comparisons = _input_fields(types, field.get("type"))
+        if not comparisons:
+            text = raw[0] if isinstance(raw, list) and raw else raw
+            if text in (None, ""):
+                continue
+            rewritten[key] = text
+            continue
+        chosen = op if op in comparisons else next((item for item in _TEXT_OPS if item in comparisons), None)
+        if not chosen:
+            continue
+        value = _comparison_value(comparisons[chosen].get("type"), raw)
+        if value in (None, "", []):
+            continue
+        rewritten[key] = {chosen: value}
+    copied = dict(query)
+    if rewritten:
+        copied["where"] = rewritten
+    else:
+        copied.pop("where", None)
+    return copied
+
+
+def conform_wiz_query(payload, query):
+    """Return ``(variable type, query value, send projectId)`` for this tenant.
+
+    Without graphSearch arguments in the schema, the historical document is kept.
+    """
+    field = _graph_search_field(payload)
+    arg = _field_arg(field, "query") if field else None
+    if not arg or not _print_type(arg.get("type")):
+        return "GraphEntityQueryInput!", query, True
+    _, types = _schema_types(payload)
+    prepared = _rewrite_comparisons(types, arg.get("type"), query if isinstance(query, dict) else {})
+    cleaned = _clean_value(types, arg.get("type"), prepared)
+    if not isinstance(cleaned, dict):
+        cleaned = {}
+    return _print_type(arg.get("type")), cleaned, _field_arg(field, "projectId") is not None
+
+
+def _contains_type(query, category):
+    found = query.get("type") if isinstance(query, dict) else None
+    if isinstance(found, list):
+        return category in found
+    return found == category
 
 
 class QueryRejected(ValueError):
@@ -1024,16 +1259,31 @@ class WizAdapter:
     def __init__(self, source):
         self.source = source
 
-    def _variables(self, query, first, after=None):
-        return {
-            "query": query,
-            "projectId": self.source.project_id or "*",
+    def _schema_payload(self):
+        payload = self.source.client.execute(INTROSPECTION, {}, cache_ttl=self.source.client.schema_ttl)
+        schema = ((payload or {}).get("data") or {}).get("__schema")
+        if not isinstance(schema, dict):
+            return None
+        return payload
+
+    def _run(self, query, first, after, full):
+        """Send graphSearch with the variable type and fields this schema allows.
+
+        An introspection result with no graphSearch arguments keeps the fallback
+        document, so the local fixture still sees GraphEntityQueryInput!.
+        """
+        query_type, cleaned, project = conform_wiz_query(self._schema_payload(), query)
+        if project and query_type == "GraphEntityQueryInput!":
+            document = DETAIL_QUERY if full else SEARCH_QUERY
+        else:
+            document = _wiz_document(query_type, full, project)
+        variables = {
+            "query": cleaned if isinstance(cleaned, dict) else {},
             "first": max(1, min(int(first), 200)),
             "after": after,
         }
-
-    def _run(self, query, variables, full):
-        document = DETAIL_QUERY if full else SEARCH_QUERY
+        if project:
+            variables["projectId"] = self.source.project_id or "*"
         return self.source.client.execute(document, variables)
 
     def _collect(self, query, limit, skip_ids, offset, full):
@@ -1049,7 +1299,7 @@ class WizAdapter:
         found, seen, skipped = [], set(), 0
         cursor, pages, total, more = None, 0, None, False
         while len(found) < limit and pages < MAX_PAGES:
-            payload = self._run(query, self._variables(query, limit, cursor), full)
+            payload = self._run(query, limit, cursor, full)
             paths, page_total, has_next, end = _graph_search(payload)
             if isinstance(page_total, int):
                 total = page_total
@@ -1094,6 +1344,17 @@ class WizAdapter:
             where[str(prop)] = {"EQUALS": [value]}
         if where:
             query["where"] = where
+        payload = self._schema_payload()
+        _, cleaned, _ = conform_wiz_query(payload, query)
+        if _graph_search_field(payload):
+            if category and not _contains_type(cleaned, category):
+                raise ValueError(f"{category} is not a Wiz entity type.")
+            kept = cleaned.get("where") if isinstance(cleaned.get("where"), dict) else {}
+            if text and "name" not in kept:
+                raise ValueError("This graph search has no name filter.")
+            if prop and value is not None and str(value) != "" and str(prop) not in kept:
+                raise ValueError(f"{prop} is not a filter on this graph search.")
+            query = cleaned
         found, _, total = self._collect(query, limit, (), offset, full=False)
         return {"nodes": [_entity_node(entity, full=False) for entity in found], "total": total}
 
@@ -1107,7 +1368,7 @@ class WizAdapter:
         for start in range(0, min(len(wanted), 200), 50):
             chunk = wanted[start:start + 50]
             query = {"select": True, "where": {"id": {"EQUALS": chunk}}}
-            payload = self._run(query, self._variables(query, len(chunk)), full=True)
+            payload = self._run(query, len(chunk), None, full=True)
             paths, _, _, _ = _graph_search(payload)
             found.extend(entity for path in paths for entity in path if str(entity.get("id")) in set(chunk))
         return {"nodes": [_entity_node(entity, full=True) for entity in found]}
@@ -1134,7 +1395,7 @@ class WizAdapter:
         approximate = False
         for anchor in [str(item) for item in ids or []][:20]:
             query = self._neighbor_query(anchor)
-            payload = self._run(query, self._variables(query, 20), full=False)
+            payload = self._run(query, 20, None, full=False)
             paths, page_total, has_next, _ = _graph_search(payload)
             entities = [entity for path in paths for entity in path if str(entity.get("id")) != anchor]
             page_degree = page_total if isinstance(page_total, int) else len(entities)
@@ -1221,7 +1482,7 @@ class WizAdapter:
         capped = wanted[:8]
         for anchor in capped:
             query = self._neighbor_query(anchor)
-            payload = self._run(query, self._variables(query, 50), full=False)
+            payload = self._run(query, 50, None, full=False)
             paths, _, _, _ = _graph_search(payload)
             for path in paths:
                 for entity in path:
@@ -1311,8 +1572,17 @@ class GraphQLSource:
             self.client.cache.drop(self.client._key(INTROSPECTION, {}))
         payload = self.client.execute(INTROSPECTION, {}, cache_ttl=self.client.schema_ttl)
         model = schema_from_introspection(payload)
-        # The data-model window only reads categories, types, and links.
-        return {key: model[key] for key in ("labels", "types", "categories", "links")}
+        # The data-model window reads categories, types, and links. Search uses
+        # entities and filters, which are the graphSearch input on a Wiz tenant.
+        entities, filters = wiz_search_hints(payload) if self.adapter_name == "wiz" else ([], [])
+        return {
+            "labels": model["labels"],
+            "types": model["types"],
+            "categories": model["categories"],
+            "links": model["links"],
+            "entities": entities,
+            "filters": filters,
+        }
 
     def search(self, q="", kind="node", category=None, prop=None, value=None, limit=20, offset=0, fuzzy=False):
         return self.adapter.search(q, kind, category, prop, value, limit, offset, fuzzy)

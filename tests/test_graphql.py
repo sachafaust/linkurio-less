@@ -193,6 +193,151 @@ def test_search_document():
           json.dumps(body)[:300])
 
 
+def _input_type(name, fields):
+    return {
+        "kind": "INPUT_OBJECT", "name": name, "fields": None,
+        "inputFields": fields, "enumValues": None, "possibleTypes": None,
+    }
+
+
+def tenant_payload(query_non_null, contains_list, with_select, with_project, where_names=("name", "id")):
+    """A graphSearch argument small enough to prove the value is coerced."""
+    string = named("SCALAR", "String")
+    value_type = listing(non_null(string)) if contains_list else string
+    query_fields = [
+        field("type", listing(non_null(named("ENUM", "GraphEntityType")))),
+        field("where", named("INPUT_OBJECT", "GraphEntityWhereInput")),
+    ]
+    if with_select:
+        query_fields.insert(0, field("select", named("SCALAR", "Boolean")))
+    query_type = named("INPUT_OBJECT", "GraphEntityQueryInput")
+    if query_non_null:
+        query_type = non_null(query_type)
+    args = [{"name": "query", "type": query_type}]
+    if with_project:
+        args.append({"name": "projectId", "type": non_null(string)})
+    args.extend([
+        {"name": "first", "type": named("SCALAR", "Int")},
+        {"name": "after", "type": string},
+    ])
+    return {"data": {"__schema": {
+        "queryType": {"name": "Query"},
+        "mutationType": None,
+        "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": [
+                field("graphSearch", named("OBJECT", "GraphSearchResult"), args),
+            ], "enumValues": None, "inputFields": None, "possibleTypes": None},
+            _input_type("GraphEntityQueryInput", query_fields),
+            _input_type("GraphEntityWhereInput", [
+                field(name, named("INPUT_OBJECT", "StringFilter")) for name in where_names
+            ]),
+            _input_type("StringFilter", [field("CONTAINS", value_type), field("EQUALS", value_type)]),
+            {"kind": "ENUM", "name": "GraphEntityType", "fields": None, "inputFields": None,
+             "enumValues": [{"name": "VIRTUAL_MACHINE"}, {"name": "BUCKET"}], "possibleTypes": None},
+            {"kind": "OBJECT", "name": "GraphSearchResult", "fields": [
+                field("totalCount", named("SCALAR", "Int")),
+            ], "enumValues": None, "inputFields": None, "possibleTypes": None},
+        ],
+    }}}
+
+
+def test_search_follows_the_tenant_schema():
+    """The query value follows the tenant input. A schema type is not an entity type."""
+    print("search follows the tenant schema")
+    asked = {"select": True, "type": ["APICallComponent"], "where": {"name": {"CONTAINS": ["ENTITY"]}}}
+    printed, cleaned, project = gql.conform_wiz_query(
+        tenant_payload(False, False, False, False), asked)
+    check("a string filter drops select, the schema type, and the list",
+          printed == "GraphEntityQueryInput" and project is False
+          and cleaned == {"where": {"name": {"CONTAINS": "ENTITY"}}},
+          safe(cleaned))
+    head = gql._wiz_document(printed, False, project).split("{", 1)[0]
+    check("the document uses that type and leaves out projectId",
+          "$query: GraphEntityQueryInput," in head and "!" not in head and "projectId" not in head,
+          head.strip())
+
+    printed, cleaned, project = gql.conform_wiz_query(
+        tenant_payload(True, True, True, True), asked)
+    check("a required list filter keeps select and a list",
+          printed == "GraphEntityQueryInput!" and project is True and cleaned.get("select") is True
+          and cleaned.get("where") == {"name": {"CONTAINS": ["ENTITY"]}} and "type" not in cleaned,
+          safe(cleaned))
+    strict_doc = gql._wiz_document(printed, True, project)
+    check("the strict document keeps the bang, projectId, and properties",
+          "$query: GraphEntityQueryInput!" in strict_doc and "projectId: $projectId" in strict_doc
+          and "properties" in strict_doc,
+          strict_doc.split("{", 1)[0].strip())
+
+    entities, filters = gql.wiz_search_hints(tenant_payload(True, True, True, True))
+    check("entity types and filters come from the graphSearch input",
+          entities == ["BUCKET", "VIRTUAL_MACHINE"] and filters == ["id", "name"],
+          safe((entities, filters)))
+
+    fallback = {"select": True, "where": {"name": {"CONTAINS": ["alpha"]}}}
+    printed, cleaned, project = gql.conform_wiz_query(introspection_payload(), fallback)
+    check("missing graphSearch arguments keep the fallback query",
+          printed == "GraphEntityQueryInput!" and project is True and cleaned == fallback,
+          safe(cleaned))
+
+    equals_only = tenant_payload(False, False, False, False)
+    for item in equals_only["data"]["__schema"]["types"]:
+        if item["name"] == "StringFilter":
+            item["inputFields"] = [one for one in item["inputFields"] if one["name"] != "CONTAINS"]
+    _, cleaned, _ = gql.conform_wiz_query(equals_only, {"where": {"name": {"CONTAINS": ["ENTITY"]}}})
+    check("a missing CONTAINS operator uses EQUALS",
+          cleaned.get("where") == {"name": {"EQUALS": "ENTITY"}}, safe(cleaned))
+
+    _, cleaned, _ = gql.conform_wiz_query(
+        tenant_payload(True, True, True, False),
+        {"select": True, "where": {"id": {"EQUALS": ["a", "b"]}}})
+    check("an id list stays a list",
+          cleaned.get("select") is True and cleaned.get("where") == {"id": {"EQUALS": ["a", "b"]}},
+          safe(cleaned))
+
+    seen = []
+
+    def opener(request, timeout=None):
+        body = json.loads(request.data.decode())
+        document = body.get("query") or ""
+        if "__schema" in document:
+            return Resp(200, json.dumps(tenant_payload(False, False, False, False)).encode())
+        seen.append(body)
+        return Resp(200, json.dumps(graph_page(
+            [{"id": "e1", "name": "ENTITY", "type": "BUCKET"}], False, None, 1)).encode())
+
+    src = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.us/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN", "project_id": "*",
+    }, client=client(opener))
+    try:
+        src.search("ENTITY", category="APICallComponent")
+        check("a schema type is refused before the search is sent", False, "no error")
+    except ValueError as exc:
+        check("a schema type is refused before the search is sent",
+              "APICallComponent" in str(exc) and "entity type" in str(exc) and not seen, safe(exc))
+    try:
+        src.search("", prop="region", value="us2")
+        check("an unknown property is refused", False, "no error")
+    except ValueError as exc:
+        check("an unknown property is refused",
+              "region" in str(exc) and "not a filter" in str(exc) and not seen, safe(exc))
+    found = src.search("ENTITY", category="BUCKET")
+    sent = seen[-1] if seen else {}
+    variables = sent.get("variables") or {}
+    check("a name search sends the value the schema accepts",
+          variables.get("query") == {"type": ["BUCKET"], "where": {"name": {"CONTAINS": "ENTITY"}}}
+          and "projectId" not in variables
+          and "GraphEntityQueryInput!" not in (sent.get("query") or "")
+          and "projectId" not in (sent.get("query") or "")
+          and found["nodes"] and found["nodes"][0]["id"] == "e1",
+          safe(sent)[:500])
+    model = src.schema()
+    check("schema publishes the entity types for the search dropdown",
+          model.get("entities") == ["BUCKET", "VIRTUAL_MACHINE"] and model.get("filters") == ["id", "name"]
+          and "Query" in (model.get("categories") or {}),
+          safe(model.get("entities")))
+
+
 def test_wiz_auth():
     print("wiz auth")
     seen = []
@@ -350,6 +495,9 @@ def test_paging_and_wiz_shape():
 
     def opener(request, timeout=None):
         body = json.loads(request.data.decode())
+        document = body.get("query") or ""
+        if "__schema" in document:
+            return Resp(200, json.dumps(introspection_payload()).encode())
         variables = body.get("variables") or {}
         after = variables.get("after")
         calls.append({"after": after, "query": variables.get("query"), "document": body.get("query") or ""})
@@ -1036,6 +1184,7 @@ def main():
     os.environ["GX_ENV"] = empty.name
     try:
         test_search_document()
+        test_search_follows_the_tenant_schema()
         test_wiz_auth()
         test_mutations()
         test_introspection_model()
