@@ -63,6 +63,8 @@ Copy `.env.example` to `.env` (gitignored) or export the same variables. The env
 
 `python3 server.py` with no password still opens the page. Add Neo4j and Add GraphQL each write their own settings into `.env`. That file is gitignored. The password, client secret, and token are not written into `gx.local.json`, and the page does not show them again after you save. Test checks the form before it is saved. Diagnostics shows the server log and the explorer log.
 
+`python3 server.py --fresh` starts this run with no Neo4j and no GraphQL connection, so the page opens without waiting on a saved database. The `.env` file stays for the next normal start. Add the connection from the page.
+
 ```bash
 NEO4J_URI=bolt://127.0.0.1:7687
 NEO4J_USER=neo4j

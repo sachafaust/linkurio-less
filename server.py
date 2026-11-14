@@ -16,6 +16,8 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     NEO4J_PASSWORD  (required; empty is allowed when Neo4j has no password)
     NEO4J_DATABASE  neo4j
     GX_ENV          path to a different .env file
+    --fresh         this process starts with no Neo4j and no GraphQL connection.
+                    The saved .env is left as it is for the next normal start.
     HOST / PORT     127.0.0.1 / 8744
     SEARCH_FULLTEXT_INDEX  name of a Neo4j full-text index for search (auto-detects "gx_search",
                     made by tools/create_fulltext_index.py)
@@ -1336,6 +1338,30 @@ def _close_driver(graph):
         pass
 
 
+def _fresh_process():
+    return os.environ.get("GX_FRESH") == "1"
+
+
+def _drop_saved_connection():
+    """Forget connection variables for this process. The .env file stays."""
+    token_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
+    for key in (*CREDENTIAL_KEYS, *ENV_KEYS):
+        os.environ.pop(key, None)
+    if token_env and _ENV_RE.fullmatch(token_env):
+        os.environ.pop(token_env, None)
+    os.environ["GX_FRESH"] = "1"
+
+
+def _unconfigured():
+    graph = UnconfiguredNeo4j()
+    if _fresh_process():
+        graph.message = (
+            "This run started with no data connection. Use Add Neo4j or Add GraphQL. "
+            "The saved connection stays in .env for the next start."
+        )
+    return graph
+
+
 def _reconnect():
     """Rebuild Neo4j and GraphQL from the environment after Data connection saves."""
     global GRAPH
@@ -1345,7 +1371,7 @@ def _reconnect():
     except Neo4jConfigError as e:
         if not e.missing_password:
             raise ValueError(str(e)) from e
-        graph = UnconfiguredNeo4j()
+        graph = _unconfigured()
     else:
         graph = Graph(settings)
     cfg = ensure_config()
@@ -1703,17 +1729,25 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     graph = None
-    try:
-        settings = neo4j_settings()
-    except Neo4jConfigError as e:
-        if not e.missing_password:
-            print(f"error: {diagnostics.redact(e)}", file=sys.stderr)
-            sys.exit(1)
-        print(f"WARNING: {diagnostics.redact(e)}", file=sys.stderr)
-        print("Neo4j is not configured. Open the page and use Add Neo4j or Add GraphQL.", file=sys.stderr)
-        graph = UnconfiguredNeo4j()
+    if "--fresh" in sys.argv[1:] or _fresh_process():
+        _drop_saved_connection()
+        print(
+            "This run has no data connection. The saved .env is left as it is. "
+            "Use Add Neo4j or Add GraphQL.",
+            flush=True)
+        graph = _unconfigured()
     else:
-        graph = Graph(settings)
+        try:
+            settings = neo4j_settings()
+        except Neo4jConfigError as e:
+            if not e.missing_password:
+                print(f"error: {diagnostics.redact(e)}", file=sys.stderr)
+                sys.exit(1)
+            print(f"WARNING: {diagnostics.redact(e)}", file=sys.stderr)
+            print("Neo4j is not configured. Open the page and use Add Neo4j or Add GraphQL.", file=sys.stderr)
+            graph = UnconfiguredNeo4j()
+        else:
+            graph = Graph(settings)
     cfg = ensure_config()
     print(f"Working set: {cfg['nodes']} nodes / {cfg['edges']} edges "
           f"({cfg['source']}) from {config_path()}.")
@@ -1723,9 +1757,9 @@ def main():
             st = GRAPH.status()
             print(diagnostics.redact(
                 f"Connected to {st['uri']} ({st['server']}), db={st['database']}: "
-                f"{st['nodes']} nodes / {st['edges']} edges. READ-ONLY."))
+                f"{st['nodes']} nodes / {st['edges']} edges. READ-ONLY."), flush=True)
         except Exception as e:  # noqa: BLE001
-            print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}")
+            print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}", flush=True)
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 8744))
     srv = ThreadingHTTPServer((host, port), Handler)
     print(f"Open http://{host}:{port}/")

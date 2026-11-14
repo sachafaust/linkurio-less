@@ -164,9 +164,15 @@ def _warn_perms(path):
 
 
 def load_credential_env(path=None, environ=None):
-    """Fill unset Neo4j credential variables from a .env file. Existing values stay."""
+    """Fill unset Neo4j credential variables from a .env file. Existing values stay.
+
+    A fresh process (``GX_FRESH=1``) does not read the file into its own
+    environment. The file stays on disk for the next normal start.
+    """
     environ = os.environ if environ is None else environ
     path = Path(path) if path is not None else dotenv_path()
+    if os.environ.get("GX_FRESH") == "1" and environ is os.environ:
+        return path
     if not path.is_file():
         return path
     _warn_perms(path)

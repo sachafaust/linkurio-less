@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import select
 import shutil
 import socket
 import stat
@@ -271,7 +272,7 @@ def _free_port():
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
         sock.close()
-        if port not in (8744, 8755):
+        if port not in (8744, 8755, 8766, 8791):
             return port
     return port
 
@@ -291,10 +292,34 @@ def _child_env(folder, dotenv, port):
     return env
 
 
-def _start(env):
+def _start(env, extra=()):
     return subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py")], env=env,
+        [sys.executable, str(ROOT / "server.py"), *extra], env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def _read_until(proc, needle, timeout):
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+    buf = ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if needle in buf:
+            return buf
+        if proc.poll() is not None:
+            buf += proc.stdout.read() or ""
+            return buf
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], min(0.2, remaining))
+        if ready:
+            buf += proc.stdout.read() or ""
+    return buf
+
+
+def _drain(proc, timeout=0.3):
+    return _read_until(proc, "\0", timeout)
 
 
 def _stop(proc):
@@ -751,6 +776,154 @@ def test_live_and_browser():
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_fresh_start_ignores_saved_connection():
+    """--fresh opens with no connection and leaves the saved .env on disk."""
+    saved_password = "saved-password-zz"
+    inherited_password = "inherited-password-zz"
+    file_token = "file-token-zz"
+    inherited_token = "inherited-token-zz"
+    custom_token = "custom-token-zz"
+    file_secret = "file-secret-zz"
+    inherited_secret = "inherited-secret-zz"
+    typed_token = "typed-token-zz"
+    secrets = (
+        saved_password, inherited_password, file_token, inherited_token,
+        custom_token, file_secret, inherited_secret, typed_token,
+    )
+    held = {
+        key: os.environ.get(key)
+        for key in ("GX_FRESH", "GRAPHQL_ENDPOINT", "GRAPHQL_ADAPTER", "GRAPHQL_TOKEN", "NEO4J_PASSWORD")
+    }
+    try:
+        os.environ["GX_FRESH"] = "1"
+        os.environ.pop("GRAPHQL_ENDPOINT", None)
+        os.environ.pop("GRAPHQL_TOKEN", None)
+        os.environ.pop("NEO4J_PASSWORD", None)
+        ignored = server.resolve_graphql_sources({
+            "graphql": {
+                "id": "wiz", "endpoint": "https://config.example.test/graphql", "adapter": "wiz",
+            },
+        })
+        check(ignored == [], "a fresh process ignores a GraphQL source stored in the config")
+        os.environ["GRAPHQL_ENDPOINT"] = "https://added.example.test/graphql"
+        os.environ["GRAPHQL_ADAPTER"] = "generic"
+        kept = server.resolve_graphql_sources({
+            "graphql": {
+                "id": "wiz", "endpoint": "https://config.example.test/graphql", "adapter": "wiz",
+            },
+        })
+        check(len(kept) == 1 and kept[0]["endpoint"] == "https://added.example.test/graphql"
+              and kept[0]["id"] == "graphql",
+              "a fresh process still uses a GraphQL endpoint set in this process")
+    finally:
+        for key, value in held.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    folder = tempfile.mkdtemp(prefix="gx-fresh-")
+    dotenv = Path(folder) / ".env"
+    dotenv.write_text(
+        "NEO4J_URI=bolt://127.0.0.1:7687\n"
+        "NEO4J_USER=neo4j\n"
+        f"NEO4J_PASSWORD={saved_password}\n"
+        "NEO4J_DATABASE=neo4j\n"
+        "GRAPHQL_ENDPOINT=https://file.example.test/graphql\n"
+        f"GRAPHQL_TOKEN={file_token}\n"
+        f"GRAPHQL_CLIENT_SECRET={file_secret}\n"
+        "GRAPHQL_CLIENT_ID=file-client\n"
+        "GRAPHQL_TOKEN_ENV=GX_SAVED_TOKEN\n",
+        encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    config = Path(folder) / "gx.local.json"
+    config.write_text(json.dumps({
+        "nodes": 100, "edges": 200, "expand_limit": 10, "cypher_limit": 20,
+        "source": "user", "gpu": "unknown", "lru": False, "reason": "test",
+        "graphql": {
+            "id": "wiz", "label": "Saved Wiz",
+            "endpoint": "https://config.example.test/graphql",
+            "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+        },
+    }), encoding="utf-8")
+    port = _free_port()
+    env = _child_env(folder, dotenv, port)
+    env.update({
+        "NEO4J_URI": "bolt://127.0.0.1:7687",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": inherited_password,
+        "GRAPHQL_ENDPOINT": "https://inherited.example.test/graphql",
+        "GRAPHQL_TOKEN": inherited_token,
+        "GRAPHQL_TOKEN_ENV": "GX_SAVED_TOKEN",
+        "GX_SAVED_TOKEN": custom_token,
+        "GRAPHQL_CLIENT_SECRET": inherited_secret,
+        "PYTHONUNBUFFERED": "1",
+    })
+    proc = _start(env, ["--fresh"])
+    log = ""
+    try:
+        log = _read_until(proc, "Open http", 8)
+        status = _wait_status(port, proc)
+        body = json.dumps(status or {})
+        sources = [item.get("id") for item in (status or {}).get("sources") or []]
+        leaked = [item for item in secrets if item in log or item in body]
+        check(proc.poll() is None and bool(status) and status.get("connected") is False
+              and sources == ["neo4j"]
+              and "no data connection" in (status.get("error") or "")
+              and "This run has no data connection" in log
+              and "Connected to" not in log
+              and "cannot reach Neo4j" not in log
+              and "config.example.test" not in log
+              and not leaked,
+              "a fresh start ignores the saved Neo4j and GraphQL connection",
+              "" if status and not leaked else (body[:180] if status else "server did not answer"))
+        view_code, view_raw = _request(port, "/api/connection", timeout=3)
+        view = json.loads(view_raw) if view_code == 200 else {}
+        neo = view.get("neo4j") or {}
+        gql = view.get("graphql") or {}
+        check(view_code == 200 and neo.get("password_set") is False and gql.get("endpoint") == ""
+              and gql.get("token_set") is False and gql.get("secret_set") is False
+              and all(item not in view_raw for item in secrets),
+              "the connection form shows no saved password or GraphQL endpoint")
+        started = time.perf_counter()
+        schema_code, schema_raw = _request(port, "/api/schema", timeout=3)
+        elapsed = time.perf_counter() - started
+        check(schema_code == 400 and elapsed < 2 and "no data connection" in schema_raw
+              and all(item not in schema_raw for item in secrets),
+              "schema refuses at once instead of initializing Neo4j",
+              f"HTTP {schema_code} in {elapsed:.2f}s")
+        save_code, save_raw = _request(port, "/api/connection", {
+            "graphql": {
+                "endpoint": "https://added.example.test/graphql",
+                "adapter": "generic",
+                "label": "Added",
+                "token": typed_token,
+            },
+        }, timeout=5)
+        saved = json.loads(save_raw) if save_code == 200 else {}
+        saved_status = saved.get("status") or {}
+        saved_ids = [item.get("id") for item in saved_status.get("sources") or []]
+        log += _drain(proc)
+        text = dotenv.read_text(encoding="utf-8")
+        saved_sources = json.dumps(saved_status.get("sources") or [])
+        check(save_code == 200 and saved_status.get("connected") is False
+              and saved_ids == ["neo4j", "graphql"]
+              and "config.example.test" not in saved_sources
+              and "Connected to" not in log
+              and "cannot reach Neo4j" not in log
+              and all(item not in save_raw and item not in log for item in secrets)
+              and f"NEO4J_PASSWORD={saved_password}" in text
+              and "https://added.example.test/graphql" in text
+              and f"GRAPHQL_TOKEN={typed_token}" in text
+              and file_secret in text
+              and "GX_FRESH" not in text
+              and inherited_password not in text,
+              "saving GraphQL during a fresh run leaves the Neo4j password in .env")
+    finally:
+        _stop(proc)
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     test_parse_and_precedence()
     test_refusals()
@@ -764,6 +937,7 @@ def main():
     test_server_refuses_a_bad_file()
     test_connection_from_the_page()
     test_graphql_only_and_empty_password()
+    test_fresh_start_ignores_saved_connection()
     test_live_and_browser()
     failed = sum(1 for ok in report if not ok)
     print(f"\n{len(report) - failed} passed, {failed} failed")

@@ -131,7 +131,13 @@ class GraphQLConfigError(ValueError):
 
 
 def load_graphql_env():
-    """Fill unset GraphQL variables from the gitignored .env. The process environment wins."""
+    """Fill unset GraphQL variables from the gitignored .env. The process environment wins.
+
+    A fresh process does not read the file. A connection saved during that
+    run is already in the environment and is used as it is.
+    """
+    if os.environ.get("GX_FRESH") == "1":
+        return
     from neo4j_env import dotenv_path, parse_dotenv
     path = dotenv_path()
     if not path.is_file():
@@ -302,10 +308,15 @@ def resolve_graphql_sources(config):
     """File sources, then the environment. ``GRAPHQL_ENDPOINT`` overrides the same id.
 
     The returned dicts name the environment variable that holds the token.
-    They do not contain the token.
+    They do not contain the token. A fresh process ignores the file and
+    ``gx.local.json`` and keeps only a source set in this process.
     """
-    load_graphql_env()
-    entries = sources_from_config(config if isinstance(config, dict) else {})
+    fresh = os.environ.get("GX_FRESH") == "1"
+    if fresh:
+        entries = []
+    else:
+        load_graphql_env()
+        entries = sources_from_config(config if isinstance(config, dict) else {})
     env_entry = _env_source()
     if env_entry:
         entries = [entry for entry in entries if entry["id"] != env_entry["id"]]
