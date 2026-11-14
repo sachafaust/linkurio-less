@@ -1253,7 +1253,9 @@ function mainMenuItems() {
     '-', { label: 'Export', icon: 'Download', sub: [{ label: 'Image (PNG)…', icon: 'ImageOutline', act: openExportImage }, { label: 'Data (CSV, JSON)…', icon: 'Table', act: () => openExportData(false) }] },
     ...(source ? ['-', source] : []),
     '-', { label: 'Understand your data model', icon: 'DatabaseOutline', act: openDataModel },
-    { label: 'Data connection…', icon: 'DatabaseOutline', act: openConnection },
+    { label: 'Neo4j connection…', icon: 'DatabaseOutline', act: () => openConnection('neo4j') },
+    { label: 'GraphQL connection…', icon: 'GraphOutline', act: () => openConnection('graphql') },
+    { label: 'Diagnostics…', icon: 'FileDocumentOutline', act: openDiagnostics },
     { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: document.body.classList.contains('dark') ? 'Light theme' : 'Dark theme', icon: 'ThemeLightDark', act: toggleTheme },
     { label: 'Keyboard shortcuts & help', icon: 'KeyboardOutline', act: openHelp },
@@ -1266,14 +1268,16 @@ const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
-  'connection': openConnection,
+  'connection-neo4j': () => openConnection('neo4j'),
+  'connection-graphql': () => openConnection('graphql'),
+  'diagnostics': openDiagnostics,
   'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch, 'budget': openBudgetSettings,
   'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
   'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
   'minimap': () => { S.minimap = !S.minimap; $('#minimap').classList.toggle('hidden', !S.minimap); $('#btn-minimap').classList.toggle('on', S.minimap); drawMinimap(); },
   'open-selpanel': () => { S.selPanelOpen = true; updateHighlight(); },
 };
-const USABLE_WHILE_BOOTING = new Set(['help', 'focus-search', 'budget']);
+const USABLE_WHILE_BOOTING = new Set(['help', 'focus-search', 'budget', 'connection-neo4j', 'connection-graphql', 'diagnostics']);
 document.addEventListener('click', e => {
   const a = e.target.closest('[data-act]');
   if (a) {
@@ -1318,7 +1322,9 @@ $('#rightpanel').addEventListener('click', e => {
   if (d.capdel) { const [c, p] = d.capdel.split('|'); catStyle(c).caption = (catStyle(c).caption || []).filter(x => x !== p); restyle(); return renderRightPanel(); }
   if (d.ecapall) { S.edgeCaptionsAlways = !S.edgeCaptionsAlways; restyle(); return renderRightPanel(); }
   if (d.d === 'gear') return showMenu([
-    { label: 'Data connection…', icon: 'DatabaseOutline', act: openConnection },
+    { label: 'Neo4j connection…', icon: 'DatabaseOutline', act: () => openConnection('neo4j') },
+    { label: 'GraphQL connection…', icon: 'GraphOutline', act: () => openConnection('graphql') },
+    { label: 'Diagnostics…', icon: 'FileDocumentOutline', act: openDiagnostics },
     { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: 'Reset styles to default', icon: 'Refresh', act: () => { localStorage.removeItem('gx:styles'); initStyles(true); restyle(); renderRightPanel(); toast('Styles reset to defaults'); } },
   ], t.getBoundingClientRect().left - 220, t.getBoundingClientRect().top - 50);
@@ -1535,36 +1541,79 @@ function openBudgetSettings() {
   };
 }
 
-async function openConnection() {
-  let cur;
-  try { cur = await api('/api/connection'); }
+function connectionNote(file) {
+  return `Saved in ${esc(file || '.env')}, which git ignores. The canvas budget stays in gx.local.json. The password, client secret, and token are not written there.`;
+}
+function canvasDirty() {
+  return window.cy && typeof cy.nodes === 'function' && cy.nodes().length > 0;
+}
+async function refreshConnectionLinks() {
+  try { S.connection = await api('/api/connection'); }
+  catch (e) { return; }
+  const n = S.connection.neo4j || {};
+  const g = S.connection.graphql || {};
+  const neo = document.querySelector('[data-neo-label]');
+  const gql = document.querySelector('[data-gql-label]');
+  if (neo) neo.textContent = n.password_set ? 'Neo4j connection' : 'Add Neo4j';
+  if (gql) gql.textContent = g.endpoint ? 'GraphQL connection' : 'Add GraphQL';
+}
+async function finishConnectionSave(bg, res) {
+  if (canvasDirty()) {
+    cy.elements().remove();
+    S.undo = []; S.redo = [];
+    afterGraphChange();
+  }
+  const st = res.status || res;
+  paintSource(st);
+  await applyServerBudget(st);
+  if (window.cy && typeof cy.nodes === 'function') {
+    try { S.schema = await api('/api/schema'); }
+    catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
+    initStyles();
+    if (window.R) restyle();
+  }
+  await refreshConnectionLinks();
+  bg.remove();
+  toast('Connection saved');
+}
+async function showConnectionTest(bg, body) {
+  const out = $('[data-cresult]', bg);
+  if (out) out.textContent = 'Testing…';
+  try {
+    const res = await api('/api/connection/test', body);
+    if (out) out.textContent = res.message || (res.ok ? 'Connected.' : 'The connection failed.');
+  } catch (e) {
+    if (out) out.textContent = e.message;
+  }
+}
+function wizAuthDefault(endpoint) {
+  let host = '';
+  try { host = new URL(endpoint).hostname.toLowerCase(); } catch (e) { return ''; }
+  if (host === 'wiz.us' || host.endsWith('.wiz.us')) return 'https://auth.app.wiz.us/oauth/token';
+  if (host === 'wiz.io' || host.endsWith('.wiz.io')) return 'https://auth.app.wiz.io/oauth/token';
+  return '';
+}
+async function openConnection(kind) {
+  let cur = S.connection;
+  try { cur = await api('/api/connection'); S.connection = cur; }
   catch (e) { toast(e.message, 4000); return; }
+  if (kind === 'graphql') openGraphQLConnection(cur);
+  else openNeo4jConnection(cur);
+}
+function openNeo4jConnection(cur) {
   const n = cur.neo4j || {};
-  const g = cur.graphql || {};
-  const file = cur.file || '.env';
-  const bg = modal('Data connection', `<div class="section-d">Saved in ${esc(file)}, which git ignores. The canvas budget stays in gx.local.json. The password and the token are not written there, and they are not shown again after you save.</div>
-    <div class="section-t">Neo4j</div>
+  const bg = modal('Neo4j connection', `<div class="section-d">${connectionNote(cur.file)}</div>
     <div class="field">URI<input type="text" data-cu="1" value="${esc(n.uri || 'bolt://localhost:7687')}" autocomplete="off" spellcheck="false"></div>
     <div class="field">User<input type="text" data-cuser="1" value="${esc(n.user || 'neo4j')}" autocomplete="off" spellcheck="false"></div>
     <div class="field">Password<input type="password" data-cpw="1" value="" autocomplete="new-password" placeholder="${n.password_set ? 'Saved — leave blank to keep it' : 'Required'}"></div>
     <label class="row"><input type="checkbox" data-cnone="1"> No password</label>
     <div class="field">Database<input type="text" data-cdb="1" value="${esc(n.database || 'neo4j')}" autocomplete="off" spellcheck="false"></div>
-    <div class="section-t">GraphQL</div>
-    <div class="section-d">Leave the endpoint blank to keep Neo4j only. A saved token stays in ${esc(file)}.</div>
-    <div class="field">Endpoint<input type="text" data-ge="1" value="${esc(g.endpoint || '')}" placeholder="https://api.us2.app.wiz.io/graphql" autocomplete="off" spellcheck="false"></div>
-    <div class="field">Label<input type="text" data-gl="1" value="${esc(g.label || '')}" placeholder="Wiz" autocomplete="off"></div>
-    <div class="field">Adapter<select data-ga="1"><option value="" ${g.adapter ? '' : 'selected'}>From the host name</option><option value="wiz" ${g.adapter === 'wiz' ? 'selected' : ''}>Wiz</option><option value="generic" ${g.adapter === 'generic' ? 'selected' : ''}>Generic</option></select></div>
-    <div class="field">Client ID<input type="text" data-gcid="1" value="${esc(g.client_id || '')}" autocomplete="off" spellcheck="false"></div>
-    <div class="field">Token<input type="password" data-gt="1" value="" autocomplete="new-password" placeholder="${g.token_set ? 'Saved — leave blank to keep it' : 'Bearer token'}"></div>
-    <div class="field">Token variable<input type="text" data-gtenv="1" value="${esc(g.token_env || 'GRAPHQL_TOKEN')}" autocomplete="off" spellcheck="false"></div>
-    <div class="field">Project<input type="text" data-gp="1" value="${esc(g.project_id || '')}" placeholder="*" autocomplete="off" spellcheck="false"></div>
-    <label class="row"><input type="checkbox" data-gclear="1"> Remove the GraphQL source</label>`,
-    `<button class="btn outline" data-close="1">Cancel</button><button class="btn primary" data-csave="1">Save</button>`, { width: 560 });
+    <pre class="conn-result" data-cresult></pre>`,
+    `<button class="btn outline" data-close="1">Cancel</button><button class="btn outline" data-ctest="1">Test</button><button class="btn primary" data-csave="1">Save</button>`, { width: 480 });
   const none = $('[data-cnone]', bg);
   const pw = $('[data-cpw]', bg);
   none.onchange = () => { pw.disabled = none.checked; if (none.checked) pw.value = ''; };
-  $('[data-csave]', bg).onclick = async () => {
-    if (bg._saving) return;
+  const payload = () => {
     const neo = {
       uri: $('[data-cu]', bg).value.trim(),
       user: $('[data-cuser]', bg).value.trim(),
@@ -1572,43 +1621,100 @@ async function openConnection() {
     };
     if (none.checked) neo.password = '';
     else if (pw.value) neo.password = pw.value;
-    const graphql = {
-      endpoint: $('[data-ge]', bg).value.trim(),
-      label: $('[data-gl]', bg).value.trim(),
-      adapter: $('[data-ga]', bg).value,
-      token_env: $('[data-gtenv]', bg).value.trim(),
-      project_id: $('[data-gp]', bg).value.trim(),
-      client_id: $('[data-gcid]', bg).value.trim(),
-    };
-    const token = $('[data-gt]', bg).value;
-    if (token) graphql.token = token;
-    if ($('[data-gclear]', bg).checked) graphql.clear = true;
-    const dirty = window.cy && typeof cy.nodes === 'function' && cy.nodes().length > 0;
-    if (dirty && !confirm('Saving the connection clears the canvas.')) return;
+    return { kind: 'neo4j', neo4j: neo };
+  };
+  $('[data-ctest]', bg).onclick = () => showConnectionTest(bg, payload());
+  $('[data-csave]', bg).onclick = async () => {
+    if (bg._saving) return;
+    if (canvasDirty() && !confirm('Saving the connection clears the canvas.')) return;
     bg._saving = true;
     try {
-      const res = await api('/api/connection', { neo4j: neo, graphql });
-      if (dirty) {
-        cy.elements().remove();
-        S.undo = []; S.redo = [];
-        afterGraphChange();
-      }
-      const st = res.status || res;
-      paintSource(st);
-      await applyServerBudget(st);
-      if (window.cy && typeof cy.nodes === 'function') {
-        try { S.schema = await api('/api/schema'); }
-        catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
-        initStyles();
-        if (window.R) restyle();
-      }
-      bg.remove();
-      toast('Connection saved');
+      await finishConnectionSave(bg, await api('/api/connection', { neo4j: payload().neo4j }));
     } catch (e) {
       bg._saving = false;
       toast('Could not save the connection: ' + e.message, 5000);
     }
   };
+}
+function openGraphQLConnection(cur) {
+  const g = cur.graphql || {};
+  const bg = modal('GraphQL connection', `<div class="section-d">${connectionNote(cur.file)} Wiz uses the client id and client secret to request an access token. The query sends that token only.</div>
+    <div class="field">Endpoint<input type="text" data-ge="1" value="${esc(g.endpoint || '')}" placeholder="https://api.us2.app.wiz.io/graphql" autocomplete="off" spellcheck="false"></div>
+    <div class="field">Client ID<input type="text" data-gcid="1" value="${esc(g.client_id || '')}" autocomplete="off" spellcheck="false"></div>
+    <div class="field">Client secret<input type="password" data-gsec="1" value="" autocomplete="new-password" placeholder="${g.secret_set ? 'Saved — leave blank to keep it' : 'Wiz client secret'}"></div>
+    <div class="field">Auth URL<input type="text" data-gauth="1" value="${esc(g.auth_url || '')}" placeholder="Filled in for a Wiz host" autocomplete="off" spellcheck="false"></div>
+    <details class="conn-more"><summary>Bearer token, label, and project</summary>
+      <div class="field">Label<input type="text" data-gl="1" value="${esc(g.label || '')}" placeholder="Wiz" autocomplete="off"></div>
+      <div class="field">Adapter<select data-ga="1"><option value="" ${g.adapter ? '' : 'selected'}>From the host name</option><option value="wiz" ${g.adapter === 'wiz' ? 'selected' : ''}>Wiz</option><option value="generic" ${g.adapter === 'generic' ? 'selected' : ''}>Generic</option></select></div>
+      <div class="field">Bearer token<input type="password" data-gt="1" value="" autocomplete="new-password" placeholder="${g.token_set ? 'Saved — leave blank to keep it' : 'Only when you already have a token'}"></div>
+      <div class="field">Token variable<input type="text" data-gtenv="1" value="${esc(g.token_env || 'GRAPHQL_TOKEN')}" autocomplete="off" spellcheck="false"></div>
+      <div class="field">Project<input type="text" data-gp="1" value="${esc(g.project_id || '')}" placeholder="*" autocomplete="off" spellcheck="false"></div>
+      ${g.endpoint ? '<label class="row"><input type="checkbox" data-gclear="1"> Remove this GraphQL source</label>' : ''}
+    </details>
+    <pre class="conn-result" data-cresult></pre>`,
+    `<button class="btn outline" data-close="1">Cancel</button><button class="btn outline" data-ctest="1">Test</button><button class="btn primary" data-csave="1">Save</button>`, { width: 520 });
+  const endpoint = $('[data-ge]', bg);
+  const auth = $('[data-gauth]', bg);
+  const fillAuth = () => {
+    if (auth.dataset.touched) return;
+    const suggested = wizAuthDefault(endpoint.value.trim());
+    if (suggested) auth.value = suggested;
+  };
+  if (auth.value) auth.dataset.touched = '1';
+  else fillAuth();
+  endpoint.addEventListener('input', fillAuth);
+  auth.addEventListener('input', () => { auth.dataset.touched = '1'; });
+  const payload = () => {
+    const graphql = {
+      endpoint: endpoint.value.trim(),
+      label: $('[data-gl]', bg).value.trim(),
+      adapter: $('[data-ga]', bg).value,
+      token_env: $('[data-gtenv]', bg).value.trim(),
+      project_id: $('[data-gp]', bg).value.trim(),
+      client_id: $('[data-gcid]', bg).value.trim(),
+      auth_url: auth.value.trim(),
+    };
+    const token = $('[data-gt]', bg).value;
+    const secret = $('[data-gsec]', bg).value;
+    if (token) graphql.token = token;
+    if (secret) graphql.client_secret = secret;
+    const clear = $('[data-gclear]', bg);
+    if (clear && clear.checked) graphql.clear = true;
+    return { kind: 'graphql', graphql };
+  };
+  $('[data-ctest]', bg).onclick = () => showConnectionTest(bg, payload());
+  $('[data-csave]', bg).onclick = async () => {
+    if (bg._saving) return;
+    const body = payload().graphql;
+    if (!body.clear && !body.endpoint) { toast('Enter a GraphQL endpoint'); return; }
+    if (canvasDirty() && !confirm('Saving the connection clears the canvas.')) return;
+    bg._saving = true;
+    try {
+      await finishConnectionSave(bg, await api('/api/connection', { graphql: body }));
+    } catch (e) {
+      bg._saving = false;
+      toast('Could not save the connection: ' + e.message, 5000);
+    }
+  };
+}
+async function openDiagnostics() {
+  const bg = modal('Diagnostics', `<div class="section-d">Server is the HTTP listener. Explorer is this process: Wiz auth, GraphQL errors, and connection tests. Secrets are removed. Select the text to copy it.</div>
+    <div class="diag-bar"><label>Show <select data-dsource><option value="">All</option><option value="server">Server</option><option value="explorer">Explorer</option></select></label><button class="btn outline small" data-drefresh="1">Refresh</button></div>
+    <textarea class="diag-log" data-dlog readonly spellcheck="false"></textarea>`,
+    `<button class="btn outline" data-close="1">Close</button>`, { width: 720 });
+  const load = async () => {
+    const source = $('[data-dsource]', bg).value;
+    try {
+      const res = await api('/api/diagnostics' + (source ? `?source=${encodeURIComponent(source)}` : ''));
+      const lines = (res.entries || []).map(e => `${e.t}  ${e.source}  ${e.message}`);
+      $('[data-dlog]', bg).value = lines.join('\n') || 'No log lines yet.';
+    } catch (e) {
+      $('[data-dlog]', bg).value = e.message;
+    }
+  };
+  $('[data-dsource]', bg).onchange = load;
+  $('[data-drefresh]', bg).onclick = load;
+  load();
 }
 
 // ---------- boot -----------------------------------------------------------------------
@@ -1714,6 +1820,7 @@ async function boot() {
     const st = await api('/api/status');
     paintSource(st);
     await applyServerBudget(st);
+    await refreshConnectionLinks();
   }
   catch (e) {
     $('#conn').innerHTML = `<span class="err">Cannot reach the data source: ${esc(e.message)}</span>`;

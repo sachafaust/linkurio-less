@@ -38,7 +38,9 @@ GraphQL (optional second source; omit it to use Neo4j only):
     GRAPHQL_ENDPOINT    https://api.us2.app.wiz.io/graphql
     GRAPHQL_TOKEN       bearer token. Data connection can save it in the gitignored
                         .env. It is never written to gx.local.json, logs, or the page.
-    GRAPHQL_CLIENT_ID   client id sent as the clientId header. Saved in .env.
+    GRAPHQL_CLIENT_ID       Wiz client id. Used only to request an access token.
+    GRAPHQL_CLIENT_SECRET   Wiz client secret. Saved in .env. Never sent on the query.
+    GRAPHQL_AUTH_URL        Wiz token URL. A wiz.io or wiz.us host fills this in.
     GRAPHQL_ADAPTER     wiz (default on a wiz.io host) or generic
     GRAPHQL_LABEL / GRAPHQL_ID / GRAPHQL_TOKEN_ENV / GRAPHQL_PROJECT_ID
     A graphql list in gx.local.json can name the endpoint and the token's
@@ -94,8 +96,10 @@ import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
 from neo4j.graph import Node, Path as NPath, Relationship
 
+import diagnostics
 from graphql_source import (
     GraphQLCallError,
+    GraphQLClient,
     GraphQLConfigError,
     GraphQLSource,
     QueryRejected,
@@ -109,6 +113,7 @@ from graphql_source import (
     load_graphql_env,
     resolve_graphql_sources,
     sources_from_config,
+    wiz_auth_url,
     without_secrets,
 )
 from neo4j_env import (
@@ -1143,7 +1148,7 @@ class UnconfiguredNeo4j:
     label = "Neo4j"
     kind = "neo4j"
     message = (
-        "Neo4j has no password yet. Open Data connection and save the URI, user, and password. "
+        "Neo4j has no password yet. Use Add Neo4j, or add a GraphQL connection. "
         "An empty password is allowed when Neo4j has none."
     )
 
@@ -1204,7 +1209,7 @@ def source_catalog():
 
 
 def _secret_values():
-    names = {"GRAPHQL_TOKEN", "NEO4J_PASSWORD"}
+    names = {"GRAPHQL_TOKEN", "GRAPHQL_CLIENT_SECRET", "NEO4J_PASSWORD"}
     extra = os.environ.get("GRAPHQL_TOKEN_ENV")
     if extra:
         names.add(extra)
@@ -1275,6 +1280,13 @@ def _plain(value, label):
     return text
 
 
+def _public_auth_url():
+    raw = (os.environ.get("GRAPHQL_AUTH_URL") or "").strip()
+    if raw and _clean_endpoint(raw) is None:
+        return ""
+    return raw
+
+
 def connection_view():
     """Settings the page can show. The password and the token stay out."""
     load_credential_env()
@@ -1301,6 +1313,8 @@ def connection_view():
             "token_env": token_env,
             "project_id": os.environ.get("GRAPHQL_PROJECT_ID") or "",
             "client_id": _client_id(os.environ.get("GRAPHQL_CLIENT_ID")),
+            "auth_url": _public_auth_url(),
+            "secret_set": bool(os.environ.get("GRAPHQL_CLIENT_SECRET")),
             "token_set": bool(os.environ.get(token_env)),
         },
     }
@@ -1381,8 +1395,9 @@ def save_connection(body):
                 updates["NEO4J_PASSWORD"] = _plain(neo.get("password"), "password")
         if clear:
             remove.extend([
-                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_ADAPTER",
-                "GRAPHQL_LABEL", "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_CLIENT_SECRET",
+                "GRAPHQL_AUTH_URL", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL", "GRAPHQL_ID",
+                "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
             ])
             custom = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
             if custom and _ENV_RE.fullmatch(custom) and custom not in remove:
@@ -1429,6 +1444,18 @@ def save_connection(body):
                     updates["GRAPHQL_CLIENT_ID"] = client_id
                 else:
                     remove.append("GRAPHQL_CLIENT_ID")
+            if "client_secret" in graphql and str(graphql.get("client_secret") or "") != "":
+                updates["GRAPHQL_CLIENT_SECRET"] = _plain(graphql.get("client_secret"), "client secret")
+            if "auth_url" in graphql:
+                auth_raw = _plain(graphql.get("auth_url") or "", "auth URL").strip()
+                if auth_raw:
+                    auth = _clean_endpoint(auth_raw)
+                    if not auth:
+                        raise ValueError(
+                            "The auth URL must be an http or https URL without a user, a password, or a token.")
+                    updates["GRAPHQL_AUTH_URL"] = auth
+                else:
+                    remove.append("GRAPHQL_AUTH_URL")
             previous_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
             token_env = _plain(graphql.get("token_env") or previous_env, "token variable").strip() or "GRAPHQL_TOKEN"
             if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:
@@ -1450,15 +1477,124 @@ def save_connection(body):
             os.environ[key] = "" if value is None else str(value)
         _reconnect()
         print("Data connection saved.")
+        diagnostics.record("explorer", "Data connection saved.")
         return {"connection": connection_view(), "status": public_status(consume=False)}
+
+
+def _test_message(exc, extra):
+    secrets = [value for value in (_secret_values() + list(extra)) if value]
+    return _scrub_public(str(exc), secrets)[:300] or "The connection failed."
+
+
+def test_connection(body):
+    """Probe the form values. Nothing is written to .env."""
+    if not isinstance(body, dict):
+        raise ValueError("connection settings must be an object")
+    kind = str(body.get("kind") or "")
+    if kind == "neo4j":
+        return _test_neo4j(body.get("neo4j") if isinstance(body.get("neo4j"), dict) else {})
+    if kind == "graphql":
+        return _test_graphql(body.get("graphql") if isinstance(body.get("graphql"), dict) else {})
+    raise ValueError("Choose Neo4j or GraphQL to test.")
+
+
+def _test_neo4j(neo):
+    load_credential_env()
+    uri = _plain(neo.get("uri") or os.environ.get("NEO4J_URI") or "bolt://localhost:7687", "URI").strip()
+    user = _plain(neo.get("user") or os.environ.get("NEO4J_USER") or "neo4j", "user").strip() or "neo4j"
+    database = _plain(neo.get("database") or os.environ.get("NEO4J_DATABASE") or "neo4j", "database").strip() or "neo4j"
+    if "password" in neo:
+        password = _plain(neo.get("password"), "password")
+    elif "NEO4J_PASSWORD" in os.environ:
+        password = os.environ.get("NEO4J_PASSWORD")
+        if password is None:
+            password = ""
+    else:
+        raise ValueError("Enter a password, or choose No password.")
+    if "://" not in uri:
+        raise ValueError("NEO4J_URI must be a bolt or neo4j URL, such as bolt://127.0.0.1:7687")
+    parts = urlsplit(uri)
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(
+            "NEO4J_URI includes a user or a password. Keep the URI as the host, "
+            "and set the user and password in their own fields.")
+    driver = GraphDatabase.driver(uri, auth=(user, password), connection_timeout=5)
+    try:
+        def work(tx):
+            return tx.run("RETURN 1 AS ok").single()
+        with driver.session(database=database, default_access_mode=READ_ACCESS) as session:
+            session.execute_read(neo4j.unit_of_work(timeout=8)(work))
+    except Exception as exc:  # noqa: BLE001
+        message = _test_message(exc, [password])
+        diagnostics.record("explorer", f"Neo4j connection test failed: {message}")
+        return {"ok": False, "message": message}
+    finally:
+        try:
+            driver.close()
+        except Exception:  # noqa: BLE001
+            pass
+    diagnostics.record("explorer", "Neo4j connection test succeeded.")
+    return {"ok": True, "message": "Neo4j answered."}
+
+
+def _test_graphql(graphql):
+    load_graphql_env()
+    endpoint_raw = _plain(graphql.get("endpoint") or os.environ.get("GRAPHQL_ENDPOINT") or "", "endpoint").strip()
+    endpoint = _clean_endpoint(endpoint_raw)
+    if not endpoint:
+        raise ValueError(
+            "The GraphQL endpoint must be an http or https URL without a user, a password, or a token.")
+    token_env = _plain(graphql.get("token_env") or os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN", "token variable").strip() or "GRAPHQL_TOKEN"
+    if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:
+        raise ValueError("The token variable name is not usable.")
+    token = None
+    if "token" in graphql and str(graphql.get("token") or "") != "":
+        token = _plain(graphql.get("token"), "token")
+    elif os.environ.get(token_env):
+        token = os.environ.get(token_env)
+    client_id = _client_id(_plain(graphql.get("client_id") if "client_id" in graphql else os.environ.get("GRAPHQL_CLIENT_ID"), "client id"))
+    if "client_secret" in graphql and str(graphql.get("client_secret") or "") != "":
+        secret = _plain(graphql.get("client_secret"), "client secret")
+    elif os.environ.get("GRAPHQL_CLIENT_SECRET"):
+        secret = os.environ.get("GRAPHQL_CLIENT_SECRET")
+    else:
+        secret = ""
+    auth_raw = _plain(graphql.get("auth_url") if "auth_url" in graphql else (os.environ.get("GRAPHQL_AUTH_URL") or ""), "auth URL").strip()
+    if auth_raw:
+        auth = _clean_endpoint(auth_raw)
+        if not auth:
+            raise ValueError("The auth URL must be an http or https URL without a user, a password, or a token.")
+    else:
+        auth = wiz_auth_url(endpoint)
+    if not token and not (client_id and secret and auth):
+        raise ValueError("Add a bearer token, or a Wiz client id and client secret.")
+    client = GraphQLClient(
+        endpoint, token_env, token=token, client_id=client_id or None,
+        client_secret=secret, auth_url=auth, timeout=8, max_retries=0, result_ttl=0,
+    )
+    try:
+        client.execute("{ __typename }")
+    except TokenExpired:
+        message = "token expired"
+        ok = False
+    except Exception as exc:  # noqa: BLE001
+        message = _test_message(exc, [token, secret, client_id])
+        ok = False
+    else:
+        message = "GraphQL answered."
+        ok = True
+    diagnostics.record("explorer", f"GraphQL connection test: {message}")
+    return {"ok": ok, "message": message}
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "GraphExplorer/0.1"
 
     def log_message(self, fmt, *args):
+        line = _scrub_public(fmt % args, _secret_values())
+        diagnostics.record("server", line)
         if os.environ.get("QUIET") != "1":
-            sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+            sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), line))
 
     def _send(self, code, body: bytes, ctype="application/json"):
         self.send_response(code)
@@ -1504,6 +1640,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_scrub_public(source_catalog(), _secret_values()))
             if u.path == "/api/connection":
                 return self._json(connection_view())
+            if u.path == "/api/diagnostics":
+                return self._json({"entries": _scrub_public(diagnostics.snapshot(q.get("source")), _secret_values())})
             if u.path == "/api/schema":
                 return self._json(src.schema(refresh=q.get("refresh") == "1"))
             if u.path == "/api/styles":
@@ -1529,6 +1667,8 @@ class Handler(BaseHTTPRequestHandler):
         src = current()
         try:
             b = self._body()
+            if u.path == "/api/connection/test":
+                return self._json(test_connection(b))
             if u.path == "/api/connection":
                 return self._json(save_connection(b))
             if u.path == "/api/source":
@@ -1565,7 +1705,7 @@ def main():
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
         print(f"WARNING: {e}", file=sys.stderr)
-        print("Neo4j is not configured. Open the page and use Data connection to save it.", file=sys.stderr)
+        print("Neo4j is not configured. Open the page and use Add Neo4j or Add GraphQL.", file=sys.stderr)
         graph = UnconfiguredNeo4j()
     else:
         graph = Graph(settings)

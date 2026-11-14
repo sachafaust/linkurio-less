@@ -1,10 +1,11 @@
 """A GraphQL data source beside Neo4j.
 
 The explorer shows one source at a time. This module never writes the bearer
-token to disk, to a log line, or to a response. Data connection in the page
-may store it in the gitignored .env file. The token is read from the
-environment at the moment a request is sent. Mutations are refused before
-that request is built.
+token, the client secret, or the auth request to disk, to a log line, or to a
+response. Data connection in the page may store them in the gitignored .env
+file. Wiz exchanges the client id and client secret for an access token.
+The GraphQL call sends that token as Authorization: Bearer and does not send
+the client id. Mutations are refused before that request is built.
 
 Wiz is the first adapter: graphSearch, the ``_vertexID`` id field, and cursor
 pages. A source with no adapter still exposes the data model from
@@ -20,12 +21,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import diagnostics
 
 TOKEN_KEYS = {"token", "bearer", "authorization", "secret", "password", "access_token"}
 ENV_KEYS = (
-    "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_ADAPTER",
-    "GRAPHQL_LABEL", "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+    "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_CLIENT_SECRET",
+    "GRAPHQL_AUTH_URL", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL", "GRAPHQL_ID",
+    "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
 )
 _ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,39}")
 _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -109,7 +113,7 @@ class QueryRejected(ValueError):
 
 
 class TokenExpired(Exception):
-    """The GraphQL API returned HTTP 401 or an equivalent auth error."""
+    """The API said the access token is expired, and a refresh did not help."""
 
 
 class RateLimited(Exception):
@@ -141,7 +145,7 @@ def load_graphql_env():
 
 def _secret_key(name) -> bool:
     key = str(name).lower()
-    return key in TOKEN_KEYS or key.endswith("_token")
+    return key in TOKEN_KEYS or key.endswith("_token") or key.endswith("_secret")
 
 
 def _warn_ignored_token():
@@ -203,12 +207,26 @@ def _clean_endpoint(value):
     return raw
 
 
+def _wiz_host(endpoint):
+    host = (urlsplit(str(endpoint or "")).hostname or "").lower()
+    return host in ("wiz.io", "wiz.us") or host.endswith(".wiz.io") or host.endswith(".wiz.us")
+
+
+def wiz_auth_url(endpoint):
+    """Auth host for a Wiz GraphQL URL. Empty when the host is not Wiz."""
+    host = (urlsplit(str(endpoint or "")).hostname or "").lower()
+    if host == "wiz.us" or host.endswith(".wiz.us"):
+        return "https://auth.app.wiz.us/oauth/token"
+    if host == "wiz.io" or host.endswith(".wiz.io"):
+        return "https://auth.app.wiz.io/oauth/token"
+    return ""
+
+
 def _adapter_name(value, endpoint):
     raw = str(value or "").strip().lower()
     if raw in ("wiz", "generic"):
         return raw
-    host = (urlsplit(endpoint).hostname or "").lower()
-    return "wiz" if host == "wiz.io" or host.endswith(".wiz.io") else "generic"
+    return "wiz" if _wiz_host(endpoint) else "generic"
 
 
 def _client_id(value):
@@ -637,11 +655,16 @@ class GraphQLClient:
 
     def __init__(self, endpoint, token_env="GRAPHQL_TOKEN", *, token=None, opener=None,
                  max_inflight=4, max_retries=3, backoff=0.5, result_ttl=60, schema_ttl=600,
-                 timeout=30, sleep=None, client_id=None):
+                 timeout=30, sleep=None, client_id=None, client_secret=None, auth_url=None):
         self.endpoint = endpoint
         self.token_env = token_env or "GRAPHQL_TOKEN"
         self.client_id = _client_id(client_id)
+        self.auth_url = str(auth_url or "").strip()
         self._fixed_token = token
+        # None reads GRAPHQL_CLIENT_SECRET at request time. "" means there is none.
+        self._fixed_secret = client_secret
+        self._minted = ""
+        self._noted = False
         self._opener = opener or urllib.request.urlopen
         self.max_retries = max(0, int(max_retries))
         self.backoff = float(backoff)
@@ -664,17 +687,92 @@ class GraphQLClient:
             raise GraphQLConfigError(f"{self.token_env} is not set")
         return value
 
+    def _secret_material(self):
+        values = [self._minted, self._fixed_token, self._fixed_secret, self.client_id]
+        values.append(os.environ.get("GRAPHQL_CLIENT_SECRET"))
+        values.append(os.environ.get(self.token_env))
+        return [value for value in values if value]
+
     def _scrub(self, text):
         text = str(text or "")
-        try:
-            token = self._token()
-        except GraphQLConfigError:
-            token = ""
-        if token and token in text:
-            text = text.replace(token, "[redacted]")
-        if self.client_id and self.client_id in text:
-            text = text.replace(self.client_id, "[redacted]")
+        for secret in self._secret_material():
+            if secret in text:
+                text = text.replace(secret, "[redacted]")
         return text[:500]
+
+    def _note(self, message):
+        if self._noted:
+            return
+        self._noted = True
+        diagnostics.record("explorer", self._scrub(message))
+
+    def _oauth_parts(self):
+        client_id = self.client_id or _client_id(os.environ.get("GRAPHQL_CLIENT_ID"))
+        if self._fixed_secret is None:
+            secret = os.environ.get("GRAPHQL_CLIENT_SECRET") or ""
+        else:
+            secret = self._fixed_secret or ""
+        secret = str(secret)
+        if "\n" in secret or "\r" in secret:
+            secret = ""
+        url = self.auth_url or (os.environ.get("GRAPHQL_AUTH_URL") or "").strip() or wiz_auth_url(self.endpoint)
+        return client_id, secret, url
+
+    def _use_oauth(self):
+        client_id, secret, url = self._oauth_parts()
+        return bool(client_id and secret and url)
+
+    def _mint(self):
+        """Trade the client id and secret for an access token. The request is not logged."""
+        client_id, secret, url = self._oauth_parts()
+        if not (client_id and secret and url):
+            raise GraphQLConfigError(
+                "A Wiz client id, client secret, and auth URL are required to request an access token.")
+        form = urlencode({
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": secret,
+            "audience": "wiz-api",
+        }).encode()
+        request = urllib.request.Request(
+            url, data=form, method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            })
+        try:
+            with self._opener(request, timeout=self.timeout) as response:
+                status = getattr(response, "status", None) or response.getcode()
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            status, raw = exc.code, exc.read()
+        except urllib.error.URLError as exc:
+            diagnostics.record("explorer", f"Wiz auth failed: {self._scrub(exc.reason or exc)}")
+            raise GraphQLCallError(f"Wiz auth failed: {self._scrub(exc.reason or exc)}") from exc
+        if status >= 400:
+            diagnostics.record("explorer", f"Wiz auth failed (HTTP {status}).")
+            raise GraphQLCallError(f"Wiz auth failed (HTTP {status}).")
+        try:
+            payload = json.loads(raw.decode() or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            diagnostics.record("explorer", "Wiz auth returned a body that was not JSON.")
+            raise GraphQLCallError("Wiz auth returned a body that was not JSON.")
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token:
+            diagnostics.record("explorer", "Wiz auth returned no access token.")
+            raise GraphQLCallError("Wiz auth returned no access token.")
+        self._minted = token
+        diagnostics.record("explorer", "Wiz auth returned an access token.")
+        return token
+
+    def _bearer(self):
+        if self._minted:
+            return self._minted
+        if self._use_oauth():
+            self._note("GraphQL uses an access token from the Wiz client id and secret.")
+            return self._mint()
+        self._note("GraphQL uses the saved bearer token.")
+        return self._token()
 
     def _key(self, document, variables):
         return document, json.dumps(variables or {}, sort_keys=True, default=str)
@@ -724,33 +822,61 @@ class GraphQLClient:
     def _fetch(self, document, variables):
         body = json.dumps({"query": document, "variables": variables}).encode()
         last = RateLimited("The GraphQL API asked us to slow down (HTTP 429).")
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        auth_tries = 0
+        while True:
             self._sem.acquire()
             try:
                 status, headers, raw = self._send(body)
             finally:
                 self._sem.release()
             if status == 401:
-                raise TokenExpired("token expired")
+                detail = self._refusal(status, raw)
+                diagnostics.record("explorer", detail)
+                if auth_tries < 1 and self._use_oauth():
+                    auth_tries += 1
+                    self._minted = ""
+                    diagnostics.record("explorer", "GraphQL HTTP 401. Requesting a new access token.")
+                    self._mint()
+                    continue
+                if _token_is_expired(detail):
+                    raise TokenExpired("token expired")
+                raise GraphQLCallError(detail)
             if status == 429:
                 if attempt >= self.max_retries:
                     raise last
                 self._sleep(self._retry_delay(headers, attempt))
+                attempt += 1
                 continue
             payload = self._payload(raw)
             if status >= 400:
-                message = _error_text(payload) or f"GraphQL request failed (HTTP {status})."
-                raise GraphQLCallError(self._scrub(message))
+                message = self._scrub(_error_text(payload) or f"GraphQL request failed (HTTP {status}).")
+                diagnostics.record("explorer", message)
+                raise GraphQLCallError(message)
             if isinstance(payload, dict) and payload.get("errors") and payload.get("data") is None:
                 message = self._scrub(_error_text(payload) or "GraphQL request failed.")
-                if _looks_unauthorized(message):
+                diagnostics.record("explorer", message)
+                if _token_is_expired(message):
                     raise TokenExpired("token expired")
                 raise GraphQLCallError(message)
             return payload
-        raise last
+
+    def _refusal(self, status, raw):
+        message = ""
+        try:
+            payload = self._payload(raw)
+        except GraphQLCallError:
+            payload = None
+        if isinstance(payload, dict):
+            message = _error_text(payload) or str(payload.get("message") or "")
+        if not message:
+            message = f"The GraphQL API refused the request (HTTP {status})."
+        else:
+            message = f"The GraphQL API refused the request (HTTP {status}): {message}"
+        return self._scrub(message)
 
     def _send(self, body):
-        token = self._token()
+        token = self._bearer()
         request = urllib.request.Request(
             self.endpoint, data=body, method="POST",
             headers={
@@ -758,8 +884,6 @@ class GraphQLClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             })
-        if self.client_id:
-            request.add_header("clientId", self.client_id)
         try:
             with self._opener(request, timeout=self.timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
@@ -799,9 +923,14 @@ def _error_text(payload):
     return "; ".join(parts)
 
 
-def _looks_unauthorized(message):
-    text = message.lower()
-    return "unauthorized" in text or "unauthorised" in text or "token expired" in text
+def _token_is_expired(message):
+    text = str(message or "").lower()
+    return (
+        "token expired" in text
+        or "token has expired" in text
+        or "token is expired" in text
+        or "jwt expired" in text
+    )
 
 
 def _page_size(body, limit):
@@ -1129,9 +1258,10 @@ class GraphQLSource:
         ttl = float(os.environ.get("CACHE_TTL", 60))
         schema_ttl = float(os.environ.get("SCHEMA_TTL", 600))
         inflight = int(os.environ.get("GRAPHQL_MAX_INFLIGHT", 4))
+        auth = spec.get("auth_url") or os.environ.get("GRAPHQL_AUTH_URL") or wiz_auth_url(self.endpoint)
         self.client = client or GraphQLClient(
             self.endpoint, self.token_env, client_id=spec.get("client_id"),
-            max_inflight=inflight, result_ttl=ttl, schema_ttl=schema_ttl)
+            auth_url=auth, max_inflight=inflight, result_ttl=ttl, schema_ttl=schema_ttl)
         self.adapter = WizAdapter(self) if self.adapter_name == "wiz" else GenericAdapter()
 
     def status(self, consume_config_created=False):

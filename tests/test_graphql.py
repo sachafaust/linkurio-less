@@ -163,21 +163,72 @@ def graph_page(entities, has_next, cursor, total):
     }}}
 
 
-def test_client_id_header():
-    print("client id")
+def test_wiz_auth():
+    print("wiz auth")
     seen = []
 
     def opener(request, timeout=None):
-        seen.append({key.lower(): value for key, value in request.header_items()})
+        headers = {key.lower(): value for key, value in request.header_items()}
+        seen.append({"url": request.full_url, "headers": headers, "body": request.data.decode()})
+        if request.full_url.endswith("/oauth/token"):
+            return Resp(200, b'{"access_token":"minted-access-token","token_type":"bearer"}')
         return Resp(200, b'{"data":{"__typename":"Query"}}')
 
-    client(opener, client_id="client-id-zz").execute("{ __typename }")
-    sent = seen[0]
-    check("the client id is sent as clientId",
-          sent.get("clientid") == "client-id-zz" and TOKEN in sent.get("authorization", ""))
-    seen.clear()
-    client(opener).execute("{ __typename }")
-    check("a request without a client id omits that header", "clientid" not in seen[0])
+    client(
+        opener, token=None, client_id="client-id-zz", client_secret="client-secret-zz",
+        auth_url="https://auth.example.test/oauth/token",
+    ).execute("{ __typename }")
+    auth, query = seen
+    auth_body = auth["body"]
+    check("the token request is a form and the query sends only the access token",
+          auth["url"].endswith("/oauth/token")
+          and "grant_type=client_credentials" in auth_body
+          and "audience=wiz-api" in auth_body
+          and "client_id=client-id-zz" in auth_body
+          and "client-secret-zz" in auth_body
+          and "clientid" not in query["headers"]
+          and "client-secret-zz" not in query["body"]
+          and query["headers"].get("authorization") == "Bearer minted-access-token")
+    check("a wiz.us host uses the wiz.us auth URL",
+          gql.wiz_auth_url("https://api.us2.app.wiz.us/graphql") == "https://auth.app.wiz.us/oauth/token")
+    check("a wiz.io host uses the wiz.io auth URL",
+          gql.wiz_auth_url("https://api.us2.app.wiz.io/graphql") == "https://auth.app.wiz.io/oauth/token")
+    check("a wiz.us host selects the wiz adapter",
+          gql._adapter_name("", "https://api.us2.app.wiz.us/graphql") == "wiz")
+
+    calls = {"auth": 0, "query": 0}
+
+    def refresh(request, timeout=None):
+        if request.full_url.endswith("/oauth/token"):
+            calls["auth"] += 1
+            token = f"minted-{calls['auth']}"
+            return Resp(200, json.dumps({"access_token": token}).encode())
+        calls["query"] += 1
+        if calls["query"] == 1:
+            raise http_error(401, b'{"errors":[{"message":"unauthorized"}]}')
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    again = client(
+        refresh, token=None, client_id="client-id-zz", client_secret="client-secret-zz",
+        auth_url="https://auth.example.test/oauth/token",
+    ).execute("{ __typename }")
+    check("HTTP 401 requests a new access token once and retries",
+          calls["auth"] == 2 and calls["query"] == 2 and again["data"]["__typename"] == "Query",
+          f"auth {calls['auth']} query {calls['query']}")
+
+    def still(request, timeout=None):
+        if request.full_url.endswith("/oauth/token"):
+            return Resp(200, b'{"access_token":"minted-stays"}')
+        raise http_error(401, b'{"errors":[{"message":"token expired"}]}')
+
+    try:
+        client(
+            still, token=None, client_id="client-id-zz", client_secret="client-secret-zz",
+            auth_url="https://auth.example.test/oauth/token",
+        ).execute("{ __typename }")
+        check("a repeated expiry is token expired", False, "no error")
+    except TokenExpired as exc:
+        check("a repeated expiry is token expired", str(exc) == "token expired", safe(exc))
 
 
 def test_mutations():
@@ -335,10 +386,13 @@ def test_auth_and_rate_limit():
     same = client(expired)
     try:
         same.execute("{ __typename }")
-        check("HTTP 401 is token expired", False, "no error")
+        check("HTTP 401 keeps the API reason", False, "no error")
+    except GraphQLCallError as exc:
+        check("HTTP 401 keeps the API reason",
+              "HTTP 401" in str(exc) and "token expired" not in str(exc).lower()
+              and TOKEN not in str(exc) and "[redacted]" in str(exc), safe(exc))
     except TokenExpired as exc:
-        check("HTTP 401 is token expired",
-              str(exc) == "token expired" and TOKEN not in str(exc), safe(exc))
+        check("HTTP 401 keeps the API reason", False, safe(exc))
     again = same.execute("{ __typename }")
     check("a 401 is not cached", calls["n"] == 2 and again["data"]["__typename"] == "Query")
 
@@ -468,12 +522,14 @@ def test_config_and_generic():
         "nodes": 10, "edges": 20, "source": "user",
         "graphql": {
             "id": "wiz", "endpoint": "https://api.us2.app.wiz.io/graphql",
-            "adapter": "wiz", "token": TOKEN, "token_env": "GRAPHQL_TOKEN",
+            "adapter": "wiz", "token": TOKEN, "client_secret": "client-secret-zz",
+            "token_env": "GRAPHQL_TOKEN",
         },
     })
     blob = json.dumps(norm)
     check("a token in the config is dropped and the endpoint stays",
           TOKEN not in blob and "token" not in norm["graphql"][0]
+          and "client_secret" not in norm["graphql"][0] and "client-secret-zz" not in blob
           and norm["graphql"][0]["endpoint"] == "https://api.us2.app.wiz.io/graphql"
           and norm["graphql"][0]["adapter"] == "wiz"
           and norm["graphql"][0]["token_env"] == "GRAPHQL_TOKEN",
@@ -618,6 +674,8 @@ def start_mock():
             text = name_filter["CONTAINS"][0]
         if text == "expired-check":
             return 401, {"errors": [{"message": f"unauthorized {TOKEN}"}]}
+        if text == "expiry-check":
+            return 401, {"errors": [{"message": "token expired"}]}
         if text == "slow-check":
             return 429, {"errors": [{"message": TOKEN}]}
         if "relationships" in query:
@@ -799,8 +857,12 @@ def test_source_switch():
               code == 400 and "no Cypher" in (denied.get("error") or "") and TOKEN not in raw,
               safe(denied))
         code, raw, expired = http_json("GET", base + "/api/search?type=node&limit=5&q=expired-check")
-        check("HTTP 401 from the API is token expired",
-              code == 401 and expired.get("error") == "token expired" and TOKEN not in raw, safe(raw))
+        check("HTTP 401 from the API keeps the reason",
+              code == 502 and "HTTP 401" in (expired.get("error") or "")
+              and expired.get("error") != "token expired" and TOKEN not in raw, safe(raw))
+        code, raw, expiry = http_json("GET", base + "/api/search?type=node&limit=5&q=expiry-check")
+        check("a token-expired body stays token expired",
+              code == 401 and expiry.get("error") == "token expired" and TOKEN not in raw, safe(raw))
         code, raw, slow = http_json("GET", base + "/api/search?type=node&limit=5&q=slow-check")
         check("HTTP 429 from the API asks the page to slow down",
               code == 429 and slow.get("error") == "The GraphQL API asked us to slow down (HTTP 429)."
@@ -839,7 +901,7 @@ def main():
     empty.close()
     os.environ["GX_ENV"] = empty.name
     try:
-        test_client_id_header()
+        test_wiz_auth()
         test_mutations()
         test_introspection_model()
         test_paging_and_wiz_shape()

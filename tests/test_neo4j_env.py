@@ -404,6 +404,20 @@ def test_connection_from_the_page():
               and SECRET not in body and WRONG not in body,
               "a plain start stays up and reports Neo4j as not connected",
               "" if status else "server did not answer")
+        code, raw = _request(port, "/api/connection/test", {
+            "kind": "graphql",
+            "graphql": {
+                "endpoint": "http://127.0.0.1:9/graphql",
+                "token": SECRET,
+                "client_id": "client-id-zz",
+            },
+        })
+        diag_code, diag_raw = _request(port, "/api/diagnostics?source=explorer")
+        compact = raw.replace(" ", "")
+        check(code == 200 and SECRET not in raw and '"ok":false' in compact,
+              "a GraphQL test reports failure and omits the token")
+        check(diag_code == 200 and SECRET not in diag_raw and "GraphQL connection test" in diag_raw,
+              "the explorer log records the test without the token")
         code, raw = _request(port, "/api/connection")
         check(code == 200 and '"password":' not in raw and '"token":' not in raw
               and SECRET not in raw and WRONG not in raw and "password_set" in raw,
@@ -494,21 +508,57 @@ def _browser_saves_connection(port):
                     && document.querySelector('#source-pick')
                     && !document.querySelector('#source-pick').disabled""",
                 timeout=40000)
-            page.click("[data-act=connection]")
+            page.click("[data-act=connection-neo4j]")
             page.wait_for_selector("[data-csave]")
-            empty = page.evaluate(
+            neo_only = page.evaluate(
                 """() => ({
                     pw: document.querySelector('[data-cpw]').value,
-                    token: document.querySelector('[data-gt]').value,
                     pwType: document.querySelector('[data-cpw]').type,
-                    tokenType: document.querySelector('[data-gt]').type,
+                    graphql: !!document.querySelector('[data-ge]'),
+                    test: !!document.querySelector('[data-ctest]'),
                 })""")
-            check(empty["pw"] == "" and empty["token"] == "" and empty["pwType"] == "password" and empty["tokenType"] == "password",
-                  "the dialog leaves both secrets blank")
+            check(neo_only["pw"] == "" and neo_only["pwType"] == "password"
+                  and not neo_only["graphql"] and neo_only["test"],
+                  "the Neo4j dialog is only Neo4j and can test")
             page.fill("[data-cu]", "bolt://127.0.0.1:7687")
             page.fill("[data-cuser]", "neo4j")
             page.fill("[data-cpw]", WRONG)
+            page.click("[data-ctest]")
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('[data-cresult]');
+                    const text = el ? el.textContent || '' : '';
+                    return text && !text.startsWith('Testing');
+                }""",
+                timeout=20000)
+            tested = page.evaluate("() => document.querySelector('[data-cresult]').textContent || ''")
+            check(WRONG not in tested and SECRET not in tested and tested.strip() != "",
+                  "the Neo4j test result leaves out the password")
+            page.click("[data-csave]")
+            page.wait_for_function(
+                """() => {
+                    const t = document.querySelector('#toast');
+                    return t && (t.textContent || '').includes('Connection saved');
+                }""",
+                timeout=30000)
+            page.evaluate("() => { const t = document.querySelector('#toast'); if (t) t.textContent = ''; }")
+            page.click("[data-act=connection-graphql]")
+            page.wait_for_selector("[data-gsec]")
+            gql_only = page.evaluate(
+                """() => ({
+                    secret: document.querySelector('[data-gsec]').value,
+                    secretType: document.querySelector('[data-gsec]').type,
+                    token: document.querySelector('[data-gt]').value,
+                    tokenType: document.querySelector('[data-gt]').type,
+                    neo4j: !!document.querySelector('[data-cpw]'),
+                })""")
+            check(gql_only["secret"] == "" and gql_only["token"] == ""
+                  and gql_only["secretType"] == "password" and gql_only["tokenType"] == "password"
+                  and not gql_only["neo4j"],
+                  "the GraphQL dialog is only GraphQL and leaves both secrets blank")
             page.fill("[data-ge]", "https://api.us2.app.wiz.io/graphql")
+            page.fill("[data-gcid]", "client-id-zz")
+            page.click("details.conn-more summary")
             page.select_option("[data-ga]", "wiz")
             page.fill("[data-gt]", SECRET)
             page.click("[data-csave]")
@@ -518,6 +568,27 @@ def _browser_saves_connection(port):
                     return t && (t.textContent || '').includes('Connection saved');
                 }""",
                 timeout=30000)
+            page.click("[data-act=diagnostics]")
+            page.wait_for_selector("[data-dlog]")
+            deadline = time.time() + 10
+            diag = ""
+            while time.time() < deadline:
+                diag = page.evaluate("() => (document.querySelector('[data-dlog]') || {}).value || ''")
+                if "Connection saved" in diag:
+                    break
+                time.sleep(0.2)
+            _, server_log = _request(port, "/api/diagnostics?source=explorer")
+            reasons = []
+            if SECRET in diag or WRONG in diag or SECRET in server_log or WRONG in server_log:
+                reasons.append("secret in the log")
+            if "Data connection saved." not in server_log:
+                reasons.append("server log missing save")
+            if "Data connection saved." not in diag:
+                reasons.append("panel missing save")
+            if '"source": "server"' in server_log:
+                reasons.append("filter kept server lines")
+            shown = ("; ".join(reasons) + "\n" + diag).replace(SECRET, "[redacted]").replace(WRONG, "[redacted]")
+            check(not reasons, "diagnostics shows the explorer log without secrets", "" if not reasons else shown[:300])
             leaked = page.evaluate(
                 """(secrets) => {
                     const text = document.body.innerText || '';
@@ -561,15 +632,20 @@ def test_graphql_only_and_empty_password():
                 "endpoint": "https://api.us2.app.wiz.io/graphql",
                 "adapter": "wiz", "label": "Wiz", "token": SECRET,
                 "client_id": "client-id-zz",
+                "client_secret": "client-secret-zz",
+                "auth_url": "https://auth.app.wiz.io/oauth/token",
             },
         })
         text = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
         cfg_path = Path(folder) / "gx.local.json"
         cfg = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
         check(code == 200 and "NEO4J_PASSWORD" not in text and "GRAPHQL_TOKEN=" in text and SECRET in text
-              and "GRAPHQL_CLIENT_ID=client-id-zz" in text and "client-id-zz" in raw
-              and SECRET not in raw and SECRET not in cfg and "client-id-zz" not in cfg,
-              "a GraphQL-only save writes the token and the client id")
+              and "GRAPHQL_CLIENT_ID=client-id-zz" in text and "GRAPHQL_CLIENT_SECRET=client-secret-zz" in text
+              and "GRAPHQL_AUTH_URL=https://auth.app.wiz.io/oauth/token" in text
+              and "client-id-zz" in raw and "client-secret-zz" not in raw
+              and SECRET not in raw and SECRET not in cfg and "client-id-zz" not in cfg
+              and "client-secret-zz" not in cfg,
+              "a GraphQL-only save writes the token, the client id, and the client secret")
         code, raw = _request(port, "/api/connection", {
             "neo4j": {
                 "uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j",

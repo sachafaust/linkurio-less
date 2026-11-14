@@ -36,7 +36,11 @@
         <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small id="land-cypher-note">Write one read-only statement.</small></span></button>
         <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
       </div>
-      <button class="land-help" data-act="connection"><i data-icon="DatabaseOutline"></i>Data connection</button>
+      <div class="land-connect" id="land-connect">
+        <button class="land-help" data-act="connection-neo4j"><i data-icon="DatabaseOutline"></i><span data-neo-label>Add Neo4j</span></button>
+        <button class="land-help" data-act="connection-graphql"><i data-icon="GraphOutline"></i><span data-gql-label>Add GraphQL</span></button>
+        <button class="land-help" data-act="diagnostics"><i data-icon="FileDocumentOutline"></i>Diagnostics</button>
+      </div>
       <button class="land-help" data-act="help"><i data-icon="HelpCircleOutline"></i>Help and shortcuts</button>
     </div>
   </div>

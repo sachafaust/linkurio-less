@@ -59,7 +59,7 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 
 Copy `.env.example` to `.env` (gitignored) or export the same variables. The environment wins over `.env`. Use a user with the reader role. A bolt URI that already contains a user or password is refused. `NEO4J_PASSWORD` may be empty when Neo4j has no password. Leave the variable out only when it is unset; `run_local.py` then asks, and Enter sends an empty password.
 
-`python3 server.py` with no password still opens the page. Data connection writes the same variables into `.env`. That file is gitignored. The password and a GraphQL token are not written into `gx.local.json`, and the page does not show them again after you save.
+`python3 server.py` with no password still opens the page. Add Neo4j and Add GraphQL each write their own settings into `.env`. That file is gitignored. The password, client secret, and token are not written into `gx.local.json`, and the page does not show them again after you save. Test checks the form before it is saved. Diagnostics shows the server log and the explorer log.
 
 ```bash
 NEO4J_URI=bolt://127.0.0.1:7687
@@ -86,16 +86,14 @@ The first launch writes a canvas working set to `gx.local.json` from CPU and RAM
 
 The page shows one source at a time. GraphQL results stay in the GraphQL view. Wiz is the first adapter (`graphSearch`, `_vertexID`, cursor pages). A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists.
 
-Set the endpoint and a ready bearer token in the environment, in `.env`, or with Data connection on the page. The token stays in that gitignored file or in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token value in that file is removed on startup. The page does not show the token again after you save.
+Set the endpoint in the environment, in `.env`, or with Add GraphQL on the page. Wiz takes `GRAPHQL_CLIENT_ID` and `GRAPHQL_CLIENT_SECRET` and returns an access token from `https://auth.app.wiz.io/oauth/token` (or `auth.app.wiz.us` for a `.wiz.us` host). The body is form fields: `grant_type=client_credentials`, `client_id`, `client_secret`, and `audience=wiz-api`. The GraphQL call sends `Authorization: Bearer` and does not send the client id. A bearer you already have can be saved as `GRAPHQL_TOKEN` when there is no client secret. `GRAPHQL_AUTH_URL` overrides the auth host. The secret and the token stay in the gitignored file or in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token or client secret in that file is removed on startup.
 
 ```bash
 GRAPHQL_ENDPOINT=https://api.us2.app.wiz.io/graphql
 GRAPHQL_CLIENT_ID=...
-GRAPHQL_TOKEN=...
+GRAPHQL_CLIENT_SECRET=...
 GRAPHQL_ADAPTER=wiz
 ```
-
-Data connection saves the client id in `.env` with the token. Requests send it as the `clientId` header. The page shows the client id again so you can change it. The token stays hidden.
 
 Or a `graphql` list in `gx.local.json`:
 
@@ -107,7 +105,7 @@ Or a `graphql` list in `gx.local.json`:
 
 `GRAPHQL_ENDPOINT` overrides a file entry with the same id. `GRAPHQL_LABEL`, `GRAPHQL_ID`, `GRAPHQL_TOKEN_ENV` (default `GRAPHQL_TOKEN`), and `GRAPHQL_PROJECT_ID` (default `*`) are optional. On a `wiz.io` host the adapter defaults to `wiz`. Any other host defaults to `generic`.
 
-The client sends queries only. A mutation is refused before the request is built. HTTP 401 is shown as "token expired". HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time.
+The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. Diagnostics lists the server log and the explorer log with secrets removed.
 
 ## API
 
@@ -118,8 +116,10 @@ The page calls these JSON endpoints on the same host. `POST /api/cypher` takes o
 | GET | `/api/status` | connection, counts, working set, safety ceiling, active source |
 | GET | `/api/sources` | sources you can pick. The token is omitted |
 | POST | `/api/source` | `{"id":"wiz"}` switches the active source |
-| GET | `/api/connection` | Neo4j and GraphQL settings. The password and the token are omitted |
-| POST | `/api/connection` | saves those settings into `.env` |
+| GET | `/api/connection` | Neo4j and GraphQL settings. The password, client secret, and token are omitted |
+| POST | `/api/connection` | saves one connection into `.env` |
+| POST | `/api/connection/test` | checks the form and does not save it |
+| GET | `/api/diagnostics` | server and explorer log lines, with secrets removed |
 | GET | `/api/schema` | labels, relationship types, counts |
 | GET | `/api/styles` | colors, icons, captions |
 | GET | `/api/queries` | built-in saved queries |
