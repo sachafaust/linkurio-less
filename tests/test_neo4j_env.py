@@ -560,14 +560,16 @@ def test_graphql_only_and_empty_password():
             "graphql": {
                 "endpoint": "https://api.us2.app.wiz.io/graphql",
                 "adapter": "wiz", "label": "Wiz", "token": SECRET,
+                "client_id": "client-id-zz",
             },
         })
         text = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
         cfg_path = Path(folder) / "gx.local.json"
         cfg = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
         check(code == 200 and "NEO4J_PASSWORD" not in text and "GRAPHQL_TOKEN=" in text and SECRET in text
-              and SECRET not in raw and SECRET not in cfg,
-              "a GraphQL-only save writes the token and leaves Neo4j unset")
+              and "GRAPHQL_CLIENT_ID=client-id-zz" in text and "client-id-zz" in raw
+              and SECRET not in raw and SECRET not in cfg and "client-id-zz" not in cfg,
+              "a GraphQL-only save writes the token and the client id")
         code, raw = _request(port, "/api/connection", {
             "neo4j": {
                 "uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j",

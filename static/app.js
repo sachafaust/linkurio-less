@@ -1554,6 +1554,7 @@ async function openConnection() {
     <div class="field">Endpoint<input type="text" data-ge="1" value="${esc(g.endpoint || '')}" placeholder="https://api.us2.app.wiz.io/graphql" autocomplete="off" spellcheck="false"></div>
     <div class="field">Label<input type="text" data-gl="1" value="${esc(g.label || '')}" placeholder="Wiz" autocomplete="off"></div>
     <div class="field">Adapter<select data-ga="1"><option value="" ${g.adapter ? '' : 'selected'}>From the host name</option><option value="wiz" ${g.adapter === 'wiz' ? 'selected' : ''}>Wiz</option><option value="generic" ${g.adapter === 'generic' ? 'selected' : ''}>Generic</option></select></div>
+    <div class="field">Client ID<input type="text" data-gcid="1" value="${esc(g.client_id || '')}" autocomplete="off" spellcheck="false"></div>
     <div class="field">Token<input type="password" data-gt="1" value="" autocomplete="new-password" placeholder="${g.token_set ? 'Saved — leave blank to keep it' : 'Bearer token'}"></div>
     <div class="field">Token variable<input type="text" data-gtenv="1" value="${esc(g.token_env || 'GRAPHQL_TOKEN')}" autocomplete="off" spellcheck="false"></div>
     <div class="field">Project<input type="text" data-gp="1" value="${esc(g.project_id || '')}" placeholder="*" autocomplete="off" spellcheck="false"></div>
@@ -1577,6 +1578,7 @@ async function openConnection() {
       adapter: $('[data-ga]', bg).value,
       token_env: $('[data-gtenv]', bg).value.trim(),
       project_id: $('[data-gp]', bg).value.trim(),
+      client_id: $('[data-gcid]', bg).value.trim(),
     };
     const token = $('[data-gt]', bg).value;
     if (token) graphql.token = token;

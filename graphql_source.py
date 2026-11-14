@@ -24,8 +24,8 @@ from urllib.parse import parse_qs, urlsplit
 
 TOKEN_KEYS = {"token", "bearer", "authorization", "secret", "password", "access_token"}
 ENV_KEYS = (
-    "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL",
-    "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+    "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_ADAPTER",
+    "GRAPHQL_LABEL", "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
 )
 _ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,39}")
 _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -211,6 +211,13 @@ def _adapter_name(value, endpoint):
     return "wiz" if host == "wiz.io" or host.endswith(".wiz.io") else "generic"
 
 
+def _client_id(value):
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text:
+        return ""
+    return text[:200]
+
+
 def _source_id(value, adapter):
     raw = str(value or "").strip()
     if _ID_RE.fullmatch(raw):
@@ -294,6 +301,10 @@ def resolve_graphql_sources(config):
             continue
         seen.add(ident)
         out.append(entry)
+    client_id = _client_id(os.environ.get("GRAPHQL_CLIENT_ID"))
+    if client_id:
+        for entry in out:
+            entry["client_id"] = client_id
     return out
 
 
@@ -626,9 +637,10 @@ class GraphQLClient:
 
     def __init__(self, endpoint, token_env="GRAPHQL_TOKEN", *, token=None, opener=None,
                  max_inflight=4, max_retries=3, backoff=0.5, result_ttl=60, schema_ttl=600,
-                 timeout=30, sleep=None):
+                 timeout=30, sleep=None, client_id=None):
         self.endpoint = endpoint
         self.token_env = token_env or "GRAPHQL_TOKEN"
+        self.client_id = _client_id(client_id)
         self._fixed_token = token
         self._opener = opener or urllib.request.urlopen
         self.max_retries = max(0, int(max_retries))
@@ -660,6 +672,8 @@ class GraphQLClient:
             token = ""
         if token and token in text:
             text = text.replace(token, "[redacted]")
+        if self.client_id and self.client_id in text:
+            text = text.replace(self.client_id, "[redacted]")
         return text[:500]
 
     def _key(self, document, variables):
@@ -744,6 +758,8 @@ class GraphQLClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             })
+        if self.client_id:
+            request.add_header("clientId", self.client_id)
         try:
             with self._opener(request, timeout=self.timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
@@ -1114,8 +1130,8 @@ class GraphQLSource:
         schema_ttl = float(os.environ.get("SCHEMA_TTL", 600))
         inflight = int(os.environ.get("GRAPHQL_MAX_INFLIGHT", 4))
         self.client = client or GraphQLClient(
-            self.endpoint, self.token_env, max_inflight=inflight,
-            result_ttl=ttl, schema_ttl=schema_ttl)
+            self.endpoint, self.token_env, client_id=spec.get("client_id"),
+            max_inflight=inflight, result_ttl=ttl, schema_ttl=schema_ttl)
         self.adapter = WizAdapter(self) if self.adapter_name == "wiz" else GenericAdapter()
 
     def status(self, consume_config_created=False):

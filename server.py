@@ -38,6 +38,7 @@ GraphQL (optional second source; omit it to use Neo4j only):
     GRAPHQL_ENDPOINT    https://api.us2.app.wiz.io/graphql
     GRAPHQL_TOKEN       bearer token. Data connection can save it in the gitignored
                         .env. It is never written to gx.local.json, logs, or the page.
+    GRAPHQL_CLIENT_ID   client id sent as the clientId header. Saved in .env.
     GRAPHQL_ADAPTER     wiz (default on a wiz.io host) or generic
     GRAPHQL_LABEL / GRAPHQL_ID / GRAPHQL_TOKEN_ENV / GRAPHQL_PROJECT_ID
     A graphql list in gx.local.json can name the endpoint and the token's
@@ -98,6 +99,7 @@ from graphql_source import (
     GraphQLConfigError,
     GraphQLSource,
     QueryRejected,
+    _client_id,
     RateLimited,
     ENV_KEYS,
     TokenExpired,
@@ -1298,6 +1300,7 @@ def connection_view():
             "id": os.environ.get("GRAPHQL_ID") or "",
             "token_env": token_env,
             "project_id": os.environ.get("GRAPHQL_PROJECT_ID") or "",
+            "client_id": _client_id(os.environ.get("GRAPHQL_CLIENT_ID")),
             "token_set": bool(os.environ.get(token_env)),
         },
     }
@@ -1378,8 +1381,8 @@ def save_connection(body):
                 updates["NEO4J_PASSWORD"] = _plain(neo.get("password"), "password")
         if clear:
             remove.extend([
-                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL",
-                "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_ADAPTER",
+                "GRAPHQL_LABEL", "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
             ])
             custom = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
             if custom and _ENV_RE.fullmatch(custom) and custom not in remove:
@@ -1420,6 +1423,12 @@ def save_connection(body):
                     updates["GRAPHQL_PROJECT_ID"] = project[:200]
                 else:
                     remove.append("GRAPHQL_PROJECT_ID")
+            if "client_id" in graphql:
+                client_id = _client_id(_plain(graphql.get("client_id") or "", "client id"))
+                if client_id:
+                    updates["GRAPHQL_CLIENT_ID"] = client_id
+                else:
+                    remove.append("GRAPHQL_CLIENT_ID")
             previous_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
             token_env = _plain(graphql.get("token_env") or previous_env, "token variable").strip() or "GRAPHQL_TOKEN"
             if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:

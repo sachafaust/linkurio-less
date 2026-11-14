@@ -163,6 +163,23 @@ def graph_page(entities, has_next, cursor, total):
     }}}
 
 
+def test_client_id_header():
+    print("client id")
+    seen = []
+
+    def opener(request, timeout=None):
+        seen.append({key.lower(): value for key, value in request.header_items()})
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    client(opener, client_id="client-id-zz").execute("{ __typename }")
+    sent = seen[0]
+    check("the client id is sent as clientId",
+          sent.get("clientid") == "client-id-zz" and TOKEN in sent.get("authorization", ""))
+    seen.clear()
+    client(opener).execute("{ __typename }")
+    check("a request without a client id omits that header", "clientid" not in seen[0])
+
+
 def test_mutations():
     print("mutations")
     calls = []
@@ -822,6 +839,7 @@ def main():
     empty.close()
     os.environ["GX_ENV"] = empty.name
     try:
+        test_client_id_header()
         test_mutations()
         test_introspection_model()
         test_paging_and_wiz_shape()

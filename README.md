@@ -90,9 +90,12 @@ Set the endpoint and a ready bearer token in the environment, in `.env`, or with
 
 ```bash
 GRAPHQL_ENDPOINT=https://api.us2.app.wiz.io/graphql
+GRAPHQL_CLIENT_ID=...
 GRAPHQL_TOKEN=...
 GRAPHQL_ADAPTER=wiz
 ```
+
+Data connection saves the client id in `.env` with the token. Requests send it as the `clientId` header. The page shows the client id again so you can change it. The token stays hidden.
 
 Or a `graphql` list in `gx.local.json`:
 
