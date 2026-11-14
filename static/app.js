@@ -1021,8 +1021,16 @@ async function runQueryToGraph(cypher, errEl = null) {
 }
 async function openDataModel() {
   const sc = S.schema = await api('/api/schema');
-  const bg = modal('Understand your data model', `<div style="display:flex;gap:14px"><div id="dm-cy" style="flex:2"></div><div style="flex:1;max-height:420px;overflow:auto" data-dminfo="1"></div></div>
+  const bg = modal('Understand your data model', `<div class="dm-layout"><div id="dm-cy" style="flex:2"></div><div data-dminfo="1"></div></div>
     <div class="section-d" style="margin-top:8px">Whole graph: ${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas. ${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} relationship types. Click a category for its properties.</div>`, '', { width: 1100 });
+  const box = $('.modal', bg);
+  box.classList.add('dm');
+  const grow = document.createElement('button');
+  grow.className = 'x';
+  grow.type = 'button';
+  grow.title = 'Expand';
+  grow.innerHTML = ico('ArrowExpandAll');
+  $('.mh .x', bg).before(grow);
   const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: `${c} (${v.count})`, cat: c } })),
     ...sc.links.filter(l => l.source !== l.target).map((l, i) => ({ data: { id: 'l' + i, source: 'c:' + l.source, target: 'c:' + l.target, label: l.type } }))];
   const dm = cytoscape({ container: $('#dm-cy', bg), elements: els, wheelSensitivity: 0.3, style: [
@@ -1032,6 +1040,13 @@ async function openDataModel() {
   const info = $('[data-dminfo]', bg);
   const show = c => { const v = sc.categories[c]; info.innerHTML = `${catChip(c)}<div class="section-d" style="margin-top:6px">Labels: ${esc(v.labels.join(', '))}</div><table class="kv">${Object.entries(v.props).sort().map(([k, t]) => `<tr><td>${esc(k)}</td><td style="color:var(--muted)">${esc(t)}</td></tr>`).join('')}</table>`; };
   dm.on('tap', 'node', e => show(e.target.data('cat'))); show(Object.keys(sc.categories)[0]);
+  grow.onclick = () => {
+    const full = box.classList.toggle('is-full');
+    box.style.width = full ? '' : '1100px';
+    grow.title = full ? 'Restore' : 'Expand';
+    grow.innerHTML = ico(full ? 'ArrowCollapseAll' : 'ArrowExpandAll');
+    requestAnimationFrame(() => { dm.resize(); dm.fit(undefined, 48); });
+  };
 }
 
 // ---------- export ---------------------------------------------------------------------
