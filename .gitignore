@@ -8,5 +8,7 @@ __pycache__/
 gx.local.json
 gx.local.json.tmp
 
-# Neo4j credentials. Copy .env.example to .env.
+# Neo4j and GraphQL credentials. Copy .env.example to .env.
+# Data connection in the page writes this file. It is never committed.
 .env
+.env.tmp

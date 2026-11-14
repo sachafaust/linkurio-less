@@ -1,7 +1,8 @@
 """A GraphQL data source beside Neo4j.
 
 The explorer shows one source at a time. This module never writes the bearer
-token to disk, to a log line, or to a response. The token is read from the
+token to disk, to a log line, or to a response. Data connection in the page
+may store it in the gitignored .env file. The token is read from the
 environment at the moment a request is sent. Mutations are refused before
 that request is built.
 

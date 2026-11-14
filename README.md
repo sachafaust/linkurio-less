@@ -59,6 +59,8 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 
 Copy `.env.example` to `.env` (gitignored) or export the same variables. The environment wins over `.env`. Use a user with the reader role. A bolt URI that already contains a user or password is refused. `NEO4J_PASSWORD` may be empty when Neo4j has no password. Leave the variable out only when it is unset; `run_local.py` then asks, and Enter sends an empty password.
 
+`python3 server.py` with no password still opens the page. Data connection writes the same variables into `.env`. That file is gitignored. The password and a GraphQL token are not written into `gx.local.json`, and the page does not show them again after you save.
+
 ```bash
 NEO4J_URI=bolt://127.0.0.1:7687
 NEO4J_USER=neo4j
@@ -78,7 +80,7 @@ The first launch writes a canvas working set to `gx.local.json` from CPU and RAM
 
 The page shows one source at a time. GraphQL results stay in the GraphQL view. Wiz is the first adapter (`graphSearch`, `_vertexID`, cursor pages). A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists.
 
-Set the endpoint and a ready bearer token in the environment or in `.env`. The token stays in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token value in that file is removed on startup.
+Set the endpoint and a ready bearer token in the environment, in `.env`, or with Data connection on the page. The token stays in that gitignored file or in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token value in that file is removed on startup. The page does not show the token again after you save.
 
 ```bash
 GRAPHQL_ENDPOINT=https://api.us2.app.wiz.io/graphql
@@ -107,6 +109,8 @@ The page calls these JSON endpoints on the same host. `POST /api/cypher` takes o
 | GET | `/api/status` | connection, counts, working set, safety ceiling, active source |
 | GET | `/api/sources` | sources you can pick. The token is omitted |
 | POST | `/api/source` | `{"id":"wiz"}` switches the active source |
+| GET | `/api/connection` | Neo4j and GraphQL settings. The password and the token are omitted |
+| POST | `/api/connection` | saves those settings into `.env` |
 | GET | `/api/schema` | labels, relationship types, counts |
 | GET | `/api/styles` | colors, icons, captions |
 | GET | `/api/queries` | built-in saved queries |

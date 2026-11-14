@@ -185,7 +185,7 @@ table.sel tr:hover td { background: var(--hover); cursor: pointer; }
 .hist { display: flex; align-items: flex-end; gap: 1px; height: 34px; margin: 2px 0 0 36px; }
 .hist div { flex: 1; background: #90caf9; min-height: 1px; }
 .field { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; font-size: 13px; }
-.field select, .field input[type=text], .field input[type=number], .field textarea { padding: 6px 8px; border: 1px solid #c8c8c8; border-radius: 3px; font: inherit; background: var(--input); color: var(--text); }
+.field select, .field input[type=text], .field input[type=number], .field input[type=password], .field textarea { padding: 6px 8px; border: 1px solid #c8c8c8; border-radius: 3px; font: inherit; background: var(--input); color: var(--text); }
 .radio-card { border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; margin: 8px 0; cursor: pointer; }
 .radio-card.on { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
 .radio-card .t { font-weight: 500; display: flex; align-items: center; gap: 6px; }

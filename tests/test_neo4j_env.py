@@ -34,6 +34,7 @@ from neo4j_env import (  # noqa: E402
     neo4j_settings,
     parse_dotenv,
     redact_uri,
+    update_dotenv,
 )
 
 SECRET = "s3cret-token"
@@ -225,23 +226,61 @@ def test_cli_flags_win():
 
 def test_gitignore():
     ignored = subprocess.run(["git", "check-ignore", ".env"], cwd=ROOT, capture_output=True, text=True)
+    tmp = subprocess.run(["git", "check-ignore", ".env.tmp"], cwd=ROOT, capture_output=True, text=True)
     example = subprocess.run(["git", "check-ignore", ".env.example"], cwd=ROOT, capture_output=True, text=True)
     check(ignored.returncode == 0 and ignored.stdout.strip() == ".env", ".env is gitignored", ignored.stdout.strip())
+    check(tmp.returncode == 0 and tmp.stdout.strip() == ".env.tmp", ".env.tmp is gitignored", tmp.stdout.strip())
     check(example.returncode != 0, ".env.example stays in git")
 
 
+def test_update_dotenv_keeps_other_lines():
+    folder = tempfile.mkdtemp(prefix="gx-dotenv-")
+    path = Path(folder) / ".env"
+    path.write_text("# keep me\nMAX_NODES=9\nNEO4J_PASSWORD=old\nNEO4J_PASSWORD=older\n", encoding="utf-8")
+    try:
+        update_dotenv(
+            {"NEO4J_PASSWORD": "s3cret with spaces", "NEO4J_URI": "bolt://127.0.0.1:7687"},
+            remove=["GONE"], path=path)
+        text = path.read_text(encoding="utf-8")
+        parsed = dict(parse_dotenv(text))
+        check(parsed.get("NEO4J_PASSWORD") == "s3cret with spaces" and text.count("NEO4J_PASSWORD=") == 1
+              and "MAX_NODES=9" in text and "# keep me" in text and "NEO4J_URI=bolt://127.0.0.1:7687" in text,
+              "updating .env keeps comments and replaces every copy of a key")
+        update_dotenv({"NEO4J_PASSWORD": ""}, path=path)
+        text = path.read_text(encoding="utf-8")
+        check("NEO4J_PASSWORD=\n" in text and dict(parse_dotenv(text)).get("NEO4J_PASSWORD") == "",
+              "an empty password is stored as an empty value")
+        try:
+            update_dotenv({"NEO4J_PASSWORD": "a\nb"}, path=path)
+            check(False, "a line break in a setting is refused")
+        except Neo4jConfigError:
+            check("a\nb" not in path.read_text(encoding="utf-8"), "a line break in a setting is refused")
+        update_dotenv({}, remove=["NEO4J_PASSWORD"], path=path)
+        text = path.read_text(encoding="utf-8")
+        check("NEO4J_PASSWORD" not in text and "MAX_NODES=9" in text, "removing a key leaves the other lines")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        check(mode & 0o077 == 0, "the env file is owner-read/write", oct(mode))
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _free_port():
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
+    port = 0
+    for _ in range(20):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        if port not in (8744, 8755):
+            return port
     return port
 
 
 def _child_env(folder, dotenv, port):
     env = os.environ.copy()
-    for key in ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "NEO4J_DATABASE", "GX_ENV", "GX_CONFIG"):
-        env.pop(key, None)
+    for key in list(env):
+        if key.startswith("GRAPHQL_") or key.startswith("NEO4J_") or key in ("GX_ENV", "GX_CONFIG"):
+            env.pop(key, None)
     env.update({
         "GX_ENV": str(dotenv),
         "GX_CONFIG": str(Path(folder) / "gx.local.json"),
@@ -331,6 +370,220 @@ def _wait_status(port, proc):
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+
+def _request(port, path, body=None, timeout=40):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method="POST" if data is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def _chrome_executable():
+    path = Path("/Users/shey/Library/Caches/ms-playwright/chromium-1254/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    return str(path) if path.is_file() else None
+
+
+def test_connection_from_the_page():
+    """A plain start stays up. Data connection writes secrets only into .env."""
+    folder = tempfile.mkdtemp(prefix="gx-conn-")
+    dotenv = Path(folder) / ".env"
+    port = _free_port()
+    proc = _start(_child_env(folder, dotenv, port))
+    log = ""
+    try:
+        status = _wait_status(port, proc)
+        body = json.dumps(status or {})
+        check(proc.poll() is None and bool(status) and status.get("connected") is False and status.get("nodes") is None
+              and SECRET not in body and WRONG not in body,
+              "a plain start stays up and reports Neo4j as not connected",
+              "" if status else "server did not answer")
+        code, raw = _request(port, "/api/connection")
+        check(code == 200 and '"password":' not in raw and '"token":' not in raw
+              and SECRET not in raw and WRONG not in raw and "password_set" in raw,
+              "the connection form omits the password and the token")
+        code, raw = _request(port, "/api/connection", {
+            "neo4j": {"uri": f"bolt://neo4j:{SECRET}@127.0.0.1:7687", "user": "neo4j", "password": WRONG},
+        })
+        leaked = dotenv.is_file() and SECRET in dotenv.read_text(encoding="utf-8")
+        check(code == 400 and SECRET not in raw and not leaked,
+              "a password inside the URI is refused and is not saved")
+        code, raw = _request(port, "/api/connection", {
+            "neo4j": {"uri": "bolt://127.0.0.1:7687", "user": "neo4j", "password": WRONG},
+            "graphql": {"endpoint": f"https://user:{SECRET}@api.us2.app.wiz.io/graphql"},
+        })
+        leaked = dotenv.is_file() and SECRET in dotenv.read_text(encoding="utf-8")
+        check(code == 400 and SECRET not in raw and not leaked,
+              "a token in the GraphQL endpoint is refused and is not saved")
+        code, raw = _request(port, "/api/connection", {
+            "neo4j": {
+                "uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j",
+                "password": WRONG,
+            },
+            "graphql": {
+                "endpoint": "https://api.us2.app.wiz.io/graphql",
+                "adapter": "wiz", "label": "Wiz", "token": SECRET, "project_id": "*",
+            },
+        })
+        saved = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
+        cfg_path = Path(folder) / "gx.local.json"
+        cfg = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
+        check(code == 200 and SECRET not in raw and WRONG not in raw,
+              "saving the connection answers without the secrets")
+        check(WRONG in saved and SECRET in saved and "NEO4J_PASSWORD=" in saved
+              and "GRAPHQL_ENDPOINT=https://api.us2.app.wiz.io/graphql" in saved,
+              "the gitignored env file stores the password and the token")
+        check(WRONG not in cfg and SECRET not in cfg and "password" not in cfg.lower(),
+              "the working set has no password or token")
+        mode = stat.S_IMODE(dotenv.stat().st_mode) if dotenv.is_file() else 0
+        check(dotenv.is_file() and mode & 0o077 == 0, "the saved env file is owner-read/write", oct(mode))
+        code, kept_raw = _request(port, "/api/connection", {
+            "neo4j": {"uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j"},
+            "graphql": {"endpoint": "https://api.us2.app.wiz.io/graphql", "adapter": "wiz", "label": "Wiz"},
+        })
+        kept = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
+        check(code == 200 and WRONG in kept and SECRET in kept and SECRET not in kept_raw and WRONG not in kept_raw,
+              "a blank password and token keep the saved values")
+        _browser_saves_connection(port)
+        code, cleared_raw = _request(port, "/api/connection", {
+            "neo4j": {"uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j"},
+            "graphql": {"clear": True},
+        })
+        cleared = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
+        check(code == 200 and "GRAPHQL_ENDPOINT" not in cleared and SECRET not in cleared
+              and f"NEO4J_PASSWORD={WRONG}" in cleared and SECRET not in cleared_raw,
+              "clearing GraphQL leaves the Neo4j password in .env")
+        view_code, view = _request(port, "/api/connection")
+        status_code, status_raw = _request(port, "/api/status")
+        check(view_code == 200 and status_code == 200 and SECRET not in view and WRONG not in view
+              and SECRET not in status_raw and WRONG not in status_raw,
+              "status and the connection form still omit both secrets")
+    finally:
+        _stop(proc)
+        log = proc.stdout.read() if proc.stdout else ""
+        check(SECRET not in log and WRONG not in log, "the server log leaves out the password and the token")
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _browser_saves_connection(port):
+    """Drive the Data connection dialog. Skip when Playwright is not installed."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("skip browser connection form (playwright is not installed)")
+        return
+    chrome = _chrome_executable()
+    try:
+        with sync_playwright() as p:
+            kwargs = {"headless": False}
+            if chrome:
+                kwargs["executable_path"] = chrome
+            browser = p.chromium.launch(**kwargs)
+            page = browser.new_context(viewport={"width": 1440, "height": 900}).new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+            page.wait_for_function(
+                """() => window.cy && typeof window.cy.nodes === 'function'
+                    && document.querySelector('#source-pick')
+                    && !document.querySelector('#source-pick').disabled""",
+                timeout=40000)
+            page.click("[data-act=connection]")
+            page.wait_for_selector("[data-csave]")
+            empty = page.evaluate(
+                """() => ({
+                    pw: document.querySelector('[data-cpw]').value,
+                    token: document.querySelector('[data-gt]').value,
+                    pwType: document.querySelector('[data-cpw]').type,
+                    tokenType: document.querySelector('[data-gt]').type,
+                })""")
+            check(empty["pw"] == "" and empty["token"] == "" and empty["pwType"] == "password" and empty["tokenType"] == "password",
+                  "the dialog leaves both secrets blank")
+            page.fill("[data-cu]", "bolt://127.0.0.1:7687")
+            page.fill("[data-cuser]", "neo4j")
+            page.fill("[data-cpw]", WRONG)
+            page.fill("[data-ge]", "https://api.us2.app.wiz.io/graphql")
+            page.select_option("[data-ga]", "wiz")
+            page.fill("[data-gt]", SECRET)
+            page.click("[data-csave]")
+            page.wait_for_function(
+                """() => {
+                    const t = document.querySelector('#toast');
+                    return t && (t.textContent || '').includes('Connection saved');
+                }""",
+                timeout=30000)
+            leaked = page.evaluate(
+                """(secrets) => {
+                    const text = document.body.innerText || '';
+                    const store = JSON.stringify(localStorage);
+                    return {
+                        text: secrets.some(s => text.includes(s)),
+                        store: secrets.some(s => store.includes(s)),
+                    };
+                }""",
+                [SECRET, WRONG])
+            fetched = page.evaluate(
+                """async (secrets) => {
+                    const conn = await (await fetch('/api/connection')).text();
+                    const status = await (await fetch('/api/status')).text();
+                    const raw = conn + status;
+                    return secrets.some(s => raw.includes(s));
+                }""",
+                [SECRET, WRONG])
+            check(not leaked["text"] and not leaked["store"] and not fetched,
+                  "the page does not show the password or the token after save")
+            check(not any(SECRET in e or WRONG in e for e in errors),
+                  "the page raised no errors that include a secret")
+            browser.close()
+    except Exception as e:
+        text = str(e).replace(SECRET, "[redacted]").replace(WRONG, "[redacted]")
+        check(False, "the Data connection dialog saves from the page", text[:300])
+
+
+def test_graphql_only_and_empty_password():
+    """GraphQL can be saved before Neo4j, and an empty password is a real password."""
+    folder = tempfile.mkdtemp(prefix="gx-conn-empty-")
+    dotenv = Path(folder) / ".env"
+    port = _free_port()
+    proc = _start(_child_env(folder, dotenv, port))
+    try:
+        ready = _wait_status(port, proc)
+        check(bool(ready) and ready.get("connected") is False, "the empty-password case starts without Neo4j",
+              "" if ready else "server did not answer")
+        code, raw = _request(port, "/api/connection", {
+            "graphql": {
+                "endpoint": "https://api.us2.app.wiz.io/graphql",
+                "adapter": "wiz", "label": "Wiz", "token": SECRET,
+            },
+        })
+        text = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
+        cfg_path = Path(folder) / "gx.local.json"
+        cfg = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
+        check(code == 200 and "NEO4J_PASSWORD" not in text and "GRAPHQL_TOKEN=" in text and SECRET in text
+              and SECRET not in raw and SECRET not in cfg,
+              "a GraphQL-only save writes the token and leaves Neo4j unset")
+        code, raw = _request(port, "/api/connection", {
+            "neo4j": {
+                "uri": "bolt://127.0.0.1:7687", "user": "neo4j", "database": "neo4j",
+                "password": "",
+            },
+        })
+        text = dotenv.read_text(encoding="utf-8") if dotenv.is_file() else ""
+        parsed = dict(parse_dotenv(text))
+        check(code == 200 and parsed.get("NEO4J_PASSWORD") == "" and "NEO4J_PASSWORD=" in text
+              and SECRET in text and SECRET not in raw and "password_set" in raw,
+              "No password stores an empty password and keeps the token")
+    finally:
+        _stop(proc)
+        log = proc.stdout.read() if proc.stdout else ""
+        check(SECRET not in log, "the empty-password run leaves the token out of the log")
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def test_live_and_browser():
@@ -429,7 +682,10 @@ def main():
     test_config_file_drops_secrets()
     test_cli_flags_win()
     test_gitignore()
+    test_update_dotenv_keeps_other_lines()
     test_server_refuses_a_bad_file()
+    test_connection_from_the_page()
+    test_graphql_only_and_empty_password()
     test_live_and_browser()
     failed = sum(1 for ok in report if not ok)
     print(f"\n{len(report) - failed} passed, {failed} failed")

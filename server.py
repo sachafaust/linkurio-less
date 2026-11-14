@@ -8,7 +8,7 @@ Neo4j is one data source. A GraphQL endpoint configured below is a second
 source, shown on its own and never copied into Neo4j. The handlers call the
 same methods on whichever source is active: status, schema, search, nodes,
 neighbor_summary, expand, edges_between, and cypher. The bearer token stays
-in the environment.
+in the environment or in the gitignored .env file.
 
 Config (environment variables; a gitignored .env fills any of the four that are unset):
     NEO4J_URI       bolt://localhost:7687   (host only: put the user and password in the variables below)
@@ -36,7 +36,8 @@ Config (environment variables; a gitignored .env fills any of the four that are 
 
 GraphQL (optional second source; omit it to use Neo4j only):
     GRAPHQL_ENDPOINT    https://api.us2.app.wiz.io/graphql
-    GRAPHQL_TOKEN       bearer token. Never written to disk, logs, or the page.
+    GRAPHQL_TOKEN       bearer token. Data connection can save it in the gitignored
+                        .env. It is never written to gx.local.json, logs, or the page.
     GRAPHQL_ADAPTER     wiz (default on a wiz.io host) or generic
     GRAPHQL_LABEL / GRAPHQL_ID / GRAPHQL_TOKEN_ENV / GRAPHQL_PROJECT_ID
     A graphql list in gx.local.json can name the endpoint and the token's
@@ -54,7 +55,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
@@ -66,12 +67,25 @@ from graphql_source import (
     GraphQLSource,
     QueryRejected,
     RateLimited,
+    ENV_KEYS,
     TokenExpired,
+    _ENV_RE,
+    _ID_RE,
+    _clean_endpoint,
+    load_graphql_env,
     resolve_graphql_sources,
     sources_from_config,
     without_secrets,
 )
-from neo4j_env import Neo4jConfigError, neo4j_settings
+from neo4j_env import (
+    CREDENTIAL_KEYS,
+    Neo4jConfigError,
+    dotenv_path,
+    load_credential_env,
+    neo4j_settings,
+    redact_uri,
+    update_dotenv,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -1081,6 +1095,37 @@ class Graph:
 GRAPH: Graph | None = None
 SOURCES: dict = {}
 ACTIVE = "neo4j"
+_CONN_LOCK = threading.Lock()
+_TOKEN_ENV_BLOCKED = set(CREDENTIAL_KEYS) | (set(ENV_KEYS) - {"GRAPHQL_TOKEN"})
+
+
+class UnconfiguredNeo4j:
+    """Stand-in so the page can open before Neo4j has a password.
+
+    An empty password is a real password. Only a missing one uses this object.
+    """
+
+    id = "neo4j"
+    label = "Neo4j"
+    kind = "neo4j"
+    message = (
+        "Neo4j has no password yet. Open Data connection and save the URI, user, and password. "
+        "An empty password is allowed when Neo4j has none."
+    )
+
+    def status(self, consume_config_created=False):
+        return {
+            "connected": False, "read_only": True,
+            "uri": redact_uri(os.environ.get("NEO4J_URI") or ""),
+            "database": os.environ.get("NEO4J_DATABASE") or "",
+            "server": "", "nodes": None, "edges": None, "error": self.message,
+            "budget": budget_payload(consume_created=consume_config_created),
+        }
+
+    def _refuse(self, *args, **kwargs):
+        raise ValueError(self.message)
+
+    schema = search = nodes = neighbor_summary = expand = edges_between = cypher = _refuse
 
 # Both sources implement these. The handlers call them and do not branch on
 # the kind, except the source list itself.
@@ -1125,11 +1170,15 @@ def source_catalog():
 
 
 def _secret_values():
-    names = {"GRAPHQL_TOKEN"}
+    names = {"GRAPHQL_TOKEN", "NEO4J_PASSWORD"}
+    extra = os.environ.get("GRAPHQL_TOKEN_ENV")
+    if extra:
+        names.add(extra)
     for src in SOURCES.values():
         env_name = getattr(src, "token_env", None)
         if env_name:
             names.add(env_name)
+    # An empty password is not a secret string. Scrubbing "" would blank the page.
     return [value for name in names if (value := os.environ.get(name))]
 
 
@@ -1185,6 +1234,184 @@ def select_source(source_id):
     return public_status(consume=False)
 
 
+def _plain(value, label):
+    text = "" if value is None else str(value)
+    if "\n" in text or "\r" in text:
+        raise ValueError(f"{label} cannot contain a line break")
+    return text
+
+
+def connection_view():
+    """Settings the page can show. The password and the token stay out."""
+    load_credential_env()
+    load_graphql_env()
+    token_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
+    if not _ENV_RE.fullmatch(token_env):
+        token_env = "GRAPHQL_TOKEN"
+    endpoint = (os.environ.get("GRAPHQL_ENDPOINT") or "").strip()
+    if endpoint and _clean_endpoint(endpoint) is None:
+        endpoint = ""
+    view = {
+        "file": dotenv_path().name,
+        "neo4j": {
+            "uri": redact_uri((os.environ.get("NEO4J_URI") or "bolt://localhost:7687").strip()),
+            "user": (os.environ.get("NEO4J_USER") or "neo4j").strip() or "neo4j",
+            "database": (os.environ.get("NEO4J_DATABASE") or "neo4j").strip() or "neo4j",
+            "password_set": "NEO4J_PASSWORD" in os.environ,
+        },
+        "graphql": {
+            "endpoint": endpoint,
+            "label": os.environ.get("GRAPHQL_LABEL") or "",
+            "adapter": os.environ.get("GRAPHQL_ADAPTER") or "",
+            "id": os.environ.get("GRAPHQL_ID") or "",
+            "token_env": token_env,
+            "project_id": os.environ.get("GRAPHQL_PROJECT_ID") or "",
+            "token_set": bool(os.environ.get(token_env)),
+        },
+    }
+    return _scrub_public(view, _secret_values())
+
+
+def _close_driver(graph):
+    driver = getattr(graph, "driver", None)
+    if driver is None:
+        return
+    try:
+        driver.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reconnect():
+    """Rebuild Neo4j and GraphQL from the environment after Data connection saves."""
+    global GRAPH
+    old = GRAPH
+    try:
+        settings = neo4j_settings()
+    except Neo4jConfigError as e:
+        if not e.missing_password:
+            raise ValueError(str(e)) from e
+        graph = UnconfiguredNeo4j()
+    else:
+        graph = Graph(settings)
+    cfg = ensure_config()
+    bind_sources(graph, cfg)
+    if old is not None and old is not graph:
+        _close_driver(old)
+
+
+def save_connection(body):
+    """Write Neo4j and GraphQL into the gitignored env file and use them now.
+
+    A blank password or token keeps the saved value. A password of "" is stored
+    when Neo4j has none. Secrets are not written to gx.local.json.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("connection settings must be an object")
+    with _CONN_LOCK:
+        load_credential_env()
+        load_graphql_env()
+        neo = body.get("neo4j") if isinstance(body.get("neo4j"), dict) else {}
+        graphql = body.get("graphql") if isinstance(body.get("graphql"), dict) else {}
+        clear = bool(graphql.get("clear"))
+        endpoint_raw = _plain(graphql.get("endpoint") or "", "endpoint").strip()
+        saving_graphql = bool(endpoint_raw) and not clear
+        password_in_body = "password" in neo
+        password_already = "NEO4J_PASSWORD" in os.environ
+        if not password_in_body and not password_already and not saving_graphql and not clear:
+            raise ValueError(
+                "Save a Neo4j password, or a GraphQL endpoint. "
+                "An empty password is allowed when Neo4j has none.")
+        updates = {}
+        remove = []
+        skip_neo = (not password_in_body) and (not password_already) and (saving_graphql or clear)
+        if not skip_neo and (password_in_body or password_already or neo.get("uri") or neo.get("user") or neo.get("database")):
+            uri = _plain(neo.get("uri") or os.environ.get("NEO4J_URI") or "bolt://localhost:7687", "URI").strip()
+            user = _plain(neo.get("user") or os.environ.get("NEO4J_USER") or "neo4j", "user").strip() or "neo4j"
+            if "database" in neo:
+                database = _plain(neo.get("database"), "database").strip() or "neo4j"
+            else:
+                database = _plain(os.environ.get("NEO4J_DATABASE") or "neo4j", "database").strip() or "neo4j"
+            if "://" not in uri:
+                raise ValueError("NEO4J_URI must be a bolt or neo4j URL, such as bolt://127.0.0.1:7687")
+            parts = urlsplit(uri)
+            if parts.username is not None or parts.password is not None:
+                raise ValueError(
+                    "NEO4J_URI includes a user or a password. Keep the URI as the host, "
+                    "and set the user and password in their own fields.")
+            updates["NEO4J_URI"] = uri
+            updates["NEO4J_USER"] = user
+            updates["NEO4J_DATABASE"] = database
+            if password_in_body:
+                updates["NEO4J_PASSWORD"] = _plain(neo.get("password"), "password")
+        if clear:
+            remove.extend([
+                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL",
+                "GRAPHQL_ID", "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+            ])
+            custom = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
+            if custom and _ENV_RE.fullmatch(custom) and custom not in remove:
+                remove.append(custom)
+        elif saving_graphql:
+            cleaned = _clean_endpoint(endpoint_raw)
+            if not cleaned:
+                raise ValueError(
+                    "The GraphQL endpoint must be an http or https URL without a user, a password, or a token.")
+            updates["GRAPHQL_ENDPOINT"] = cleaned
+            if "label" in graphql:
+                label = _plain(graphql.get("label") or "", "label").strip()
+                if label:
+                    updates["GRAPHQL_LABEL"] = label[:80]
+                else:
+                    remove.append("GRAPHQL_LABEL")
+            if "adapter" in graphql:
+                adapter = _plain(graphql.get("adapter") or "", "adapter").strip().lower()
+                if adapter in ("wiz", "generic"):
+                    updates["GRAPHQL_ADAPTER"] = adapter
+                elif adapter == "":
+                    remove.append("GRAPHQL_ADAPTER")
+                else:
+                    raise ValueError("The GraphQL adapter is wiz or generic.")
+            if "id" in graphql:
+                ident = _plain(graphql.get("id") or "", "id").strip()
+                if ident == "neo4j":
+                    raise ValueError("A GraphQL source cannot use the id neo4j.")
+                if ident and not _ID_RE.fullmatch(ident):
+                    raise ValueError("The GraphQL id must start with a letter and use letters, numbers, _ or -.")
+                if ident:
+                    updates["GRAPHQL_ID"] = ident
+                else:
+                    remove.append("GRAPHQL_ID")
+            if "project_id" in graphql:
+                project = _plain(graphql.get("project_id") or "", "project").strip()
+                if project:
+                    updates["GRAPHQL_PROJECT_ID"] = project[:200]
+                else:
+                    remove.append("GRAPHQL_PROJECT_ID")
+            previous_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
+            token_env = _plain(graphql.get("token_env") or previous_env, "token variable").strip() or "GRAPHQL_TOKEN"
+            if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:
+                raise ValueError("The token variable name is not usable.")
+            if graphql.get("token_env"):
+                updates["GRAPHQL_TOKEN_ENV"] = token_env
+            if "token" in graphql and str(graphql.get("token") or "") != "":
+                updates[token_env] = _plain(graphql.get("token"), "token")
+            elif token_env != previous_env and os.environ.get(previous_env) and token_env not in os.environ:
+                updates[token_env] = os.environ[previous_env]
+        remove = [key for key in remove if key not in updates]
+        try:
+            update_dotenv(updates, remove=remove)
+        except Neo4jConfigError as e:
+            raise ValueError(str(e)) from e
+        for key in remove:
+            os.environ.pop(key, None)
+        for key, value in updates.items():
+            os.environ[key] = "" if value is None else str(value)
+        _reconnect()
+        print("Data connection saved.")
+        return {"connection": connection_view(), "status": public_status(consume=False)}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "GraphExplorer/0.1"
 
@@ -1234,6 +1461,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(public_status(consume=True))
             if u.path == "/api/sources":
                 return self._json(_scrub_public(source_catalog(), _secret_values()))
+            if u.path == "/api/connection":
+                return self._json(connection_view())
             if u.path == "/api/schema":
                 return self._json(src.schema(refresh=q.get("refresh") == "1"))
             if u.path == "/api/styles":
@@ -1259,6 +1488,8 @@ class Handler(BaseHTTPRequestHandler):
         src = current()
         try:
             b = self._body()
+            if u.path == "/api/connection":
+                return self._json(save_connection(b))
             if u.path == "/api/source":
                 return self._json(select_source(b.get("id")))
             if u.path == "/api/nodes":
@@ -1285,20 +1516,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    graph = None
     try:
         settings = neo4j_settings()
     except Neo4jConfigError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        if not e.missing_password:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"WARNING: {e}", file=sys.stderr)
+        print("Neo4j is not configured. Open the page and use Data connection to save it.", file=sys.stderr)
+        graph = UnconfiguredNeo4j()
+    else:
+        graph = Graph(settings)
     cfg = ensure_config()
     print(f"Working set: {cfg['nodes']} nodes / {cfg['edges']} edges "
           f"({cfg['source']}) from {config_path()}.")
-    bind_sources(Graph(settings), cfg)
-    try:
-        st = GRAPH.status()
-        print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")
-    except Exception as e:  # noqa: BLE001
-        print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}")
+    bind_sources(graph, cfg)
+    if isinstance(graph, Graph):
+        try:
+            st = GRAPH.status()
+            print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}")
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 8744))
     srv = ThreadingHTTPServer((host, port), Handler)
     print(f"Open http://{host}:{port}/")

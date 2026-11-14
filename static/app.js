@@ -1253,6 +1253,7 @@ function mainMenuItems() {
     '-', { label: 'Export', icon: 'Download', sub: [{ label: 'Image (PNG)…', icon: 'ImageOutline', act: openExportImage }, { label: 'Data (CSV, JSON)…', icon: 'Table', act: () => openExportData(false) }] },
     ...(source ? ['-', source] : []),
     '-', { label: 'Understand your data model', icon: 'DatabaseOutline', act: openDataModel },
+    { label: 'Data connection…', icon: 'DatabaseOutline', act: openConnection },
     { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: document.body.classList.contains('dark') ? 'Light theme' : 'Dark theme', icon: 'ThemeLightDark', act: toggleTheme },
     { label: 'Keyboard shortcuts & help', icon: 'KeyboardOutline', act: openHelp },
@@ -1265,6 +1266,7 @@ const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
+  'connection': openConnection,
   'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch, 'budget': openBudgetSettings,
   'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
   'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
@@ -1316,6 +1318,7 @@ $('#rightpanel').addEventListener('click', e => {
   if (d.capdel) { const [c, p] = d.capdel.split('|'); catStyle(c).caption = (catStyle(c).caption || []).filter(x => x !== p); restyle(); return renderRightPanel(); }
   if (d.ecapall) { S.edgeCaptionsAlways = !S.edgeCaptionsAlways; restyle(); return renderRightPanel(); }
   if (d.d === 'gear') return showMenu([
+    { label: 'Data connection…', icon: 'DatabaseOutline', act: openConnection },
     { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: 'Reset styles to default', icon: 'Refresh', act: () => { localStorage.removeItem('gx:styles'); initStyles(true); restyle(); renderRightPanel(); toast('Styles reset to defaults'); } },
   ], t.getBoundingClientRect().left - 220, t.getBoundingClientRect().top - 50);
@@ -1532,6 +1535,80 @@ function openBudgetSettings() {
   };
 }
 
+async function openConnection() {
+  let cur;
+  try { cur = await api('/api/connection'); }
+  catch (e) { toast(e.message, 4000); return; }
+  const n = cur.neo4j || {};
+  const g = cur.graphql || {};
+  const file = cur.file || '.env';
+  const bg = modal('Data connection', `<div class="section-d">Saved in ${esc(file)}, which git ignores. The canvas budget stays in gx.local.json. The password and the token are not written there, and they are not shown again after you save.</div>
+    <div class="section-t">Neo4j</div>
+    <div class="field">URI<input type="text" data-cu="1" value="${esc(n.uri || 'bolt://localhost:7687')}" autocomplete="off" spellcheck="false"></div>
+    <div class="field">User<input type="text" data-cuser="1" value="${esc(n.user || 'neo4j')}" autocomplete="off" spellcheck="false"></div>
+    <div class="field">Password<input type="password" data-cpw="1" value="" autocomplete="new-password" placeholder="${n.password_set ? 'Saved — leave blank to keep it' : 'Required'}"></div>
+    <label class="row"><input type="checkbox" data-cnone="1"> No password</label>
+    <div class="field">Database<input type="text" data-cdb="1" value="${esc(n.database || 'neo4j')}" autocomplete="off" spellcheck="false"></div>
+    <div class="section-t">GraphQL</div>
+    <div class="section-d">Leave the endpoint blank to keep Neo4j only. A saved token stays in ${esc(file)}.</div>
+    <div class="field">Endpoint<input type="text" data-ge="1" value="${esc(g.endpoint || '')}" placeholder="https://api.us2.app.wiz.io/graphql" autocomplete="off" spellcheck="false"></div>
+    <div class="field">Label<input type="text" data-gl="1" value="${esc(g.label || '')}" placeholder="Wiz" autocomplete="off"></div>
+    <div class="field">Adapter<select data-ga="1"><option value="" ${g.adapter ? '' : 'selected'}>From the host name</option><option value="wiz" ${g.adapter === 'wiz' ? 'selected' : ''}>Wiz</option><option value="generic" ${g.adapter === 'generic' ? 'selected' : ''}>Generic</option></select></div>
+    <div class="field">Token<input type="password" data-gt="1" value="" autocomplete="new-password" placeholder="${g.token_set ? 'Saved — leave blank to keep it' : 'Bearer token'}"></div>
+    <div class="field">Token variable<input type="text" data-gtenv="1" value="${esc(g.token_env || 'GRAPHQL_TOKEN')}" autocomplete="off" spellcheck="false"></div>
+    <div class="field">Project<input type="text" data-gp="1" value="${esc(g.project_id || '')}" placeholder="*" autocomplete="off" spellcheck="false"></div>
+    <label class="row"><input type="checkbox" data-gclear="1"> Remove the GraphQL source</label>`,
+    `<button class="btn outline" data-close="1">Cancel</button><button class="btn primary" data-csave="1">Save</button>`, { width: 560 });
+  const none = $('[data-cnone]', bg);
+  const pw = $('[data-cpw]', bg);
+  none.onchange = () => { pw.disabled = none.checked; if (none.checked) pw.value = ''; };
+  $('[data-csave]', bg).onclick = async () => {
+    if (bg._saving) return;
+    const neo = {
+      uri: $('[data-cu]', bg).value.trim(),
+      user: $('[data-cuser]', bg).value.trim(),
+      database: $('[data-cdb]', bg).value.trim(),
+    };
+    if (none.checked) neo.password = '';
+    else if (pw.value) neo.password = pw.value;
+    const graphql = {
+      endpoint: $('[data-ge]', bg).value.trim(),
+      label: $('[data-gl]', bg).value.trim(),
+      adapter: $('[data-ga]', bg).value,
+      token_env: $('[data-gtenv]', bg).value.trim(),
+      project_id: $('[data-gp]', bg).value.trim(),
+    };
+    const token = $('[data-gt]', bg).value;
+    if (token) graphql.token = token;
+    if ($('[data-gclear]', bg).checked) graphql.clear = true;
+    const dirty = window.cy && typeof cy.nodes === 'function' && cy.nodes().length > 0;
+    if (dirty && !confirm('Saving the connection clears the canvas.')) return;
+    bg._saving = true;
+    try {
+      const res = await api('/api/connection', { neo4j: neo, graphql });
+      if (dirty) {
+        cy.elements().remove();
+        S.undo = []; S.redo = [];
+        afterGraphChange();
+      }
+      const st = res.status || res;
+      paintSource(st);
+      await applyServerBudget(st);
+      if (window.cy && typeof cy.nodes === 'function') {
+        try { S.schema = await api('/api/schema'); }
+        catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
+        initStyles();
+        if (window.R) restyle();
+      }
+      bg.remove();
+      toast('Connection saved');
+    } catch (e) {
+      bg._saving = false;
+      toast('Could not save the connection: ' + e.message, 5000);
+    }
+  };
+}
+
 // ---------- boot -----------------------------------------------------------------------
 function rememberCounts(st) {
   S.db = {
@@ -1546,6 +1623,7 @@ function connectionText(st) {
     const counts = st.nodes == null ? 'instances load as you explore' : `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges`;
     return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + st.error : ''}`;
   }
+  if (st.nodes == null) return `${st.database || 'Neo4j'} · read-only${st.error ? ' · ' + st.error : ''}`;
   return `${st.server || ''} · ${st.database || ''} · ${Number(st.nodes || 0).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges · read-only`;
 }
 function paintSource(st) {
