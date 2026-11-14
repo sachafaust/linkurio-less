@@ -4,6 +4,26 @@ Read-only graph explorer for any Neo4j database. The page is a Linkurious-style 
 
 Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`. Cytoscape holds the graph model. `static/render.js` draws it on Canvas2D. ForceAtlas2 runs in a web worker.
 
+## What it looks like
+
+`screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison.
+
+A hub with its neighbors grouped by category. Double-click a group to load that page.
+
+![Hub groups around acme-prod](screenshots/app-21-hub-groups.png)
+
+Filters hide a category and grey those nodes out.
+
+![Category filter on the graph](screenshots/app-07-filters.png)
+
+The data-model view reads the live schema.
+
+![Data model with AWSAccount properties](screenshots/app-18-data-model.png)
+
+The Cypher editor runs one read-only query and can add the result to the graph.
+
+![Read-only Cypher editor](screenshots/app-16-code-query.png)
+
 ## Run locally
 
 Needs Docker. The first run installs the venv and the Neo4j 5.26 image. Later runs take about 25 seconds.
