@@ -345,7 +345,7 @@ def run_tests(args, env, url):
     say("API benchmark against this database (tests/bench_server.py)")
     subprocess.run([py, str(HERE / "tests" / "bench_server.py"), "--url", url.rstrip("/"), "--repeat", "3",
                     "--out", str(RUN / "bench-server.json")], env=env)
-    say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, screenshots/app-*.png")
+    say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, docs/screenshots/app-*.png")
     return b.returncode or t.returncode
 
 

@@ -1,7 +1,7 @@
 """Headless browser tests for the Neo4j graph explorer (Playwright + Chrome).
 
 Needs a running Neo4j seeded with seed_cartography.py. Starts server.py itself on a
-free port, drives the UI, writes tests/results.json and screenshots/app-*.png.
+free port, drives the UI, writes tests/results.json and docs/screenshots/app-*.png.
 
     NEO4J_PASSWORD=... python3 tests/run_ui_tests.py
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
-SHOTS = ROOT / "screenshots"
+SHOTS = ROOT / "docs" / "screenshots"
 DL = Path(os.environ.get("TMPDIR", "/tmp")) / "gx-downloads"
 RESULTS = []
 

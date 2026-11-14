@@ -2,29 +2,29 @@
 
 <img src="static/logo.jpg" alt="linkurio-less" width="460">
 
-Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`cartography_styles.json`), and the built-in queries (`queries.json`).
+Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`data/cartography_styles.json`), and the built-in queries (`data/queries.json`).
 
 Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`. Cytoscape holds the graph model. `static/render.js` draws it on Canvas2D. ForceAtlas2 runs in a web worker.
 
 ## What it looks like
 
-`screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison.
+`docs/screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
 
 A hub with its neighbors grouped by category. Double-click a group to load that page.
 
-![Hub groups around acme-prod](screenshots/app-21-hub-groups.png)
+![Hub groups around acme-prod](docs/screenshots/app-21-hub-groups.png)
 
 Filters hide a category and grey those nodes out.
 
-![Category filter on the graph](screenshots/app-07-filters.png)
+![Category filter on the graph](docs/screenshots/app-07-filters.png)
 
 The data-model view reads the live schema.
 
-![Data model with AWSAccount properties](screenshots/app-18-data-model.png)
+![Data model with AWSAccount properties](docs/screenshots/app-18-data-model.png)
 
 The Cypher editor runs one read-only query and can add the result to the graph.
 
-![Read-only Cypher editor](screenshots/app-16-code-query.png)
+![Read-only Cypher editor](docs/screenshots/app-16-code-query.png)
 
 ## Run locally
 
@@ -109,8 +109,10 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `static/app.js` | UI |
 | `static/render.js` | Canvas2D renderer |
 | `run_local.py` | venv, Docker Neo4j, sample load, server |
-| `cartography_styles.json` | category color, icon, caption |
-| `queries.json` | built-in queries |
+| `data/cartography_styles.json` | category color, icon, caption |
+| `data/queries.json` | built-in queries |
+| `docs/screenshots/` | UI-suite captures |
+| `docs/compare/` | Linkurious comparison sheets |
 | `tests/test_budget.py` | working-set math and a tiny read-only server check |
 | `tests/test_neo4j_env.py` | credential loading |
 | `tests/run_ui_tests.py` | Playwright UI suite. Set `CHROME` to override the browser |
