@@ -31,6 +31,7 @@ const S = {
   // Ceilings come from the server. The working set is gx.local.json on the server.
   budget: { serverNodes: 2000, serverEdges: 5000, nodes: 2000, edges: 5000, expand_limit: 50, cypher_limit: 500, expand_max: 50, cypher_max: 500, lru: false, resources: null, suggestion: null, reason: '' },
   db: { nodes: 0, edges: 0 }, seq: 1, canvasRefused: false,
+  ready: false,
 };
 const DEFAULT_SIZE = 26;
 let cy, R;
@@ -1187,9 +1188,17 @@ const ACTIONS = {
   'minimap': () => { S.minimap = !S.minimap; $('#minimap').classList.toggle('hidden', !S.minimap); $('#btn-minimap').classList.toggle('on', S.minimap); drawMinimap(); },
   'open-selpanel': () => { S.selPanelOpen = true; updateHighlight(); },
 };
+const USABLE_WHILE_BOOTING = new Set(['help', 'focus-search', 'budget']);
 document.addEventListener('click', e => {
-  const a = e.target.closest('[data-act]'); if (a) { e.preventDefault(); ACTIONS[a.dataset.act]?.(a); return; }
-  const p = e.target.closest('#righttb [data-panel]'); if (p) { openPanel(p.dataset.panel); return; }
+  const a = e.target.closest('[data-act]');
+  if (a) {
+    e.preventDefault();
+    if (!S.ready && !USABLE_WHILE_BOOTING.has(a.dataset.act)) { toast('Initializing…'); return; }
+    ACTIONS[a.dataset.act]?.(a);
+    return;
+  }
+  const p = e.target.closest('#righttb [data-panel]');
+  if (p) { if (!S.ready) { toast('Initializing…'); return; } openPanel(p.dataset.panel); return; }
   if (!e.target.closest('.menu') && e !== S.menuEvent) closeMenus();
   if (!e.target.closest('#search')) closeSearch();
 });
@@ -1284,6 +1293,7 @@ $$('.sd-head [data-scope]').forEach(a => a.onclick = () => { S.searchScope = a.d
 document.addEventListener('keydown', e => {
   if (e.target.closest('input,textarea,select')) return;
   const mod = e.ctrlKey || e.metaKey; const k = e.key;
+  if (!S.ready) { if (k === 'Escape') { closeMenus(); $$('.modal-bg').forEach(m => m.remove()); } return; }
   if (k === 'Escape') { closeMenus(); $$('.modal-bg').forEach(m => m.remove()); cy.$(':selected').unselect(); S.lassoMode = null; return; }
   if ($('.modal-bg')) return;
   const pan = { ArrowLeft: [60, 0], ArrowRight: [-60, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[k];
@@ -1462,6 +1472,8 @@ async function boot() {
     const landMeta = $('#land-meta');
     if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = 'Neo4j is not reachable.'; }
   }
+  const stopWait = armLandWait();
+  try {
   try { S.schema = await api('/api/schema'); } catch { S.schema = { categories: {}, types: {}, links: [] }; }
   initStyles();
   cy = cytoscape({ headless: true, styleEnabled: true, elements: [], style: cyStyle(), minZoom: 0.01, maxZoom: 6 });
@@ -1483,7 +1495,35 @@ async function boot() {
   $('#minimap').addEventListener('mousedown', ev => { const t = $('#minimap')._t; if (!t) return; const r = ev.target.getBoundingClientRect(); const mx = (ev.clientX - r.left - t.ox) / t.s, my = (ev.clientY - r.top - t.oy) / t.s; R.animate({ center: { x: mx, y: my }, zoom: cy.zoom() }, 200); });
   window.addEventListener('resize', () => { sizeOverlay(); R.resize(); drawOverlay(); });
   updateUndoBtns(); updateSaveChip(); afterGraphChange();
+  S.ready = true;
   const q = new URLSearchParams(location.search);
   if (q.get('viz')) loadViz(q.get('viz'));
+  } finally {
+    stopWait();
+  }
+}
+
+// Shown only when the data-model read outlasts a quick start. The counts are
+// already on the card; this is the stretch before the canvas exists.
+function armLandWait() {
+  const land = document.querySelector('.land');
+  const reveal = setTimeout(() => {
+    if (land) land.classList.add('is-booting');
+    const el = $('#land-wait');
+    if (el) el.classList.remove('hidden');
+  }, 400);
+  const note = setTimeout(() => {
+    const n = $('#land-wait-note');
+    if (n) n.classList.remove('hidden');
+  }, 3000);
+  return () => {
+    clearTimeout(reveal);
+    clearTimeout(note);
+    if (land) land.classList.remove('is-booting');
+    const el = $('#land-wait');
+    if (el) el.classList.add('hidden');
+    const n = $('#land-wait-note');
+    if (n) n.classList.add('hidden');
+  };
 }
 boot();

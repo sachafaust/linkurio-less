@@ -209,6 +209,47 @@ def _neo4j():
     return None
 
 
+def test_graph_counts():
+    print("graph counts")
+    sample = {
+        "nodes": [
+            {"count": 10},
+            {"count": 10, "label": "Person"},
+            {"count": 4, "label": "Employee"},
+        ],
+        "relationships": [
+            {"count": 7},
+            {"relationshipType": "KNOWS", "count": 7},
+            {"count": 3, "relationshipType": "KNOWS", "startLabel": "Person"},
+            {"count": 3, "relationshipType": "KNOWS", "endLabel": "Person"},
+        ],
+    }
+    got = server.graph_count_totals(sample)
+    check("store totals ignore per-label and pattern rows",
+          got == {"nodes": 10, "edges": 7,
+                  "labels": {"Person": 10, "Employee": 4}, "types": {"KNOWS": 7}},
+          repr(got))
+    check("a payload with no totals is ignored",
+          server.graph_count_totals({"nodes": [{"count": 1, "label": "Person"}], "relationships": []}) is None
+          and server.graph_count_totals(None) is None
+          and server.graph_count_totals({"nodes": [], "relationships": [{"count": 1}]}) is None)
+    found = _neo4j()
+    if not found:
+        return
+    from neo4j_env import Settings
+    uri, user, pw = found
+    g = server.Graph(Settings(uri, user, pw, os.environ.get("NEO4J_DATABASE") or "neo4j"))
+    try:
+        got = g.store_counts()
+        n, r = g._count_with_cypher()
+        check("db.stats.retrieve totals match the count store",
+              got is not None and got["nodes"] == n and got["edges"] == r
+              and sum(got["types"].values()) == r,
+              repr(None if got is None else (got["nodes"], got["edges"], n, r)))
+    finally:
+        g.driver.close()
+
+
 def test_config_file():
     print("config file")
     tmp = tempfile.TemporaryDirectory()
@@ -326,6 +367,19 @@ def test_api():
               budget.get("max_nodes") == 6 and budget.get("max_edges") == 4
               and budget.get("expand_limit") == 3 and budget.get("cypher_limit") == 5,
               repr(budget))
+        code_n, node_count = _post(url, "/api/cypher", {"query": "MATCH (n) RETURN count(n) AS n"})
+        code_r, rel_count = _post(url, "/api/cypher", {"query": "MATCH ()-[r]->() RETURN count(r) AS n"})
+
+        def _cell(body):
+            rows = body.get("rows") or []
+            return rows[0][0] if rows and rows[0] else None
+
+        check("status totals match the count store",
+              code_n == 200 and code_r == 200
+              and status.get("nodes") == _cell(node_count)
+              and status.get("edges") == _cell(rel_count),
+              f"status {status.get('nodes')}/{status.get('edges')} "
+              f"vs count {_cell(node_count)}/{_cell(rel_count)}")
         cfg = budget.get("config") or {}
         check("the first launch writes a config file",
               budget.get("config_created") is True and budget.get("config_file") == "gx.local.json"
@@ -431,6 +485,7 @@ def main():
     test_config_file()
     test_hard_limit()
     test_plan()
+    test_graph_counts()
     test_api()
     if FAILS:
         print(f"\n{len(FAILS)} failed")

@@ -650,6 +650,46 @@ def apply_hard_limit(query: str, limit: int) -> str:
     return f"CALL {{\n{inner}\n}}\nRETURN * LIMIT {limit}"
 
 
+def graph_count_totals(data):
+    """Read store totals from ``db.stats.retrieve('GRAPH COUNTS')``.
+
+    The total node count is the entry with no label. The total relationship
+    count is the entry with no relationship type. Entries that also name a
+    start or end label are patterns, not type totals. Returns None when
+    either total is missing.
+    """
+    if not isinstance(data, dict):
+        return None
+    nodes, rels = data.get("nodes"), data.get("relationships")
+    if not isinstance(nodes, list) or not isinstance(rels, list):
+        return None
+    node_total, labels = None, {}
+    for entry in nodes:
+        if not isinstance(entry, dict) or "count" not in entry:
+            continue
+        count = int(entry["count"])
+        label = entry.get("label")
+        if label is None:
+            node_total = count
+        else:
+            labels[str(label)] = count
+    rel_total, types = None, {}
+    for entry in rels:
+        if not isinstance(entry, dict) or "count" not in entry:
+            continue
+        if entry.get("startLabel") is not None or entry.get("endLabel") is not None:
+            continue
+        count = int(entry["count"])
+        kind = entry.get("relationshipType")
+        if kind is None:
+            rel_total = count
+        else:
+            types[str(kind)] = count
+    if node_total is None or rel_total is None:
+        return None
+    return {"nodes": node_total, "edges": rel_total, "labels": labels, "types": types}
+
+
 class Graph:
     def __init__(self, settings=None):
         settings = settings or neo4j_settings()
@@ -660,6 +700,7 @@ class Graph:
         self._ft_checked = bool(self._fulltext)
         self.cache = TTLCache(ttl=float(os.environ.get("CACHE_TTL", 60)))
         self.schema_cache = TTLCache(ttl=float(os.environ.get("SCHEMA_TTL", 600)), size=4)
+        self._counts_warned = False
 
     def read(self, query: str, timeout: float = 30, **params):
         """Run one statement in a READ transaction and return the records."""
@@ -680,11 +721,39 @@ class Graph:
                 self._fulltext = None
         return self._fulltext
 
+    def store_counts(self):
+        """Totals from ``CALL db.stats.retrieve('GRAPH COUNTS')``.
+
+        Neo4j answers that from the count store. None means the procedure is
+        missing or not permitted, and the caller counts with Cypher instead.
+        A connection failure is not caught here.
+        """
+        try:
+            rows = self.read("CALL db.stats.retrieve('GRAPH COUNTS') YIELD data RETURN data")
+        except neo4j.exceptions.Neo4jError as e:
+            if not self._counts_warned:
+                self._counts_warned = True
+                print(f"WARNING: db.stats.retrieve('GRAPH COUNTS') failed ({e}). Counting with Cypher.")
+            return None
+        parsed = graph_count_totals(rows[0]["data"] if rows else None)
+        if parsed is None and not self._counts_warned:
+            self._counts_warned = True
+            print("WARNING: db.stats.retrieve('GRAPH COUNTS') returned no totals. Counting with Cypher.")
+        return parsed
+
+    def _count_with_cypher(self):
+        n = self.read("MATCH (n) RETURN count(n) AS n")[0]["n"]
+        r = self.read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
+        return n, r
+
     # ---- API ---------------------------------------------------------------
     def status(self, consume_config_created=False):
         info = self.driver.get_server_info()
-        n = self.read("MATCH (n) RETURN count(n) AS n")[0]["n"]          # count store: O(1)
-        r = self.read("MATCH ()-[r]->() RETURN count(r) AS n")[0]["n"]
+        counts = self.store_counts()
+        if counts:
+            n, r = counts["nodes"], counts["edges"]
+        else:
+            n, r = self._count_with_cypher()
         return {"connected": True, "uri": self.uri, "database": self.db, "server": info.agent,
                 "nodes": n, "edges": r, "read_only": True, "fulltext_index": self.fulltext,
                 "budget": budget_payload(consume_created=consume_config_created)}
@@ -693,10 +762,15 @@ class Graph:
         hit = None if refresh else self.schema_cache.get("schema")
         if hit:
             return hit
-        labels = [r["label"] for r in self.read("CALL db.labels() YIELD label RETURN label ORDER BY label")]
-        types = [r["relationshipType"] for r in self.read("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType")]
-        label_counts = {l: self.read(f"MATCH (n:{cyq(l)}) RETURN count(n) AS c")[0]["c"] for l in labels}
-        type_counts = {t: self.read(f"MATCH ()-[r:{cyq(t)}]->() RETURN count(r) AS c")[0]["c"] for t in types}
+        counts = self.store_counts()
+        if counts:
+            label_counts, type_counts = counts["labels"], counts["types"]
+            labels, types = sorted(label_counts), sorted(type_counts)
+        else:
+            labels = [r["label"] for r in self.read("CALL db.labels() YIELD label RETURN label ORDER BY label")]
+            types = [r["relationshipType"] for r in self.read("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType")]
+            label_counts = {l: self.read(f"MATCH (n:{cyq(l)}) RETURN count(n) AS c")[0]["c"] for l in labels}
+            type_counts = {t: self.read(f"MATCH ()-[r:{cyq(t)}]->() RETURN count(r) AS c")[0]["c"] for t in types}
         cats = {}
         for l in labels:
             if not label_counts.get(l):
