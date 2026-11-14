@@ -8,7 +8,7 @@ Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`
 
 ## What it looks like
 
-`docs/screenshots/` holds the UI-suite captures. `python3 run_local.py --test` rewrites the `app-*.png` files. `landing.png` is the empty-canvas start page. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
+`docs/screenshots/` is the curated set. The UI suite writes its own captures under `tests/screenshots/`, which is gitignored. `landing.png` is the empty-canvas start page. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
 
 The empty canvas opens on the start page.
 
@@ -51,7 +51,7 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 | `--live-scale` | Stream exactly 15,000,000 nodes and 60,000,000 edges. Needs about 16 GB of RAM for Docker and 30 GB of disk. `--nodes` and `--edges` override the totals. |
 | `--max-nodes N --max-edges M` | Fixed safety ceiling. Omit both and the ceiling follows this machine's RAM. |
 | `--port 8755` `--no-browser` `--detach` | Explorer port, skip the browser, run in the background. |
-| `--test` | Budget tests plus the 33 UI checks, then keep serving. `--no-serve` exits after the tests. |
+| `--test` | Budget tests plus the 33 UI checks against the fixture snapshot, then keep serving. `--no-serve` exits after the tests. |
 
 ## Your own Neo4j
 
@@ -115,7 +115,7 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `run_local.py` | venv, Docker Neo4j, sample load, server |
 | `data/cartography_styles.json` | category color, icon, caption |
 | `data/queries.json` | built-in queries |
-| `docs/screenshots/` | UI-suite captures |
+| `docs/screenshots/` | Curated UI captures. The suite writes gitignored `tests/screenshots/` |
 | `docs/compare/` | Linkurious comparison sheets |
 | `tests/test_budget.py` | working-set math and a tiny read-only server check |
 | `tests/test_neo4j_env.py` | credential loading |

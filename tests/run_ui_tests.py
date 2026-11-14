@@ -1,7 +1,9 @@
 """Headless browser tests for the Neo4j graph explorer (Playwright + Chrome).
 
-Needs a running Neo4j seeded with seed_cartography.py. Starts server.py itself on a
-free port, drives the UI, writes tests/results.json and docs/screenshots/app-*.png.
+Needs a running Neo4j loaded with the Cartography fixture snapshot
+(data/cartography-fixtures.json.gz). The synthetic acme-prod estate is not required.
+Starts server.py itself on a free port, drives the UI, and writes tests/results.json
+and tests/screenshots/app-*.png. Both outputs are gitignored.
 
     NEO4J_PASSWORD=... python3 tests/run_ui_tests.py
 """
@@ -21,7 +23,10 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
-SHOTS = ROOT / "docs" / "screenshots"
+SHOTS = ROOT / "tests" / "screenshots"
+# Anchors in the fixture snapshot. acme-prod exists only in the synthetic generator.
+FIXTURE_SEARCH = "AWSID"          # an AWSAccount id that no other node uses
+FIXTURE_HUB = "000000000000"      # the AWSAccount with more than 100 relationships
 DL = Path(os.environ.get("TMPDIR", "/tmp")) / "gx-downloads"
 RESULTS = []
 
@@ -90,7 +95,9 @@ def ev(pg, js):
     # made the renderer grow to >3 GB and crash ("Target crashed").
     return pg.evaluate("""async (src) => {
         const r = await (0, eval)(src);
-        return (r && typeof r === 'object' && (typeof r.cy === 'function' || r instanceof Element)) ? null : r;
+        // A cytoscape core or collection is cyclic. Returning it makes Chrome crash.
+        if (r && typeof r === 'object' && (typeof r.cy === 'function' || typeof r.elements === 'function' || r instanceof Element)) return null;
+        return r;
     }""", js)
 
 
@@ -119,12 +126,12 @@ def run_all(pg, url):
     check("connect to Neo4j and show the landing screen", t_connect)
 
     def t_search():
-        pg.click("#search-input"); pg.fill("#search-input", "acme-prod")
+        pg.click("#search-input"); pg.fill("#search-input", FIXTURE_SEARCH)
         pg.wait_for_selector("#search-results .sr", timeout=8000)
         n = pg.locator("#search-results .sr").count()
         first = pg.text_content("#search-results .sr .cat")
         marks = pg.locator("#search-results mark").count()
-        assert n >= 5 and first.strip().upper() == "AWSACCOUNT" and marks > 0, (n, first, marks)
+        assert n >= 1 and first.strip().upper() == "AWSACCOUNT" and marks > 0, (n, first, marks)
         shot(pg, "02-search")
         return f"{n} results, first category {first}, {marks} highlighted matches"
     check("full-text search shows ranked results with category chip and highlights", t_search)
@@ -132,25 +139,31 @@ def run_all(pg, url):
     def t_search_edges_local():
         pg.click(".sd-head [data-kind=edge]"); pg.fill("#search-input", "CAN_WRITE"); pg.wait_for_timeout(900)
         ne = pg.locator("#search-results .sr").count()
-        pg.click(".sd-head [data-kind=node]"); pg.fill("#search-input", "acme-prod"); pg.wait_for_timeout(900)
+        pg.click(".sd-head [data-kind=node]"); pg.fill("#search-input", FIXTURE_SEARCH); pg.wait_for_timeout(900)
         assert ne > 0, ne
         return f"edge search for CAN_WRITE returned {ne} edges"
     check("search edges by type", t_search_edges_local)
 
     def t_add():
-        # wait for the node results of "acme-prod" to replace the edge results of the previous check (search is
+        # wait for the node results to replace the edge results of the previous check (search is
         # debounced and async; on a bigger or cold database a fixed sleep raced it and Enter picked a stale row)
         pg.wait_for_function("(() => { const c = document.querySelector('#search-results .sr .cat'); return c && c.textContent.trim().toUpperCase() === 'AWSACCOUNT'; })()", timeout=15000)
         pg.keyboard.press("Enter"); pg.wait_for_timeout(800)
         n = ev(pg, "cy.nodes().length"); sel = ev(pg, "cy.$(':selected').map(e => e.data('category'))")
         assert n == 1 and sel == ["AWSAccount"], (n, sel)
         badge = ev(pg, "hiddenCount(cy.nodes()[0])")
-        assert badge > 50
+        assert badge > 0
         return f"added AWSAccount node, undisplayed-neighbor badge = {badge}"
     check("pick a search result adds and selects the node", t_add)
 
     def t_expand_menu():
-        x, y = node_pos(pg, ev(pg, "cy.nodes()[0].id()"))
+        ev(pg, "newViz()")
+        ev(pg, "runQueryToGraph(\"MATCH (a:AWSAccount {id:'" + FIXTURE_HUB + "'}) RETURN a\")")
+        pg.wait_for_function("() => !document.body.classList.contains('is-laying-out')", timeout=20000)
+        nid = ev(pg, "cy.nodes().filter(n => n.data('props').id === " + json.dumps(FIXTURE_HUB) + ")[0].id()")
+        ev(pg, f"cy.zoom(1.2); cy.center(cy.getElementById({json.dumps(nid)}))")
+        pg.wait_for_timeout(300)
+        x, y = node_pos(pg, nid)
         pg.mouse.click(x, y, button="right"); pg.wait_for_selector(".menu .mi")
         pg.hover(".menu .mi:has-text('Expand')"); pg.wait_for_function("document.querySelectorAll('.menu').length >= 2", timeout=8000)
         items = pg.locator(".menu >> nth=1").locator(".mi").all_text_contents()
@@ -159,7 +172,8 @@ def run_all(pg, url):
         pg.click(".menu >> nth=1 >> .mi:has-text('More options')")
         pg.wait_for_selector(".modal .xp-row")
         rows = pg.locator(".modal .xp-row").count()
-        # Pick only AWSRole nodes via RESOURCE edges
+        # Pick only AWSRole nodes via RESOURCE edges. The two roles also share a
+        # CAN_PASS_ROLE edge, which the canvas adds once both are visible.
         pg.click(".modal [data-xall]"); pg.click(".modal [data-xall]")
         pg.locator(".modal [data-xcat='AWSRole']").check()
         row = pg.locator(".modal .xp-row", has=pg.locator("[data-xcat='AWSRole']"))
@@ -168,18 +182,20 @@ def run_all(pg, url):
         pg.click(".modal [data-xgo]"); wait_layout(pg, 2200)
         cats = ev(pg, "[...new Set(cy.nodes().map(n => n.data('category')))]")
         types = ev(pg, "[...new Set(cy.edges().map(e => e.data('type')))]")
-        assert set(cats) == {"AWSAccount", "AWSRole"} and types == ["RESOURCE"], (cats, types)
+        assert set(cats) == {"AWSAccount", "AWSRole"} and set(types) == {"RESOURCE", "CAN_PASS_ROLE"}, (cats, types)
         return f"expand menu items: {len(items)}; selective expand had {rows} category rows; result categories {cats}, edge types {types}"
     check("expand menu filtered by category and edge type (selective expand)", t_expand_menu)
 
     def t_dblclick_expand():
         before = ev(pg, "cy.nodes().length")
-        nid = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole' && hiddenCount(n) > 0 && hiddenCount(n) < 40)[0].id()")
+        ev(pg, "expand(cy.nodes().filter(n => n.data('category') === 'AWSAccount'), {categories: ['AWSEC2Instance'], limit: 10})")
+        wait_layout(pg, 1800)
+        nid = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSEC2Instance' && hiddenCount(n) > 0 && hiddenCount(n) < 40)[0].id()")
         ev(pg, f"cy.zoom(1.4); cy.center(cy.getElementById({json.dumps(nid)}))"); pg.wait_for_timeout(200)
         x, y = node_pos(pg, nid); pg.mouse.dblclick(x, y); wait_layout(pg, 2200)
         after = ev(pg, "cy.nodes().length")
         assert after > before, (before, after)
-        return f"double-click expanded an AWSRole: {before} -> {after} nodes"
+        return f"double-click expanded an AWSEC2Instance: {before} -> {after} nodes"
     check("double-click a node expands its neighbors", t_dblclick_expand)
 
     def t_expand_all():
@@ -246,7 +262,7 @@ def run_all(pg, url):
     def t_style():
         ev(pg, "cy.$(':selected').unselect()")
         pg.click("[data-panel=design]"); pg.wait_for_selector("#rightpanel .tabs-box")
-        u = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole')[0].id()")
+        u = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole' && n.data('props').roleid)[0].id()")
         w0 = ev(pg, f"nodeSize(cy.getElementById({json.dumps(u)}).data())")
         pg.click("#rightpanel [data-color='AWSRole']"); pg.click(".pop [data-c='#17becf']"); pg.wait_for_timeout(200)
         col = ev(pg, f"nodeColor(cy.getElementById({json.dumps(u)}).data())")
@@ -265,35 +281,36 @@ def run_all(pg, url):
     check("design panel: color, size, icon and caption by category", t_style)
 
     def t_value_color():
-        # make sure some stopped instances are on screen (synthetic data: ~10% stopped)
-        ev(pg, "runQueryToGraph(\"MATCH (i:EC2Instance {state: 'stopped'}) RETURN i LIMIT 3\")"); pg.wait_for_timeout(600)
+        # The fixture has no stopped instances. c4.large and r4.large are both on the graph.
+        ev(pg, "runQueryToGraph(\"MATCH (i:AWSEC2Instance) WHERE i.instancetype IN ['c4.large', 'r4.large'] RETURN i\")"); pg.wait_for_timeout(600)
         pg.click("#rightpanel [data-dtab=styles]"); pg.click("#rightpanel [data-open='d:AWSEC2Instance']")
-        pg.click("#rightpanel [data-open='dp:AWSEC2Instance:state']")
-        pg.click("#rightpanel [data-vcolor='AWSEC2Instance|state|stopped']"); pg.click(".pop [data-c='#9e9e9e']"); pg.wait_for_timeout(200)
-        stopped = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'stopped').map(n => nodeColor(n.data()))")
-        running = ev(pg, "cy.nodes().filter(n => n.data('props').state === 'running').map(n => nodeColor(n.data()))[0]")
-        assert stopped and all(c.lower() == "#9e9e9e" for c in stopped), stopped
+        pg.click("#rightpanel [data-open='dp:AWSEC2Instance:instancetype']")
+        pg.click("#rightpanel [data-vcolor='AWSEC2Instance|instancetype|c4.large']"); pg.click(".pop [data-c='#9e9e9e']"); pg.wait_for_timeout(200)
+        colored = ev(pg, "cy.nodes().filter(n => n.data('props').instancetype === 'c4.large').map(n => nodeColor(n.data()))")
+        other = ev(pg, "cy.nodes().filter(n => n.data('props').instancetype === 'r4.large').map(n => nodeColor(n.data()))[0]")
+        assert colored and all(c.lower() == "#9e9e9e" for c in colored) and other.lower() != "#9e9e9e", (colored, other)
         pg.click("#rightpanel [data-d=gear]"); pg.click(".menu .mi:has-text('Reset styles')")
-        return f"{len(stopped)} stopped instances recolored grey, running stay {running}"
+        return f"{len(colored)} c4.large instances recolored grey, r4.large stays {other}"
     check("design panel: color by property value", t_value_color)
 
     def t_dynamic_size():
-        pg.click("#rightpanel [data-size='AWSS3Bucket']"); pg.select_option(".pop [data-sp]", "object_count"); pg.select_option(".pop [data-sc]", "log"); pg.click(".pop [data-sok]")
-        ev(pg, "expand(cy.nodes().filter(n => n.data('category') === 'AWSAccount'), {categories: ['AWSS3Bucket'], limit: 30})"); wait_layout(pg, 2400)
-        ws = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSS3Bucket').map(n => nodeSize(n.data()))")
+        # Listener ports are 80 and 443, so a log scale spans more than 1.5×. object_count is not in the fixture.
+        ev(pg, "runQueryToGraph(\"MATCH (l:AWSELBV2Listener) RETURN l\")"); pg.wait_for_timeout(800)
+        pg.click("#rightpanel [data-size='AWSELBV2Listener']"); pg.select_option(".pop [data-sp]", "port"); pg.select_option(".pop [data-sc]", "log"); pg.click(".pop [data-sok]")
+        ws = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSELBV2Listener').map(n => nodeSize(n.data()))")
         pg.click("#rightpanel [data-d=gear]"); pg.click(".menu .mi:has-text('Reset styles')")
         assert ws and max(ws) > min(ws) * 1.5, ws
-        return f"{len(ws)} buckets sized by log(object_count): {min(ws):.0f}px .. {max(ws):.0f}px"
+        return f"{len(ws)} listeners sized by log(port): {min(ws):.0f}px .. {max(ws):.0f}px"
     check("design panel: dynamic size by numeric property", t_dynamic_size)
 
     def t_filter():
         pg.click("[data-panel=filters]"); pg.wait_for_selector("#rightpanel .hint")
         n0 = ev(pg, "cy.nodes().length")
-        pg.click("#rightpanel [data-ftog='cat|AWSS3Bucket']"); pg.wait_for_timeout(200)
+        pg.click("#rightpanel [data-ftog='cat|AWSELBV2Listener']"); pg.wait_for_timeout(200)
         f = ev(pg, "cy.nodes('.filtered').length"); dot = ev(pg, "document.querySelector('[data-panel=filters]').classList.contains('dot')")
         shot(pg, "07-filters")
-        pg.click("#rightpanel [data-open='f:AWSEC2Instance']"); pg.click("#rightpanel [data-open='fp:AWSEC2Instance:state']")
-        pg.click("#rightpanel [data-ftog='val|AWSEC2Instance|state|stopped']"); pg.wait_for_timeout(150)
+        pg.click("#rightpanel [data-open='f:AWSEC2Instance']"); pg.click("#rightpanel [data-open='fp:AWSEC2Instance:instancetype']")
+        pg.click("#rightpanel [data-ftog='val|AWSEC2Instance|instancetype|c4.large']"); pg.wait_for_timeout(150)
         f2 = ev(pg, "cy.nodes('.filtered').length")
         ev(pg, "removeFiltered()"); pg.wait_for_timeout(200)
         n1 = ev(pg, "cy.nodes().length")
@@ -306,12 +323,12 @@ def run_all(pg, url):
     check("filters: category and property value, remove filtered, undo, reset", t_filter)
 
     def t_num_filter():
-        pg.click("#rightpanel [data-open='f:AWSS3Bucket']"); pg.click("#rightpanel [data-open='fp:AWSS3Bucket:object_count']")
-        pg.fill("#rightpanel [data-fnum='AWSS3Bucket|object_count|min']", "1000000"); pg.press("#rightpanel [data-fnum='AWSS3Bucket|object_count|min']", "Enter"); pg.wait_for_timeout(200)
-        f = ev(pg, "cy.nodes('.filtered').length"); exp = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSS3Bucket' && n.data('props').object_count < 1000000).length")
+        pg.click("#rightpanel [data-open='f:AWSELBV2Listener']"); pg.click("#rightpanel [data-open='fp:AWSELBV2Listener:port']")
+        pg.fill("#rightpanel [data-fnum='AWSELBV2Listener|port|min']", "100"); pg.press("#rightpanel [data-fnum='AWSELBV2Listener|port|min']", "Enter"); pg.wait_for_timeout(200)
+        f = ev(pg, "cy.nodes('.filtered').length"); exp = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSELBV2Listener' && n.data('props').port < 100).length")
         pg.click("#rightpanel [data-f=reset]")
-        assert f == exp, (f, exp)
-        return f"number bound object_count >= 1,000,000 hid {f} buckets (expected {exp})"
+        assert f == exp and exp > 0, (f, exp)
+        return f"number bound port >= 100 hid {f} listeners (expected {exp})"
     check("filters: numeric lower bound", t_num_filter)
 
     def t_layouts():
@@ -434,7 +451,7 @@ def run_all(pg, url):
     check("save, new and reopen a visualization locally", t_save_open)
 
     def t_cypher_readonly():
-        pg.click("[data-act=code-query] >> nth=1")
+        pg.click("#toolbar-cypher")
         pg.fill(".modal textarea.cypher", "MATCH (n) DETACH DELETE n")
         pg.click(".modal [data-cqadd]"); pg.wait_for_selector(".modal .err")
         err = pg.text_content(".modal .err")
@@ -443,7 +460,7 @@ def run_all(pg, url):
             urllib.request.urlopen(req); code = 200
         except urllib.error.HTTPError as e:
             code = e.code
-        pg.fill(".modal textarea.cypher", "MATCH p=(u:GitHubUser)-[r]->(o:GitHubOrganization) WHERE u.has_2fa_enabled = false RETURN p")
+        pg.fill(".modal textarea.cypher", "MATCH p=(u:GitHubUser)-[r]->(o:GitHubOrganization) RETURN p LIMIT 5")
         pg.click(".modal [data-cqprev]"); pg.wait_for_timeout(800); shot(pg, "16-code-query")
         n0 = ev(pg, "cy.nodes().length")
         pg.click(".modal [data-cqadd]"); wait_layout(pg, 1800); n1 = ev(pg, "cy.nodes().length")
@@ -455,7 +472,7 @@ def run_all(pg, url):
     def t_queries_panel():
         pg.click("[data-panel=queries]"); pg.wait_for_selector("#rightpanel .q-item")
         n0 = ev(pg, "cy.nodes().length")
-        pg.click("#rightpanel .q-item:has-text('Okta groups mapped')"); wait_layout(pg, 1800)
+        pg.click("#rightpanel .q-item:has-text('Security groups open to 0.0.0.0/0')"); wait_layout(pg, 1800)
         n1 = ev(pg, "cy.nodes().length")
         shot(pg, "17-queries-panel")
         assert n1 > n0, (n0, n1)
@@ -486,7 +503,7 @@ def run_all(pg, url):
         # Supernodes: above HUB_THRESHOLD hidden neighbours, double-click shows one group node per category
         # instead of hundreds of nodes; the group loads its members in pages.
         ev(pg, "newViz()")
-        ev(pg, "runQueryToGraph(\"MATCH (a:AWSAccount {name:'acme-prod'}) RETURN a\")"); pg.wait_for_timeout(1200)
+        ev(pg, "runQueryToGraph(\"MATCH (a:AWSAccount {id:'" + FIXTURE_HUB + "'}) RETURN a\")"); pg.wait_for_timeout(1200)
         hub = ev(pg, "cy.nodes()[0].id()"); hidden = ev(pg, "hiddenCount(cy.nodes()[0])")
         ev(pg, f"HUB_THRESHOLD = 100; expandDefault(cy.getElementById({json.dumps(hub)}))"); pg.wait_for_timeout(1500)
         groups = ev(pg, "cy.nodes().filter(n => n.data('hubgroup')).map(n => [n.data('category'), n.data('type'), n.data('count')])")
@@ -504,7 +521,7 @@ def run_all(pg, url):
     def t_workspace_shot():
         # A clean overview shot for the comparison sheet: Cartography IAM neighborhood with property panel.
         ev(pg, "newViz()")
-        ev(pg, "runQueryToGraph(\"MATCH p=(a:AWSAccount {name:'acme-prod'})-[:RESOURCE]->(r:AWSRole)<-[:STS_ASSUMEROLE_ALLOW]-(x) RETURN p LIMIT 40\")"); wait_layout(pg, 2600)
+        ev(pg, "runQueryToGraph(\"MATCH p=(a:AWSAccount {id:'" + FIXTURE_HUB + "'})-[:RESOURCE]->(r:AWSRole) RETURN p LIMIT 40\")"); wait_layout(pg, 2600)
         rid = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSRole').max(n => n.degree()).ele.id()")
         ev(pg, f"selectOnly(cy.getElementById({json.dumps(rid)}))"); pg.wait_for_timeout(200)
         if pg.is_visible("#open-selpanel"):
