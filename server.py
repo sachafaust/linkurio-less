@@ -26,7 +26,10 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     HUB_SAMPLE      neighbors read per node for summaries / degree ranking (20000)
     EDGE_WALK_MAX   edge fill will not walk a node with more relationships than this (2000)
     SEARCH_SCAN_CAP nodes scanned per search without a full-text index (200000)
-    CACHE_TTL / SCHEMA_TTL  seconds to cache neighbor summaries (60) / the schema (600)
+    CACHE_TTL / SCHEMA_TTL  seconds to keep neighbor summaries (60) and the schema (600)
+                    in memory. The schema is also saved in gitignored gx.schema.json, beside
+                    the working set, and reused for the same Neo4j URI and database until
+                    the page asks to refresh it.
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
@@ -690,6 +693,68 @@ def graph_count_totals(data):
     return {"nodes": node_total, "edges": rel_total, "labels": labels, "types": types}
 
 
+# The data model for one Neo4j connection. The first read pays for the label and
+# relationship sample; later launches of this process reuse the file until the
+# page asks to refresh. The file sits next to the working set so a test that
+# points GX_CONFIG at a temp directory does not read this machine's cache.
+_SCHEMA_DISK_LOCK = threading.Lock()
+
+
+def schema_cache_path():
+    return config_path().with_name("gx.schema.json")
+
+
+def connection_cache_key(uri, database):
+    """Identity of a Neo4j connection with any userinfo removed."""
+    parts = urlsplit((uri or "").strip())
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host + (f":{parts.port}" if parts.port else "")
+    clean = urlunsplit((parts.scheme, netloc, parts.path or "", "", ""))
+    return f"{clean}|{(database or '').strip()}"
+
+
+def _schema_body_ok(body):
+    return (isinstance(body, dict) and isinstance(body.get("labels"), dict)
+            and isinstance(body.get("types"), dict) and isinstance(body.get("categories"), dict)
+            and isinstance(body.get("links"), list))
+
+
+def _read_schema_file(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("entries"), dict):
+        return None
+    return data
+
+
+def load_cached_schema(uri, database, path=None):
+    data = _read_schema_file(path or schema_cache_path())
+    if not data:
+        return None
+    entry = data["entries"].get(connection_cache_key(uri, database))
+    if not isinstance(entry, dict) or not isinstance(entry.get("saved_at"), str):
+        return None
+    body = entry.get("schema")
+    if not _schema_body_ok(body):
+        return None
+    return {"schema": body, "saved_at": entry["saved_at"]}
+
+
+def store_cached_schema(uri, database, schema, saved_at, path=None):
+    path = path or schema_cache_path()
+    key = connection_cache_key(uri, database)
+    body = {k: schema[k] for k in ("labels", "types", "categories", "links")}
+    with _SCHEMA_DISK_LOCK:
+        data = _read_schema_file(path) or {"version": 1, "entries": {}}
+        data["version"] = 1
+        data["entries"][key] = {"saved_at": saved_at, "schema": body}
+        _write_config(path, data)
+
+
 class Graph:
     def __init__(self, settings=None):
         settings = settings or neo4j_settings()
@@ -759,9 +824,28 @@ class Graph:
                 "budget": budget_payload(consume_created=consume_config_created)}
 
     def schema(self, refresh=False):
-        hit = None if refresh else self.schema_cache.get("schema")
-        if hit:
-            return hit
+        """Categories, relationship types, and the links between them.
+
+        A restart reuses gx.schema.json for this URI and database. refresh
+        reads Neo4j again and replaces that entry.
+        """
+        if not refresh:
+            hit = self.schema_cache.get("schema")
+            if hit:
+                return hit
+            disk = load_cached_schema(self.uri, self.db)
+            if disk:
+                body = dict(disk["schema"])
+                body["cache"] = {"saved_at": disk["saved_at"], "source": "disk"}
+                return self.schema_cache.put("schema", body)
+        computed = self._compute_schema()
+        saved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        store_cached_schema(self.uri, self.db, computed, saved_at)
+        body = dict(computed)
+        body["cache"] = {"saved_at": saved_at, "source": "fresh"}
+        return self.schema_cache.put("schema", body)
+
+    def _compute_schema(self):
         counts = self.store_counts()
         if counts:
             label_counts, type_counts = counts["labels"], counts["types"]
@@ -790,9 +874,8 @@ class Graph:
             for rec in self.read(f"MATCH (a)-[r:{cyq(t)}]->(b) RETURN labels(a) AS la, labels(b) AS lb LIMIT 200"):
                 key = (category_of(rec["la"]), t, category_of(rec["lb"]))
                 links[key] = links.get(key, 0) + 1
-        return self.schema_cache.put("schema", {
-            "labels": label_counts, "types": {t: c for t, c in type_counts.items() if c}, "categories": cats,
-            "links": [{"source": a, "type": t, "target": b} for (a, t, b) in sorted(links)]})
+        return {"labels": label_counts, "types": {t: c for t, c in type_counts.items() if c}, "categories": cats,
+                "links": [{"source": a, "type": t, "target": b} for (a, t, b) in sorted(links)]}
 
     def search(self, q: str, kind="node", category=None, prop=None, value=None, limit=20, offset=0, fuzzy=False):
         ql = (q or "").strip().lower()
