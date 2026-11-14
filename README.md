@@ -1,5 +1,7 @@
 # linkurio-less
 
+<img src="static/logo.jpg" alt="linkurio-less" width="460">
+
 Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`cartography_styles.json`), and the built-in queries (`queries.json`).
 
 Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`. Cytoscape holds the graph model. `static/render.js` draws it on Canvas2D. ForceAtlas2 runs in a web worker.
