@@ -58,6 +58,14 @@ body.dark #watermark { color: rgba(255,255,255,.08); }
 .land-stats b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 .land-stats span { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
 .land-stats.is-msg { display: block; padding: 12px 0; font-size: 13px; color: var(--text); }
+.land-wait { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; font-size: 13px; }
+.land-wait b { font-weight: 500; }
+.land-wait small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.land-spin { width: 14px; height: 14px; margin-top: 2px; flex: none; border: 2px solid var(--line); border-top-color: var(--primary); border-radius: 50%; animation: land-spin .7s linear infinite; }
+@keyframes land-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .land-spin { animation: none; } }
+.land.is-booting .land-act { opacity: .45; pointer-events: none; }
+.land.is-booting .land-act:hover { border-color: var(--line); background: var(--card); }
 .land-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
 .land-act { display: flex; gap: 12px; align-items: flex-start; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); }
 .land-act:hover { border-color: var(--primary); background: var(--hover); }
