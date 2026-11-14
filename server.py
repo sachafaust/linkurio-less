@@ -49,7 +49,7 @@ from neo4j_env import Neo4jConfigError, neo4j_settings
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-CFG = json.loads((ROOT / "cartography_styles.json").read_text())
+CFG = json.loads((ROOT / "data" / "cartography_styles.json").read_text())
 
 # Generic / ontology labels that Cartography adds next to the specific one. They are
 # kept on the node, but never chosen as the node's display category.
@@ -997,7 +997,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/styles":
                 return self._json(CFG)
             if u.path == "/api/queries":
-                return self._json(json.loads((ROOT / "queries.json").read_text()))
+                return self._json(json.loads((ROOT / "data" / "queries.json").read_text()))
             if u.path == "/api/search":
                 return self._json(GRAPH.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
                                                q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))

@@ -2,7 +2,7 @@
 next to a Linkurious manual screenshot, at the reference's 1919x941 viewport.
 
 Usage: python3 tools/make_before_after.py --before http://127.0.0.1:8750/ --after http://127.0.0.1:8745/
-Writes screenshots/before-after-*.png and compare-before-after.png.
+Writes docs/screenshots/before-after-*.png and docs/compare/compare-before-after.png.
 """
 import argparse
 import os
@@ -51,7 +51,7 @@ def main():
     ap.add_argument("--before", default="http://127.0.0.1:8750/")
     ap.add_argument("--after", default="http://127.0.0.1:8745/")
     a = ap.parse_args()
-    shots = os.path.join(HERE, "screenshots")
+    shots = os.path.join(HERE, "docs", "screenshots")
     bp, apath = os.path.join(shots, "before-after-v1.png"), os.path.join(shots, "before-after-v2.png")
     shoot(a.before, bp)
     shoot(a.after, apath)
@@ -68,7 +68,7 @@ def main():
     for i in imgs:
         out.paste(i, (0, y))
         y += i.height
-    dst = os.path.join(HERE, "compare-before-after.png")
+    dst = os.path.join(HERE, "docs", "compare", "compare-before-after.png")
     out.save(dst, optimize=True)
     print("wrote", dst, bp, apath)
 

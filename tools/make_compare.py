@@ -1,4 +1,4 @@
-"""Build compare-*.png (reference screenshot left, prototype right) and compare-all.png.
+"""Build docs/compare/compare-*.png (reference screenshot left, prototype right) and compare-all.png.
 
 Reference images come from the Linkurious user manual downloaded during research
 (/home/box/shared/rnd/linkurious-reference/manual/images). Run after tests/run_ui_tests.py.
@@ -9,7 +9,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REF = os.environ.get("REF_DIR", "/home/box/shared/rnd/linkurious-reference/manual/images")
-SHOTS = os.path.join(HERE, "screenshots")
+SHOTS = os.path.join(HERE, "docs", "screenshots")
+COMPARE = os.path.join(HERE, "docs", "compare")
 FONT = os.path.join(HERE, "static", "fonts", "Roboto.ttf")
 
 PAIRS = [
@@ -66,7 +67,7 @@ def main():
             print("skip", key, "(missing", rp if not os.path.exists(rp) else ap, ")")
             continue
         img = compose(title, Image.open(rp).convert("RGBA"), Image.open(ap))
-        path = os.path.join(HERE, f"compare-{key}.png")
+        path = os.path.join(COMPARE, f"compare-{key}.png")
         img.save(path, optimize=True)
         made.append(img)
         print("wrote", path)
@@ -79,7 +80,7 @@ def main():
     y = 0
     for r in rows:
         out.paste(r, (0, y)); y += r.height
-    out.save(os.path.join(HERE, "compare-all.png"), optimize=True)
+    out.save(os.path.join(COMPARE, "compare-all.png"), optimize=True)
     print("wrote compare-all.png", out.size)
 
 

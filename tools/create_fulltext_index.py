@@ -9,7 +9,7 @@ explorer server stays read-only and auto-detects the index by name ("gx_search")
     A gitignored .env supplies any of those variables that are unset. The environment wins.
 
 Neo4j full-text indexes need an explicit label list; this uses every label currently in the
-database and the search fields from cartography_styles.json. Re-run with --replace after new
+database and the search fields from data/cartography_styles.json. Re-run with --replace after new
 Cartography modules add labels.
 """
 import argparse
@@ -36,7 +36,7 @@ def main():
     ap.add_argument("--yes", action="store_true", help="actually create the index")
     ap.add_argument("--replace", action="store_true", help="drop and recreate an existing gx_search index")
     a = ap.parse_args()
-    fields = json.loads((ROOT / "cartography_styles.json").read_text())["search_fields"]
+    fields = json.loads((ROOT / "data" / "cartography_styles.json").read_text())["search_fields"]
     try:
         settings = neo4j_settings()
     except Neo4jConfigError as e:
