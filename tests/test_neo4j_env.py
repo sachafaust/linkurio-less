@@ -113,6 +113,67 @@ def test_refusals():
     absent.parent.rmdir()
 
 
+def test_empty_password_is_sent():
+    absent = missing_env()
+    try:
+        settings = neo4j_settings(environ={
+            "NEO4J_URI": "bolt://127.0.0.1:7687",
+            "NEO4J_USER": "neo4j",
+            "NEO4J_PASSWORD": "",
+            "NEO4J_DATABASE": "neo4j",
+        }, path=absent)
+        check(settings.password == "" and settings.user == "neo4j" and settings.database == "neo4j",
+              "an empty password is kept")
+    finally:
+        absent.parent.rmdir()
+    folder = tempfile.TemporaryDirectory()
+    path = Path(folder.name) / ".env"
+    path.write_text("NEO4J_URI=bolt://10.0.0.8:7687\nNEO4J_PASSWORD=\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    env = {}
+    settings = neo4j_settings(environ=env, path=path)
+    check(settings.password == "" and env.get("NEO4J_PASSWORD") == "" and settings.uri == "bolt://10.0.0.8:7687",
+          "an empty password in .env is set")
+    folder.cleanup()
+
+
+def test_prompt_keeps_an_empty_password():
+    import getpass
+    keys = ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD", "NEO4J_DATABASE", "GX_ENV")
+    saved = {k: os.environ.get(k) for k in keys}
+    folder = tempfile.TemporaryDirectory()
+    path = Path(folder.name) / ".env"
+    path.write_text("NEO4J_URI=bolt://10.1.2.3:7687\nNEO4J_USER=neo4j\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    for key in keys:
+        os.environ.pop(key, None)
+    os.environ["GX_ENV"] = str(path)
+    prompted = []
+
+    def fake_getpass(prompt):
+        prompted.append(prompt)
+        return ""
+
+    real_isatty = sys.stdin.isatty
+    real_getpass = getpass.getpass
+    sys.stdin.isatty = lambda: True
+    getpass.getpass = fake_getpass
+    try:
+        settings = run_local._settings_or_prompt()
+        check(settings.password == "" and settings.uri == "bolt://10.1.2.3:7687"
+              and settings.user == "neo4j" and len(prompted) == 1 and "Enter if there is none" in prompted[0],
+              "Enter at the prompt sets an empty password")
+    finally:
+        getpass.getpass = real_getpass
+        sys.stdin.isatty = real_isatty
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        folder.cleanup()
+
+
 def test_file_mode_warning():
     folder = tempfile.TemporaryDirectory()
     path = Path(folder.name) / ".env"
@@ -362,6 +423,8 @@ def test_live_and_browser():
 def main():
     test_parse_and_precedence()
     test_refusals()
+    test_empty_password_is_sent()
+    test_prompt_keeps_an_empty_password()
     test_file_mode_warning()
     test_config_file_drops_secrets()
     test_cli_flags_win()

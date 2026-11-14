@@ -32,6 +32,7 @@ Your own / live Neo4j (local or remote; no Docker, data is NOT touched unless yo
   The same four variables can live in a gitignored .env (copy .env.example). The environment wins over that file.
   Flags still work: --neo4j-uri, --neo4j-user, --neo4j-database, --neo4j-password.
   Leave the password out of the command to be prompted, so it stays out of your shell history.
+  Enter at that prompt sends an empty password. NEO4J_PASSWORD= in the environment or in .env does the same.
   The explorer opens the database read-only.
 
 Everything stays on your machine: Neo4j and the explorer listen on 127.0.0.1 only, the data is fake/fixture data.
@@ -375,7 +376,8 @@ def _settings_or_prompt():
         os.environ.pop("NEO4J_PASSWORD", None)
         user = (os.environ.get("NEO4J_USER") or "neo4j").strip() or "neo4j"
         host = redact_uri((os.environ.get("NEO4J_URI") or "").strip())
-        os.environ["NEO4J_PASSWORD"] = getpass.getpass(f"Neo4j password for {user} at {host}: ")
+        os.environ["NEO4J_PASSWORD"] = getpass.getpass(
+            f"Neo4j password for {user} at {host} (Enter if there is none): ")
         return neo4j_settings()
 
 
@@ -471,7 +473,7 @@ def parse(argv):
     n.add_argument("--neo4j-pagecache", default=None, help="Neo4j page cache in the container (default 1G, or 8G with --live-scale)")
     n.add_argument("--neo4j-uri", help="use your own Neo4j instead of Docker. NEO4J_URI in the environment or in .env does the same. Example: neo4j+s://host:7687 or bolt://localhost:7687. Data is left untouched")
     n.add_argument("--neo4j-user", default=None, help="Neo4j user (default: NEO4J_USER, otherwise neo4j)")
-    n.add_argument("--neo4j-password", default=None, help="password. Prefer NEO4J_PASSWORD or .env so it stays out of shell history. Prompted when neither is set")
+    n.add_argument("--neo4j-password", default=None, help="password. An empty value is sent as an empty password. Prefer NEO4J_PASSWORD or .env so it stays out of shell history. Prompted when it is unset; Enter sends an empty password")
     n.add_argument("--neo4j-database", default=None, help="database name (default: NEO4J_DATABASE, otherwise neo4j)")
     n.add_argument("--load-data", action="store_true", help="with --neo4j-uri: wipe it and load the mock data (refused for non-local servers)")
     n.add_argument("--wait", type=int, default=180, help="seconds to wait for Neo4j (default 180)")
