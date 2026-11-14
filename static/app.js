@@ -568,10 +568,11 @@ async function expandDefault(node) {
   // Neo4j nodes already carry a degree. A GraphQL node asks for one page of
   // neighbor counts first, then uses the same hub grouping.
   if (node.data('degree') == null && !node.data('group')) {
+    toast('Finding neighbors…');
     try {
       const sum = await api('/api/neighbors', { ids: [node.id()], visible: realNodes().map(n => n.id()) });
       if (typeof sum.degree === 'number') node.data('degree', sum.degree);
-    } catch (e) { return toast('Expand failed: ' + e.message, 4000); }
+    } catch (e) { toast('Expand failed: ' + e.message, 4000); }
   }
   const hidden = hiddenCount(node);
   if (hidden === 0) return toast('All neighbors are already displayed');
@@ -606,11 +607,12 @@ async function runSearch() {
     if (S.searchKind === 'node') items = realNodes().filter(n => Object.values(n.data('props') || {}).some(v => fmt(v).toLowerCase().includes(ql)) || nodeCaption(n.data()).toLowerCase().includes(ql)).slice(0, 30).map(n => ({ kind: 'node', node: { ...n.data() } }));
     else items = realEdges().filter(e => e.data('type').toLowerCase().includes(ql) || Object.values(e.data('props') || {}).some(v => fmt(v).toLowerCase().includes(ql))).slice(0, 30).map(e => ({ kind: 'edge', edge: e.data() }));
   } else {
+    box.innerHTML = '<div class="sr-empty">Searching…</div>';
     try {
       const r = await api(`/api/search?type=${S.searchKind}&limit=25&q=${encodeURIComponent(q)}`);
       if (seq !== searchSeq) return;
       items = S.searchKind === 'node' ? r.nodes.map(n => ({ kind: 'node', node: n })) : r.edges.map(e => ({ kind: 'edge', edge: e }));
-    } catch (e) { box.innerHTML = `<div class="sr-empty err">${esc(e.message)}</div>`; return; }
+    } catch (e) { if (seq === searchSeq) box.innerHTML = `<div class="sr-empty err">${esc(e.message)}</div>`; return; }
   }
   searchRes = items;
   box.innerHTML = items.length ? items.map((it, i) => it.kind === 'node'
@@ -632,8 +634,14 @@ function pickSearch(i) {
   if (target.nonempty()) { selectOnly(target); const z = Math.max(cy.zoom(), 1.2); R.animate({ zoom: z, center: target.isNode() ? target.position() : target.midpoint() }, 350); }
 }
 async function fetchEdgesAmongVisible() {
+  // Wiz expand draws the related edges. Asking for every pair here is a fan-out
+  // of graph searches and is what made the page wait after each result.
+  if (sourceIsGraphQL()) return;
   const ids = realNodes().map(n => n.id()); if (ids.length < 2) return;
-  const r = await api('/api/edges-between', graphBody({ ids })); addGraph({ nodes: [], edges: r.edges, truncation: r.truncation });
+  try {
+    const r = await api('/api/edges-between', graphBody({ ids }));
+    addGraph({ nodes: [], edges: r.edges, truncation: r.truncation });
+  } catch (e) { toast(e.message, 4000); }
 }
 function closeSearch() { $('#search-dd').classList.add('hidden'); }
 
@@ -911,7 +919,19 @@ function showMenu(items, x, y, parent = null) {
     el.addEventListener('mouseenter', () => {
       $$('.menu', $('#menus')).forEach(o => { if (o !== m && o._parent === m) o.remove(); });
       $$('.mi.open', m).forEach(o => o.classList.remove('open'));
-      if (it.sub) { el.classList.add('open'); const r = el.getBoundingClientRect(); const sub = typeof it.sub === 'function' ? it.sub() : it.sub; Promise.resolve(sub).then(s => { if (el.classList.contains('open')) showMenu(s, r.right, r.top - 6, m); }); }
+      if (it.sub) {
+        el.classList.add('open');
+        const r = el.getBoundingClientRect();
+        const sub = typeof it.sub === 'function' ? it.sub() : it.sub;
+        const reveal = (s) => { if (el.classList.contains('open')) showMenu(s, r.right, r.top - 6, m); };
+        if (sub && typeof sub.then === 'function') {
+          const pending = showMenu([{ label: 'Loading…', disabled: true }], r.right, r.top - 6, m);
+          sub.then(s => { if (pending.isConnected) pending.remove(); reveal(s); }).catch(err => {
+            if (pending.isConnected) pending.remove();
+            toast(err && err.message ? err.message : 'That menu failed', 4000);
+          });
+        } else Promise.resolve(sub).then(reveal).catch(err => toast(err && err.message ? err.message : 'That menu failed', 4000));
+      }
     });
     el.addEventListener('click', ev => { ev.stopPropagation(); if (it.sub) return; closeMenus(); it.act && it.act(); });
   });
@@ -948,13 +968,19 @@ function backgroundMenuItems() {
   return items;
 }
 async function expandSubmenu(nodes) {
-  const r = await api('/api/neighbors', { ids: nodes.map(n => n.id()), visible: realNodes().map(n => n.id()) });
-  return [
-    { label: 'All neighbors', right: String(r.total), act: () => r.total > HUB_THRESHOLD && nodes.length === 1 ? groupHub(nodes[0]) : r.total > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r) : expand(nodes) },
-    '-',
-    ...Object.entries(r.categories).sort((a, b) => b[1] - a[1]).map(([c, n]) => ({ html: esc(c), count: n, act: () => n > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r, c) : expand(nodes, { categories: [c] }) })),
-    '-', { label: 'More options…', act: () => openSelectiveExpand(nodes, r) },
-  ];
+  const direct = [{ label: 'All neighbors', act: () => expand(nodes) }];
+  try {
+    const r = await api('/api/neighbors', { ids: nodes.map(n => n.id()), visible: realNodes().map(n => n.id()) });
+    return [
+      { label: 'All neighbors', right: String(r.total), act: () => r.total > HUB_THRESHOLD && nodes.length === 1 ? groupHub(nodes[0]) : r.total > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r) : expand(nodes) },
+      '-',
+      ...Object.entries(r.categories).sort((a, b) => b[1] - a[1]).map(([c, n]) => ({ html: esc(c), count: n, act: () => n > EXPAND_THRESHOLD ? openSelectiveExpand(nodes, r, c) : expand(nodes, { categories: [c] }) })),
+      '-', { label: 'More options…', act: () => openSelectiveExpand(nodes, r) },
+    ];
+  } catch (e) {
+    toast('Expand failed: ' + e.message, 4000);
+    return direct;
+  }
 }
 function nodeMenuItems(node) {
   if (node.data('hubgroup')) return [{ header: node.data('caption') }, { label: `Load next ${EXPAND_THRESHOLD}`, icon: 'PlayOutline', act: () => loadHubGroup(node) }, { label: 'Filter members…', icon: 'FilterVariant', act: () => openHubFilter(node) }, '-', { label: 'Remove group', icon: 'MinusCircleOutline', act: () => removeEles(node) }];
@@ -1022,21 +1048,37 @@ function openAdvancedSearch() {
       <select data-aprop="1" style="padding:6px"><option value="">Property…</option></select><input type="text" data-aval="1" placeholder="exact value" style="width:130px;padding:7px;border:1px solid #c8c8c8;border-radius:3px">
       ${gql ? '' : '<label class="row" title="Uses the full-text index if configured"><input type="checkbox" data-afz="1"> fuzzy</label>'}</div>
     <div data-ares="1" style="margin-top:10px"></div>`, `<span data-atotal="1" style="margin-right:auto;color:var(--muted);font-size:13px"></span><button class="btn outline" data-apage="-1">‹</button><button class="btn outline" data-apage="1">›</button><button class="btn outline" data-aaddsel="1">Add selected</button><button class="btn primary" data-aadd="1">Add all</button>`, { width: 900 });
-  let off = 0, res = [];
+  let off = 0, res = [], seq = 0;
   const kindSel = $('[data-akind]', bg), catSel = $('[data-acat]', bg), propSel = $('[data-aprop]', bg);
   const fillCats = () => { const k = kindSel.value; const label = k === 'node' ? catLabel : 'Any type'; catSel.innerHTML = `<option value="">${esc(label)}</option>` + (k === 'node' ? cats : types).map(c => `<option>${esc(c)}</option>`).join(''); fillProps(); };
   const fillProps = () => {
     const props = gqlFilters || (catSel.value && kindSel.value === 'node' ? Object.keys(S.schema.categories[catSel.value]?.props || {}).sort() : []);
     propSel.innerHTML = '<option value="">Property…</option>' + props.map(p => `<option>${esc(p)}</option>`).join('');
   };
+  const ready = () => {
+    const text = $('[data-aq]', bg).value.trim();
+    const prop = propSel.value;
+    const val = $('[data-aval]', bg).value.trim();
+    return !!(text || catSel.value || (prop && val));
+  };
   async function go() {
+    if (!ready()) {
+      res = [];
+      seq += 1;
+      $('[data-atotal]', bg).textContent = '';
+      $('[data-ares]', bg).innerHTML = '<div class="empty">Type a name, or choose an entity type.</div>';
+      return;
+    }
+    const mine = ++seq;
     const k = kindSel.value; const p = new URLSearchParams({ q: $('[data-aq]', bg).value, type: k, limit: 20, offset: off, category: catSel.value, prop: propSel.value, value: $('[data-aval]', bg).value, fuzzy: $('[data-afz]', bg)?.checked ? '1' : '0' });
+    $('[data-ares]', bg).innerHTML = '<div class="empty">Searching…</div>';
     try {
       const r = await api('/api/search?' + p);
+      if (mine !== seq) return;
       res = k === 'node' ? r.nodes : r.edges;
       if (r.total != null) $('[data-atotal]', bg).textContent = `${r.total} result${r.total === 1 ? '' : 's'} · page ${off / 20 + 1}`; else $('[data-atotal]', bg).textContent = `page ${off / 20 + 1}`;
       $('[data-ares]', bg).innerHTML = res.length ? `<table class="sel" style="width:100%"><thead><tr><th></th><th>Caption</th><th>Category</th><th>Matching properties</th></tr></thead><tbody>${res.map((n, i) => `<tr><td><input type="checkbox" data-ai="${i}"></td><td>${esc(k === 'node' ? nodeCaption(n) : n.type)}</td><td>${k === 'node' ? catChip(n.category) : catChip(n.type, true)}</td><td style="white-space:normal;font-size:11px">${propSnippet(n.props, $('[data-aq]', bg).value)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No result</div>';
-    } catch (e) { $('[data-ares]', bg).innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    } catch (e) { if (mine === seq) $('[data-ares]', bg).innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   }
   const deb = () => { off = 0; clearTimeout(bg._t); bg._t = setTimeout(go, 250); };
   kindSel.onchange = () => { fillCats(); deb(); }; catSel.onchange = () => { fillProps(); deb(); }; propSel.onchange = deb;

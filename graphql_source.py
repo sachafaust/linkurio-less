@@ -88,8 +88,9 @@ fragment TypeRef on __Type {
 """
 
 # Fallback when introspection has not named the graphSearch arguments. A tenant
-# schema replaces the variable type and drops fields that input does not have.
-# $after stays nullable: the first page sends null.
+# schema inlines the query object instead of sending a $query variable: the
+# live API answers "invalid type for variable: 'query'" for that variable.
+# $after stays nullable: the first page omits it.
 SEARCH_QUERY = """
 query GraphSearch($query: GraphEntityQueryInput!, $projectId: String!, $first: Int, $after: String) {
   graphSearch(query: $query, projectId: $projectId, first: $first, after: $after) {
@@ -196,22 +197,179 @@ def wiz_search_hints(payload):
     return sorted(entities), filters
 
 
-def _wiz_document(query_type, full, project):
-    variables = [f"$query: {query_type}", "$first: Int", "$after: String"]
-    arguments = ["query: $query", "first: $first", "after: $after"]
-    if project:
-        variables.insert(1, "$projectId: String!")
-        arguments.insert(1, "projectId: $projectId")
+def _raw_literal(value):
+    """A GraphQL literal for a scalar. Strings use JSON quoting, which GraphQL accepts."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    if value is None:
+        return "null"
+    return json.dumps(str(value))
+
+
+def _graphql_literal(types, type_ref, value):
+    """Print a value as a GraphQL literal. Enum names stay bare, so they are not strings."""
+    if not isinstance(type_ref, dict):
+        return _raw_literal(value)
+    kind = type_ref.get("kind")
+    if kind == "NON_NULL":
+        return _graphql_literal(types, type_ref.get("ofType"), value)
+    if kind == "LIST":
+        items = value if isinstance(value, list) else [value]
+        inner = ", ".join(_graphql_literal(types, type_ref.get("ofType"), item) for item in items)
+        return f"[{inner}]"
+    name = type_ref.get("name")
+    named = types.get(name or "") or {}
+    named_kind = named.get("kind") or kind
+    if named_kind == "ENUM":
+        return str(value)
+    if named_kind == "INPUT_OBJECT" and isinstance(value, dict):
+        fields = _input_fields(types, type_ref)
+        parts = []
+        for key, item in value.items():
+            if key not in fields:
+                continue
+            parts.append(f"{key}: {_graphql_literal(types, fields[key].get('type'), item)}")
+        return "{ " + ", ".join(parts) + " }"
+    return _raw_literal(value)
+
+
+def _inline_graph_search(payload, cleaned, full, project_id, first, after):
+    """One graphSearch document with the query object inlined.
+
+    A $query variable is not declared. quick, projectId, first, and after are
+    variables only when this schema publishes them. The first page omits after.
+    """
+    field = _graph_search_field(payload)
+    _, types = _schema_types(payload)
+    decls, args, variables = [], [], {}
+    page = max(1, min(int(first), 200))
+    for name, value, fallback in (
+        ("projectId", project_id or "*", "String!"),
+        ("first", page, "Int"),
+        ("after", after, "String"),
+        ("quick", True, "Boolean"),
+    ):
+        arg = _field_arg(field, name)
+        if not arg:
+            continue
+        if name == "after" and after is None:
+            printed = _print_type(arg.get("type")) or fallback
+            decls.append(f"${name}: {printed}")
+            args.append(f"{name}: ${name}")
+            continue
+        printed = _print_type(arg.get("type")) or fallback
+        decls.append(f"${name}: {printed}")
+        args.append(f"{name}: ${name}")
+        variables[name] = value
+    query_arg = _field_arg(field, "query")
+    literal = _graphql_literal(types, query_arg.get("type"), cleaned if isinstance(cleaned, dict) else {})
+    args.append(f"query: {literal}")
     body = "id name type properties" if full else "id name type"
-    return (
-        f"query GraphSearch({', '.join(variables)}) {{\n"
-        f"  graphSearch({', '.join(arguments)}) {{\n"
+    head = f"query GraphSearch({', '.join(decls)})" if decls else "query GraphSearch"
+    document = (
+        f"{head} {{\n"
+        f"  graphSearch({', '.join(args)}) {{\n"
         f"    totalCount\n"
         f"    pageInfo {{ hasNextPage endCursor }}\n"
         f"    nodes {{ entities {{ {body} }} }}\n"
         f"  }}\n"
         f"}}\n"
     )
+    return document, variables
+
+
+def _relationship_type_value(types, type_ref, names):
+    """The relationship-type filter this input declares. None when the names do not fit."""
+    node = type_ref if isinstance(type_ref, dict) else {}
+    while node.get("kind") == "NON_NULL":
+        node = node.get("ofType") or {}
+    if node.get("kind") == "LIST":
+        inner = node.get("ofType") or {}
+        while inner.get("kind") == "NON_NULL":
+            inner = inner.get("ofType") or {}
+        named = types.get(inner.get("name") or "") or {}
+        if named.get("kind") == "ENUM":
+            allowed = {item.get("name") for item in named.get("enumValues") or [] if isinstance(item, dict)}
+            kept = [name for name in names if not allowed or name in allowed]
+            return kept or None
+        if named.get("kind") == "INPUT_OBJECT":
+            fields = _input_fields(types, inner)
+            enum_field = fields.get("type")
+            if not enum_field:
+                return None
+            allowed = set(_enum_names(types, enum_field.get("type")))
+            kept = [name for name in names if not allowed or name in allowed]
+            return [{"type": name} for name in kept] or None
+        return None
+    named = types.get(node.get("name") or "") or {}
+    if named.get("kind") == "INPUT_OBJECT":
+        fields = _input_fields(types, node)
+        exact = fields.get("EXACT")
+        if not exact:
+            return None
+        value = _comparison_value(exact.get("type"), names)
+        return {"EXACT": value} if value not in (None, "", []) else None
+    return None
+
+
+def _neighbor_value(payload, anchor, categories=None, rel_types=None, q=None):
+    """The graphSearch value that finds entities connected to ``anchor``.
+
+    Without graphSearch arguments the historical shape is kept, so the local
+    fixture still reads relationships.with.where.id. A tenant schema uses the
+    relationship input it publishes. The saved Wiz documents use
+    ``type: [{ type: NAME }]`` and a nested ``with`` selection.
+    """
+    rel_types = [item for item in (rel_types or []) if item and item != "related"]
+    field = _graph_search_field(payload)
+    arg = _field_arg(field, "query") if field else None
+    if not arg:
+        clause = {"with": {"where": {"id": {"EQUALS": [anchor]}}}}
+        if rel_types:
+            clause["type"] = {"EXACT": rel_types}
+        query = {"select": True, "relationships": [clause]}
+        if categories:
+            query["type"] = list(categories)
+        text = str(q or "").strip()
+        if text:
+            query["where"] = {"name": {"CONTAINS": [text]}}
+        return query
+    _, types = _schema_types(payload)
+    query_type = arg.get("type")
+    query_fields = _input_fields(types, query_type)
+    rel_field = query_fields.get("relationships")
+    if not rel_field:
+        raise ValueError("This graph search has no relationship filter.")
+    item_fields = _input_fields(types, rel_field.get("type"))
+    with_field = item_fields.get("with")
+    if not with_field:
+        raise ValueError("This graph search has no relationship filter.")
+    inner_fields = _input_fields(types, with_field.get("type"))
+    where_fields = _input_fields(types, (inner_fields.get("where") or {}).get("type"))
+    ident = "id" if "id" in where_fields else "_vertexID" if "_vertexID" in where_fields else ""
+    if not ident:
+        raise ValueError("This graph search has no id filter.")
+    inner = {"where": {ident: {"EQUALS": [anchor]}}}
+    if "select" in inner_fields:
+        inner["select"] = True
+    clause = {"with": inner}
+    if rel_types and "type" in item_fields:
+        typed = _relationship_type_value(types, item_fields["type"].get("type"), rel_types)
+        if typed:
+            clause["type"] = typed
+    query = {"relationships": [clause]}
+    if "select" in query_fields:
+        query["select"] = True
+    if categories and "type" in query_fields:
+        query["type"] = list(categories)
+    text = str(q or "").strip()
+    if text and "where" in query_fields:
+        query["where"] = {"name": {"CONTAINS": [text]}}
+    return query
 
 
 def _object_field_names(types, type_ref):
@@ -339,41 +497,58 @@ def _comparison_value(op_type, raw):
 
 
 def _rewrite_comparisons(types, query_type, query):
-    """Point name and property filters at an operator the where-input actually has."""
+    """Point name and property filters at an operator the where-input actually has.
+
+    A neighbor query often has no top-level where. The id filter lives under
+    relationships.with, so that clause is rewritten on its own.
+    """
     if not isinstance(query, dict):
         return query
-    where = query.get("where")
-    if not isinstance(where, dict):
-        return query
-    fields = _input_fields(types, (_input_fields(types, query_type).get("where") or {}).get("type"))
-    rewritten = {}
-    for key, spec in where.items():
-        field = fields.get(key)
-        if not field:
-            continue
-        if not isinstance(spec, dict) or len(spec) != 1:
-            rewritten[key] = spec
-            continue
-        op, raw = next(iter(spec.items()))
-        comparisons = _input_fields(types, field.get("type"))
-        if not comparisons:
-            text = raw[0] if isinstance(raw, list) and raw else raw
-            if text in (None, ""):
-                continue
-            rewritten[key] = text
-            continue
-        chosen = op if op in comparisons else next((item for item in _TEXT_OPS if item in comparisons), None)
-        if not chosen:
-            continue
-        value = _comparison_value(comparisons[chosen].get("type"), raw)
-        if value in (None, "", []):
-            continue
-        rewritten[key] = {chosen: value}
     copied = dict(query)
-    if rewritten:
-        copied["where"] = rewritten
-    else:
-        copied.pop("where", None)
+    where = query.get("where")
+    if isinstance(where, dict):
+        fields = _input_fields(types, (_input_fields(types, query_type).get("where") or {}).get("type"))
+        rewritten = {}
+        for key, spec in where.items():
+            field = fields.get(key)
+            if not field:
+                continue
+            if not isinstance(spec, dict) or len(spec) != 1:
+                rewritten[key] = spec
+                continue
+            op, raw = next(iter(spec.items()))
+            comparisons = _input_fields(types, field.get("type"))
+            if not comparisons:
+                text = raw[0] if isinstance(raw, list) and raw else raw
+                if text in (None, ""):
+                    continue
+                rewritten[key] = text
+                continue
+            chosen = op if op in comparisons else next((item for item in _TEXT_OPS if item in comparisons), None)
+            if not chosen:
+                continue
+            value = _comparison_value(comparisons[chosen].get("type"), raw)
+            if value in (None, "", []):
+                continue
+            rewritten[key] = {chosen: value}
+        if rewritten:
+            copied["where"] = rewritten
+        else:
+            copied.pop("where", None)
+    rel_field = _input_fields(types, query_type).get("relationships")
+    rels = copied.get("relationships")
+    if rel_field and isinstance(rels, list):
+        item_fields = _input_fields(types, rel_field.get("type"))
+        with_field = item_fields.get("with")
+        nested = []
+        for rel in rels:
+            if not isinstance(rel, dict):
+                continue
+            item = dict(rel)
+            if with_field and isinstance(rel.get("with"), dict):
+                item["with"] = _rewrite_comparisons(types, with_field.get("type"), rel["with"])
+            nested.append(item)
+        copied["relationships"] = nested
     return copied
 
 
@@ -1375,8 +1550,9 @@ class WizAdapter:
 
     Neighbors use the relationship clause the Wiz clients send: the outer
     entity is the neighbor, and ``with`` selects the node on the canvas by id.
-    The canvas edge type is ``related`` because the result is the entity, not
-    the relationship name.
+    The relationship type follows the input the tenant publishes. The canvas
+    edge type is ``related`` because the result is the entity, not the
+    relationship name.
     """
 
     def __init__(self, source):
@@ -1411,23 +1587,28 @@ class WizAdapter:
         return payload
 
     def _run(self, query, first, after, full):
-        """Send graphSearch with the variable type and fields this schema allows.
+        """Send graphSearch with the fields this schema allows.
 
-        An introspection result with no graphSearch arguments keeps the fallback
+        A schema that publishes a query argument gets that object inlined.
+        Sending it as a $query variable is what the tenant rejects. An
+        introspection result with no graphSearch arguments keeps the fallback
         document, so the local fixture still sees GraphEntityQueryInput!.
         """
-        query_type, cleaned, project = conform_wiz_query(self._schema_payload(), query)
-        if project and query_type == "GraphEntityQueryInput!":
-            document = DETAIL_QUERY if full else SEARCH_QUERY
+        payload = self._schema_payload()
+        query_type, cleaned, project = conform_wiz_query(payload, query)
+        field = _graph_search_field(payload)
+        if field and _field_arg(field, "query"):
+            document, variables = _inline_graph_search(
+                payload, cleaned, full, self.source.project_id, first, after)
         else:
-            document = _wiz_document(query_type, full, project)
-        variables = {
-            "query": cleaned if isinstance(cleaned, dict) else {},
-            "first": max(1, min(int(first), 200)),
-            "after": after,
-        }
-        if project:
-            variables["projectId"] = self.source.project_id or "*"
+            document = DETAIL_QUERY if full else SEARCH_QUERY
+            variables = {
+                "query": cleaned if isinstance(cleaned, dict) else {},
+                "first": max(1, min(int(first), 200)),
+                "after": after,
+            }
+            if project:
+                variables["projectId"] = self.source.project_id or "*"
         return self.source.client.execute(document, variables)
 
     def _collect(self, query, limit, skip_ids, offset, full):
@@ -1518,20 +1699,9 @@ class WizAdapter:
         return {"nodes": [_entity_node(entity, full=True) for entity in found]}
 
     def _neighbor_query(self, anchor, categories=None, types=None, q=None):
-        # Same shape as the Wiz clients: the neighbor is the outer entity, and
-        # `with` names the node already on the canvas. Relationship type is
-        # {EXACT: [name]}. A missing type asks for every relationship.
-        rel_types = [item for item in (types or []) if item and item != "related"]
-        clause = {"with": {"where": {"id": {"EQUALS": [anchor]}}}}
-        if rel_types:
-            clause["type"] = {"EXACT": rel_types}
-        query = {"select": True, "relationships": [clause]}
-        if categories:
-            query["type"] = list(categories)
-        text = str(q or "").strip()
-        if text:
-            query["where"] = {"name": {"CONTAINS": [text]}}
-        return query
+        # The neighbor is the outer entity. `with` names the node already on
+        # the canvas. A missing relationship type asks for every relationship.
+        return _neighbor_value(self._schema_payload(), anchor, categories, types, q)
 
     def neighbor_summary(self, ids, visible):
         visible = {str(item) for item in visible or []}

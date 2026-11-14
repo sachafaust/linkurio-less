@@ -255,10 +255,12 @@ def test_search_follows_the_tenant_schema():
           printed == "GraphEntityQueryInput" and project is False
           and cleaned == {"where": {"name": {"CONTAINS": "ENTITY"}}},
           safe(cleaned))
-    head = gql._wiz_document(printed, False, project).split("{", 1)[0]
-    check("the document uses that type and leaves out projectId",
-          "$query: GraphEntityQueryInput," in head and "!" not in head and "projectId" not in head,
-          head.strip())
+    inline, inline_vars = gql._inline_graph_search(
+        tenant_payload(False, False, False, False), cleaned, False, "*", 5, None)
+    check("the document inlines the query and leaves out projectId",
+          "$query" not in inline and "projectId" not in inline and "quick" not in inline
+          and 'CONTAINS: "ENTITY"' in inline and "query" not in inline_vars,
+          inline.strip())
 
     printed, cleaned, project = gql.conform_wiz_query(
         tenant_payload(True, True, True, True), asked)
@@ -266,10 +268,12 @@ def test_search_follows_the_tenant_schema():
           printed == "GraphEntityQueryInput!" and project is True and cleaned.get("select") is True
           and cleaned.get("where") == {"name": {"CONTAINS": ["ENTITY"]}} and "type" not in cleaned,
           safe(cleaned))
-    strict_doc = gql._wiz_document(printed, True, project)
-    check("the strict document keeps the bang, projectId, and properties",
-          "$query: GraphEntityQueryInput!" in strict_doc and "projectId: $projectId" in strict_doc
-          and "properties" in strict_doc,
+    strict_doc, strict_vars = gql._inline_graph_search(
+        tenant_payload(True, True, True, True), cleaned, True, "*", 5, None)
+    check("the strict document inlines the query, projectId, and properties",
+          "$query" not in strict_doc and "projectId: $projectId" in strict_doc
+          and "properties" in strict_doc and 'CONTAINS: ["ENTITY"]' in strict_doc
+          and strict_vars.get("projectId") == "*" and "query" not in strict_vars,
           strict_doc.split("{", 1)[0].strip())
 
     entities, filters = gql.wiz_search_hints(tenant_payload(True, True, True, True))
@@ -328,18 +332,477 @@ def test_search_follows_the_tenant_schema():
     found = src.search("ENTITY", category="BUCKET")
     sent = seen[-1] if seen else {}
     variables = sent.get("variables") or {}
-    check("a name search sends the value the schema accepts",
-          variables.get("query") == {"type": ["BUCKET"], "where": {"name": {"CONTAINS": "ENTITY"}}}
-          and "projectId" not in variables
-          and "GraphEntityQueryInput!" not in (sent.get("query") or "")
-          and "projectId" not in (sent.get("query") or "")
+    document = sent.get("query") or ""
+    check("a name search inlines the value the schema accepts",
+          "query" not in variables and "$query" not in document
+          and "type: [BUCKET]" in document and 'CONTAINS: "ENTITY"' in document
+          and "projectId" not in variables and "projectId" not in document
+          and "GraphEntityQueryInput!" not in document
           and found["nodes"] and found["nodes"][0]["id"] == "e1",
-          safe(sent)[:500])
+          safe(sent)[:700])
     model = src.schema()
     check("schema publishes the entity types for the search dropdown",
           model.get("entities") == ["BUCKET", "VIRTUAL_MACHINE"] and model.get("filters") == ["id", "name"]
           and "Query" in (model.get("categories") or {}),
           safe(model.get("entities")))
+
+
+def tenant_graph_payload():
+    """A tenant graphSearch: query, projectId, first, after, quick, and relationships.
+
+    The relationship type is a list of inputs with a type enum, which is the
+    shape the saved Wiz documents use. The local fixture publishes no arguments,
+    so it never reaches this document.
+    """
+    string = named("SCALAR", "String")
+    boolean = named("SCALAR", "Boolean")
+    integer = named("SCALAR", "Int")
+    text_list = listing(non_null(string))
+    entity = named("ENUM", "GraphEntityType")
+    rel_enum = named("ENUM", "GraphRelationshipType")
+    query_ref = named("INPUT_OBJECT", "GraphEntityQueryInput")
+    return {"data": {"__schema": {
+        "queryType": {"name": "Query"},
+        "mutationType": None,
+        "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": [
+                field("graphSearch", named("OBJECT", "GraphSearchResult"), [
+                    {"name": "query", "type": non_null(query_ref)},
+                    {"name": "projectId", "type": non_null(string)},
+                    {"name": "first", "type": integer},
+                    {"name": "after", "type": string},
+                    {"name": "quick", "type": boolean},
+                ]),
+            ], "enumValues": None, "inputFields": None, "possibleTypes": None},
+            _input_type("GraphEntityQueryInput", [
+                field("select", boolean),
+                field("type", listing(non_null(entity))),
+                field("where", named("INPUT_OBJECT", "GraphEntityWhereInput")),
+                field("relationships", listing(non_null(named("INPUT_OBJECT", "GraphRelationshipQueryInput")))),
+            ]),
+            _input_type("GraphRelationshipQueryInput", [
+                field("type", listing(non_null(named("INPUT_OBJECT", "GraphRelationshipTypeInput")))),
+                field("with", non_null(query_ref)),
+            ]),
+            _input_type("GraphRelationshipTypeInput", [
+                field("type", non_null(rel_enum)),
+            ]),
+            _input_type("GraphEntityWhereInput", [
+                field("name", named("INPUT_OBJECT", "StringFilter")),
+                field("id", named("INPUT_OBJECT", "StringFilter")),
+            ]),
+            _input_type("StringFilter", [
+                field("EQUALS", text_list),
+                field("CONTAINS", text_list),
+            ]),
+            {"kind": "ENUM", "name": "GraphEntityType", "fields": None, "inputFields": None,
+             "enumValues": [{"name": "VIRTUAL_MACHINE"}, {"name": "BUCKET"}], "possibleTypes": None},
+            {"kind": "ENUM", "name": "GraphRelationshipType", "fields": None, "inputFields": None,
+             "enumValues": [{"name": "CONTAINS"}, {"name": "CONNECTS"}], "possibleTypes": None},
+            {"kind": "OBJECT", "name": "GraphSearchResult", "fields": [
+                field("totalCount", integer),
+                field("maxCountReached", boolean),
+            ], "enumValues": None, "inputFields": None, "possibleTypes": None},
+        ],
+    }}}
+
+
+_TENANT_ALPHA = {"id": "alpha-1", "name": "alpha", "type": "VIRTUAL_MACHINE", "properties": {"region": "us2"}}
+_TENANT_BETA = {"id": "beta-2", "name": "beta", "type": "BUCKET", "properties": {"name": "beta"}}
+
+
+def tenant_answer(document, variables):
+    """Reject a $query variable the way the tenant does. Inline documents return entities."""
+    del variables
+    if "__schema" in document:
+        return 200, tenant_graph_payload()
+    if "$query" in document:
+        return 200, {"errors": [{"message": "invalid type for variable: 'query'"}], "data": None}
+    if "graphSearch" not in document:
+        return 200, {"data": {"__typename": "Query"}}
+    if "entities" not in document:
+        return 200, {"data": {"graphSearch": {"totalCount": 3, "maxCountReached": False}}}
+    if "relationships" in document and "alpha-1" in document:
+        return 200, graph_page([_TENANT_BETA], False, None, 1)
+    if "BUCKET" in document:
+        return 200, graph_page([_TENANT_BETA], False, None, 1)
+    if "alpha" in document:
+        return 200, graph_page([_TENANT_ALPHA], False, None, 1)
+    return 200, graph_page([], False, None, 0)
+
+
+def _tenant_source(seen):
+    def opener(request, timeout=None):
+        body = json.loads(request.data.decode())
+        document = body.get("query") or ""
+        if "graphSearch" in document and "__schema" not in document:
+            seen.append(body)
+        code, payload = tenant_answer(document, body.get("variables") or {})
+        return Resp(code, json.dumps(payload).encode())
+
+    return GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.us/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN", "project_id": "*",
+    }, client=client(opener))
+
+
+def test_tenant_inline_search_and_expand():
+    """Search and expand inline the query. A $query variable is the tenant error."""
+    print("tenant inline search and expand")
+    seen = []
+    src = _tenant_source(seen)
+
+    try:
+        src.search("alpha", category="APICallComponent")
+        check("an unknown entity type is refused before the search is sent", False, "no error")
+    except ValueError as exc:
+        check("an unknown entity type is refused before the search is sent",
+              "APICallComponent" in str(exc) and not seen, safe(exc))
+    try:
+        src.search("", prop="region", value="us2")
+        check("an unknown property is refused before the search is sent", False, "no error")
+    except ValueError as exc:
+        check("an unknown property is refused before the search is sent",
+              "region" in str(exc) and "not a filter" in str(exc) and not seen, safe(exc))
+
+    try:
+        found = src.search("alpha")
+    except GraphQLCallError as exc:
+        found = {}
+        check("a name search does not send $query", False, safe(exc))
+    sent = seen[-1] if seen else {}
+    document = sent.get("query") or ""
+    variables = sent.get("variables") or {}
+    check("a name search inlines the filter and sends quick",
+          found.get("nodes") and found["nodes"][0]["id"] == "alpha-1"
+          and "$query" not in document and "query" not in variables
+          and 'CONTAINS: ["alpha"]' in document and "quick: $quick" in document
+          and variables.get("quick") is True and variables.get("projectId") == "*"
+          and "after" not in variables and "GraphEntityQueryInput!" not in document,
+          safe(document)[:800])
+
+    try:
+        buckets = src.search("", category="BUCKET")
+    except GraphQLCallError as exc:
+        buckets = {}
+        check("an entity type search does not send $query", False, safe(exc))
+    typed = seen[-1] if seen else {}
+    typed_doc = typed.get("query") or ""
+    check("an entity type is a bare enum in the inlined query",
+          buckets.get("nodes") and buckets["nodes"][0]["id"] == "beta-2"
+          and "type: [BUCKET]" in typed_doc and '"BUCKET"' not in typed_doc
+          and "$query" not in typed_doc,
+          safe(typed_doc)[:800])
+
+    try:
+        expanded = src.expand(["alpha-1"], [], types=["CONTAINS"], limit=5)
+    except GraphQLCallError as exc:
+        expanded = {}
+        check("expand does not send $query", False, safe(exc))
+    expand_doc = (seen[-1].get("query") if seen else "") or ""
+    expand_vars = (seen[-1].get("variables") if seen else {}) or {}
+    check("expand walks relationships and prints the type the schema declares",
+          [node["id"] for node in expanded.get("nodes") or []] == ["beta-2"]
+          and expanded.get("edges") and expanded["edges"][0]["type"] == "related"
+          and expanded["edges"][0]["id"] == "alpha-1:related:beta-2"
+          and "relationships" in expand_doc and "with:" in expand_doc
+          and 'EQUALS: ["alpha-1"]' in expand_doc
+          and "type: [{ type: CONTAINS }]" in expand_doc
+          and "EXACT" not in expand_doc and "$query" not in expand_doc
+          and '"CONTAINS"' not in expand_doc
+          and expand_vars.get("quick") is True,
+          safe(expand_doc)[:900])
+
+    try:
+        summary = src.neighbor_summary(["alpha-1"], [])
+    except GraphQLCallError as exc:
+        summary = {}
+        check("neighbor summary does not send $query", False, safe(exc))
+    check("neighbor summary returns the connected entity",
+          summary.get("degree") == 1 and summary.get("categories", {}).get("BUCKET") == 1
+          and "$query" not in ((seen[-1].get("query") if seen else "") or ""),
+          safe(summary))
+
+    try:
+        details = src.nodes(["alpha-1"])
+    except GraphQLCallError as exc:
+        details = {}
+        check("opening a node does not send $query", False, safe(exc))
+    detail_doc = (seen[-1].get("query") if seen else "") or ""
+    props = ((details.get("nodes") or [{}])[0]).get("props") or {}
+    check("opening a node inlines the id and asks for properties",
+          props.get("region") == "us2" and details["nodes"][0]["partial"] is False
+          and "properties" in detail_doc and 'EQUALS: ["alpha-1"]' in detail_doc
+          and "relationships" not in detail_doc and "$query" not in detail_doc,
+          safe(detail_doc)[:800])
+
+    only_contains = json.loads(json.dumps(tenant_graph_payload()))
+    for item in only_contains["data"]["__schema"]["types"]:
+        if item["name"] == "StringFilter":
+            item["inputFields"] = [one for one in item["inputFields"] if one["name"] != "EQUALS"]
+    value = gql._neighbor_value(only_contains, "alpha-1")
+    _, cleaned, _ = gql.conform_wiz_query(only_contains, value)
+    nested, _ = gql._inline_graph_search(only_contains, cleaned, False, "*", 5, None)
+    check("a nested id filter uses the operator the schema has",
+          "alpha-1" in nested and "CONTAINS:" in nested and "EQUALS" not in nested and "$query" not in nested,
+          nested)
+
+    try:
+        gql._neighbor_value(tenant_payload(True, True, True, True), "alpha-1")
+        check("a schema without relationships refuses expand", False, "no error")
+    except ValueError as exc:
+        check("a schema without relationships refuses expand",
+              "no relationship filter" in str(exc), safe(exc))
+
+
+class _RecordingGraphQL(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, code, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.loads(raw.decode() or "{}")
+        document = body.get("query") or ""
+        self.server.documents.append(document)
+        code, payload = self.server.answer(document, body.get("variables") or {})
+        self._send(code, payload)
+
+
+def _start_tenant_mock():
+    port = free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _RecordingGraphQL)
+    httpd.answer = tenant_answer
+    httpd.documents = []
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, port
+
+
+def _chrome_executable():
+    path = Path("/Users/shey/Library/Caches/ms-playwright/chromium-1254/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    return str(path) if path.is_file() else None
+
+
+def test_tenant_page_flow():
+    """HTTP search, neighbors, and expand stay 200, and the page can run that flow."""
+    print("tenant page flow")
+    found = neo4j_up()
+    if found:
+        uri, user, password = found
+    else:
+        uri, user, password = "bolt://127.0.0.1:7687", "neo4j", "tinkerlab-test"
+    mock, mock_port = _start_tenant_mock()
+    cfg_dir = tempfile.TemporaryDirectory()
+    env_file = tempfile.NamedTemporaryFile(prefix="gx-env-", delete=False)
+    env_file.close()
+    err_file = tempfile.NamedTemporaryFile(prefix="gx-tenant-err-", delete=False)
+    port = free_port()
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("GRAPHQL_") or key in ("GX_FRESH",):
+            env.pop(key, None)
+    env.update({
+        "NEO4J_URI": uri, "NEO4J_USER": user, "NEO4J_PASSWORD": password,
+        "NEO4J_DATABASE": os.environ.get("NEO4J_DATABASE") or "neo4j",
+        "HOST": "127.0.0.1", "PORT": str(port), "QUIET": "1",
+        "GX_CONFIG": str(Path(cfg_dir.name) / "gx.local.json"),
+        "GX_ENV": env_file.name,
+        "GRAPHQL_ENDPOINT": f"http://127.0.0.1:{mock_port}/graphql",
+        "GRAPHQL_TOKEN": TOKEN,
+        "GRAPHQL_ADAPTER": "wiz",
+        "GRAPHQL_LABEL": "Wiz",
+        "GRAPHQL_ID": "wiz",
+        "PYTHONUNBUFFERED": "1",
+    })
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "server.py")], env=env,
+        stdout=subprocess.DEVNULL, stderr=err_file)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        status = None
+        for _ in range(80):
+            if proc.poll() is not None:
+                err_file.flush()
+                check("explorer starts beside the tenant mock", False, safe(Path(err_file.name).read_text()[-500:]))
+                return
+            try:
+                code, _, status = http_json("GET", base + "/api/status")
+                if code == 200:
+                    break
+            except Exception:  # noqa: BLE001
+                status = None
+            time.sleep(0.25)
+        if not status:
+            check("explorer starts beside the tenant mock", False, "status never answered")
+            return
+        check("explorer starts beside the tenant mock", True)
+        code, raw, wiz = http_json("POST", base + "/api/source", {"id": "wiz"})
+        check("the tenant source connects and counts nodes",
+              code == 200 and wiz.get("source", {}).get("id") == "wiz"
+              and wiz.get("connected") is True and wiz.get("nodes") == 3
+              and wiz.get("edges") is None and TOKEN not in raw,
+              safe(raw[:400]))
+        code, raw, found_nodes = http_json("GET", base + "/api/search?type=node&limit=5&q=alpha")
+        nodes = found_nodes.get("nodes") or []
+        check("search returns the tenant entity",
+              code == 200 and nodes and nodes[0]["id"] == "alpha-1" and "invalid type" not in raw,
+              safe(raw[:400]))
+        code, raw, buckets = http_json("GET", base + "/api/search?type=node&limit=5&category=BUCKET")
+        bucket_nodes = buckets.get("nodes") or []
+        check("an entity type search returns the bucket",
+              code == 200 and bucket_nodes and bucket_nodes[0]["id"] == "beta-2" and "invalid type" not in raw,
+              safe(raw[:400]))
+        code, raw, summary = http_json("POST", base + "/api/neighbors", {"ids": ["alpha-1"], "visible": []})
+        check("neighbors answers instead of failing the request",
+              code == 200 and (summary.get("categories") or {}).get("BUCKET") == 1
+              and "invalid type" not in raw,
+              safe(raw[:400]))
+        code, raw, expanded = http_json("POST", base + "/api/expand", {"ids": ["alpha-1"], "visible": [], "limit": 5})
+        expanded_ids = [node.get("id") for node in expanded.get("nodes") or []]
+        check("expand returns the neighbor",
+              code == 200 and expanded_ids == ["beta-2"]
+              and expanded.get("edges") and expanded["edges"][0]["id"] == "alpha-1:related:beta-2"
+              and "invalid type" not in raw,
+              safe(raw[:400]))
+        code, raw, details = http_json("POST", base + "/api/nodes", {"ids": ["alpha-1"]})
+        props = ((details.get("nodes") or [{}])[0]).get("props") or {}
+        check("opening a node returns its properties",
+              code == 200 and props.get("region") == "us2", safe(raw[:300]))
+        logged = "\n".join(doc for doc in mock.documents)
+        check("the tenant mock never saw a $query variable",
+              "$query" not in logged and "invalid type for variable" not in logged
+              and "relationships" in logged and "alpha-1" in logged,
+              safe(logged[-600:]))
+        _drive_tenant_page(base)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        err_file.close()
+        try:
+            log = Path(err_file.name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log = ""
+        check("the server log omits the token", TOKEN not in log, safe(log[-400:]))
+        mock.shutdown()
+        mock.server_close()
+        cfg_dir.cleanup()
+        for path in (env_file.name, err_file.name):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _drive_tenant_page(base):
+    """Headed page: empty advanced search, an entity type, then Expand."""
+    chrome = _chrome_executable()
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  skip headed page (playwright is not installed)")
+        return
+    if not chrome:
+        print("  skip headed page (Chrome for Testing is not installed)")
+        return
+    traffic = []
+    errors = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False, executable_path=chrome)
+            page = browser.new_context(viewport={"width": 1440, "height": 900}).new_page()
+            page.on("pageerror", lambda err: errors.append(str(err)))
+            page.on("response", lambda resp: traffic.append((resp.url, resp.status)))
+            page.goto(base + "/", wait_until="domcontentloaded")
+            page.wait_for_function(
+                """() => window.cy && typeof window.cy.nodes === 'function'
+                    && document.querySelector('#source-pick')
+                    && !document.querySelector('#source-pick').disabled""",
+                timeout=40000)
+            page.wait_for_function(
+                "() => (document.querySelector('#land-kicker') || {}).textContent.includes('Wiz')",
+                timeout=20000)
+            page.focus("#search-input")
+            page.click("[data-act=advanced-search]")
+            page.wait_for_selector("[data-ares]")
+            page.wait_for_timeout(400)
+            empty = page.locator("[data-ares]").inner_text()
+            searches_before = [item for item in traffic if "/api/search" in item[0]]
+            options = page.evaluate(
+                """() => [...document.querySelectorAll('[data-acat] option')].map(o => o.value)""")
+            page.evaluate(
+                """() => {
+                    const sel = document.querySelector('[data-acat]');
+                    sel.value = 'BUCKET';
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                }""")
+            page.wait_for_function(
+                "() => (document.querySelector('[data-ares]') || {}).innerText.includes('beta')",
+                timeout=10000)
+            props = page.evaluate(
+                """() => [...document.querySelectorAll('[data-aprop] option')].map(o => o.value)""")
+            advanced_text = page.locator(".modal").inner_text()
+            page.click(".modal [data-close]")
+            page.fill("#search-input", "alpha")
+            page.wait_for_selector("#search-results .sr")
+            page.click("#search-results .sr")
+            page.wait_for_function(
+                """() => {
+                    const button = document.querySelector('#open-selpanel');
+                    return button && !button.classList.contains('hidden')
+                        && window.cy.getElementById('alpha-1').nonempty();
+                }""",
+                timeout=10000)
+            page.click("#open-selpanel")
+            page.click("#leftpanel [data-lp=expand]")
+            page.hover("#menus .mi")
+            page.wait_for_function(
+                """() => [...document.querySelectorAll('#menus .mi')]
+                    .some(el => el.textContent.includes('All neighbors'))""",
+                timeout=10000)
+            page.locator("#menus .mi", has_text="All neighbors").click()
+            page.wait_for_function(
+                "() => window.cy.getElementById('beta-2').nonempty()",
+                timeout=15000)
+            toast = page.locator("#toast").inner_text()
+            browser.close()
+    except Exception as exc:  # noqa: BLE001
+        check("the page searches and expands without the variable error", False, safe(exc))
+        return
+    neighbor_codes = [status for url, status in traffic if "/api/neighbors" in url]
+    expand_codes = [status for url, status in traffic if "/api/expand" in url]
+    between = [url for url, _status in traffic if "/api/edges-between" in url]
+    check("advanced search waits for a name or an entity type",
+          "Type a name, or choose an entity type." in empty
+          and "invalid type" not in empty
+          and not searches_before
+          and options == ["", "BUCKET", "VIRTUAL_MACHINE"],
+          safe({"empty": empty, "options": options, "searches": len(searches_before)}))
+    check("choosing an entity type lists the filters and the bucket",
+          "beta" in advanced_text and "invalid type" not in advanced_text
+          and "name" in props and "id" in props,
+          safe({"props": props, "text": advanced_text[:300]}))
+    check("Expand adds the neighbor and does not fan out edge lookups",
+          neighbor_codes and expand_codes
+          and all(code == 200 for code in neighbor_codes)
+          and all(code == 200 for code in expand_codes)
+          and not between and not errors
+          and "invalid type" not in toast and "Expand failed" not in toast,
+          safe({"neighbors": neighbor_codes, "expand": expand_codes, "between": between,
+                "toast": toast, "errors": errors}))
+    print("  HEADED ok")
 
 
 def test_wiz_library_and_node_total():
@@ -1443,6 +1906,8 @@ def main():
     try:
         test_search_document()
         test_search_follows_the_tenant_schema()
+        test_tenant_inline_search_and_expand()
+        test_tenant_page_flow()
         test_wiz_library_and_node_total()
         test_wiz_auth()
         test_mutations()
