@@ -32,36 +32,41 @@
         <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small>Write one read-only statement.</small></span></button>
         <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
       </div>
+      <div id="land-queries" class="land-list"></div>
+      <div id="land-views" class="land-list"></div>
+      <p id="land-error" class="land-error hidden" role="alert"></p>
       <button class="land-help" data-act="help"><i data-icon="HelpCircleOutline"></i>Help and shortcuts</button>
     </div>
   </div>
 
-  <div class="card toolbar" id="topleft">
-    <button data-act="main-menu" title="Menu"><i data-icon="Menu"></i></button>
-    <button data-act="undo" id="btn-undo" title="Undo (Ctrl+Z)"><i data-icon="ArrowLeft"></i></button>
-    <button data-act="redo" id="btn-redo" title="Redo (Ctrl+Y)"><i data-icon="ArrowRight"></i></button>
-    <button data-act="code-query" title="Code a query"><i data-icon="CodeBracesBox"></i></button>
-    <button data-act="more-menu" title="More"><i data-icon="DotsHorizontal"></i></button>
-  </div>
-  <button class="card" id="open-selpanel" data-act="open-selpanel" title="Open selection panel"><i data-icon="DockLeft"></i></button>
-
-  <div id="search">
-    <input id="search-input" placeholder="" autocomplete="off" spellcheck="false">
-    <i data-icon="Magnify" class="search-icon"></i>
-    <button id="search-clear" title="Clear"><i data-icon="Close"></i></button>
-    <div id="search-dd" class="card hidden">
-      <div class="sd-head">
-        <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span>
-        <span class="sd-scope"><a data-scope="all" class="on">ALL</a> - <a data-scope="local">LOCAL</a></span>
-        <a class="sd-adv" data-act="advanced-search">Advanced</a>
-      </div>
-      <div id="search-results"></div>
+  <header id="topbar">
+    <div class="toolbar" id="topleft">
+      <button data-act="main-menu" title="Menu"><i data-icon="Menu"></i></button>
+      <button data-act="undo" id="btn-undo" title="Undo (Ctrl+Z)"><i data-icon="ArrowLeft"></i></button>
+      <button data-act="redo" id="btn-redo" title="Redo (Ctrl+Y)"><i data-icon="ArrowRight"></i></button>
+      <button data-act="code-query" title="Code a query"><i data-icon="CodeBracesBox"></i></button>
+      <button data-act="more-menu" title="More"><i data-icon="DotsHorizontal"></i></button>
     </div>
-  </div>
+    <div id="viz-title">Untitled</div>
+    <div id="search">
+      <input id="search-input" placeholder="Search by name, account, or ARN" autocomplete="off" spellcheck="false">
+      <i data-icon="Magnify" class="search-icon"></i>
+      <button id="search-clear" title="Clear"><i data-icon="Close"></i></button>
+      <div id="search-dd" class="card hidden">
+        <div class="sd-head">
+          <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span>
+          <span class="sd-scope"><a data-scope="all" class="on">ALL</a> - <a data-scope="local">LOCAL</a></span>
+          <a class="sd-adv" data-act="advanced-search">Advanced</a>
+        </div>
+        <div id="search-results"></div>
+      </div>
+    </div>
+    <button id="focus-toggle" data-act="focus-toggle" title="Dim everything outside the last query">Focus</button>
+    <button id="open-selpanel" data-act="open-selpanel" title="Open selection panel"><i data-icon="DockLeft"></i></button>
+  </header>
 
   <div class="card toolbar vertical" id="righttb">
     <button data-panel="filters" title="Filters"><i data-icon="FilterVariant"></i></button>
-    <button data-panel="timeline" title="Timeline"><i data-icon="ClockOutline"></i></button>
     <div class="sep"></div>
     <button data-panel="design" title="Design"><i data-icon="Brush"></i></button>
     <button data-panel="layout" title="Layout"><i data-icon="GraphOutline"></i></button>
@@ -74,20 +79,24 @@
   <aside id="rightpanel" class="hidden"></aside>
   <aside id="leftpanel" class="hidden"></aside>
 
-  <div id="statusbar"><span id="viz-title" class="chip hidden"></span><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span></div>
-  <div id="watermark">GRAPH&nbsp;EXPLORER <small>for Neo4j</small></div>
+  <div id="statusbar"><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span><span id="layout-chip" class="chip hidden">Laying out…</span><span id="conn" class="chip"></span></div>
+  <div id="legend" class="card hidden"></div>
   <div class="card toolbar" id="zoomctl">
     <button data-act="zoom-out" title="Zoom out (-)"><i data-icon="Minus"></i></button>
     <button data-act="zoom-in" title="Zoom in (+)"><i data-icon="Plus"></i></button>
     <button data-act="locate" title="Locate"><i data-icon="CrosshairsGps"></i></button>
     <button data-act="minimap" title="Minimap" id="btn-minimap"><i data-icon="MapOutline"></i></button>
   </div>
-  <button id="help-btn" data-act="help"><i data-icon="HelpCircleOutline"></i>Help</button>
   <canvas id="minimap" class="card hidden" width="200" height="130"></canvas>
+  <div id="cmdk" class="hidden">
+    <div class="cmdk-box">
+      <input id="cmdk-input" placeholder="Commands, queries, or nodes" autocomplete="off" spellcheck="false">
+      <div id="cmdk-list"></div>
+    </div>
+  </div>
   <div id="menus"></div>
   <div id="modal-root"></div>
   <div id="toast"></div>
-  <div id="conn" class="chip"></div>
 </div>
 <script src="/vendor/cytoscape.min.js"></script>
 <script src="/vendor/layout-base.js"></script>
