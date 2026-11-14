@@ -1020,9 +1020,10 @@ async function runQueryToGraph(cypher, errEl = null) {
   }
 }
 async function openDataModel() {
-  const sc = S.schema = await api('/api/schema');
-  const bg = modal('Understand your data model', `<div class="dm-layout"><div id="dm-cy" style="flex:2"></div><div data-dminfo="1"></div></div>
-    <div class="section-d" style="margin-top:8px">Whole graph: ${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas. ${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} relationship types. Click a category for its properties.</div>`, '', { width: 1100 });
+  if (document.querySelector('.modal.dm')) return;
+  const counts = `${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges`;
+  const bg = modal('Understand your data model', `<div class="dm-layout"><div class="dm-stage"><div id="dm-cy"></div><div class="dm-wait" data-dm-wait role="status"><span class="land-spin" aria-hidden="true"></span><span><b>Reading the data model…</b><small class="hidden" data-dm-note>A large database can take a minute.</small></span></div></div><div data-dminfo="1"><div class="section-d">Properties appear here.</div></div></div>
+    <div class="section-d" data-dm-foot style="margin-top:8px">Whole graph: ${counts}. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas.</div>`, '', { width: 1100 });
   const box = $('.modal', bg);
   box.classList.add('dm');
   const grow = document.createElement('button');
@@ -1031,22 +1032,45 @@ async function openDataModel() {
   grow.title = 'Expand';
   grow.innerHTML = ico('ArrowExpandAll');
   $('.mh .x', bg).before(grow);
-  const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: `${c} (${v.count})`, cat: c } })),
-    ...sc.links.filter(l => l.source !== l.target).map((l, i) => ({ data: { id: 'l' + i, source: 'c:' + l.source, target: 'c:' + l.target, label: l.type } }))];
-  const dm = cytoscape({ container: $('#dm-cy', bg), elements: els, wheelSensitivity: 0.3, style: [
-    { selector: 'node', style: { 'background-color': e => catStyle(e.data('cat')).color, label: 'data(label)', 'font-size': 9, 'text-valign': 'bottom', width: 22, height: 22, 'border-width': 1.5, 'border-color': '#fff', 'background-image': e => catStyle(e.data('cat')).icon ? iconUri(catStyle(e.data('cat')).icon) : 'none', 'background-fit': 'contain', 'text-outline-color': '#f8f8f8', 'text-outline-width': 2 } },
-    { selector: 'edge', style: { width: 1, 'line-color': '#9e9e9e', 'target-arrow-shape': 'triangle', 'target-arrow-color': '#9e9e9e', 'curve-style': 'bezier', 'arrow-scale': 0.6, label: 'data(label)', 'font-size': 6, color: '#777', 'text-rotation': 'autorotate', 'min-zoomed-font-size': 6 } }],
-    layout: { name: 'fcose', animate: false, nodeRepulsion: 12000, idealEdgeLength: 110 } });
-  const info = $('[data-dminfo]', bg);
-  const show = c => { const v = sc.categories[c]; info.innerHTML = `${catChip(c)}<div class="section-d" style="margin-top:6px">Labels: ${esc(v.labels.join(', '))}</div><table class="kv">${Object.entries(v.props).sort().map(([k, t]) => `<tr><td>${esc(k)}</td><td style="color:var(--muted)">${esc(t)}</td></tr>`).join('')}</table>`; };
-  dm.on('tap', 'node', e => show(e.target.data('cat'))); show(Object.keys(sc.categories)[0]);
+  let dm = null;
   grow.onclick = () => {
     const full = box.classList.toggle('is-full');
     box.style.width = full ? '' : '1100px';
     grow.title = full ? 'Restore' : 'Expand';
     grow.innerHTML = ico(full ? 'ArrowCollapseAll' : 'ArrowExpandAll');
-    requestAnimationFrame(() => { dm.resize(); dm.fit(undefined, 48); });
+    if (dm) requestAnimationFrame(() => { dm.resize(); dm.fit(undefined, 48); });
   };
+  const noteTimer = setTimeout(() => { const n = $('[data-dm-note]', bg); if (n) n.classList.remove('hidden'); }, 3000);
+  let sc;
+  try { sc = S.schema = await api('/api/schema'); }
+  catch (e) {
+    clearTimeout(noteTimer);
+    if (!bg.isConnected) return;
+    const wait = $('[data-dm-wait]', bg);
+    if (wait) wait.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    return;
+  }
+  clearTimeout(noteTimer);
+  if (!bg.isConnected) return;
+  const foot = $('[data-dm-foot]', bg);
+  if (foot) foot.textContent = `Whole graph: ${counts}. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas. ${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} relationship types. Click a category for its properties.`;
+  const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: `${c} (${v.count})`, cat: c } })),
+    ...sc.links.filter(l => l.source !== l.target).map((l, i) => ({ data: { id: 'l' + i, source: 'c:' + l.source, target: 'c:' + l.target, label: l.type } }))];
+  dm = cytoscape({ container: $('#dm-cy', bg), elements: els, wheelSensitivity: 0.3, style: [
+    { selector: 'node', style: { 'background-color': e => catStyle(e.data('cat')).color, label: 'data(label)', 'font-size': 9, 'text-valign': 'bottom', width: 22, height: 22, 'border-width': 1.5, 'border-color': '#fff', 'background-image': e => catStyle(e.data('cat')).icon ? iconUri(catStyle(e.data('cat')).icon) : 'none', 'background-fit': 'contain', 'text-outline-color': '#f8f8f8', 'text-outline-width': 2 } },
+    { selector: 'edge', style: { width: 1, 'line-color': '#9e9e9e', 'target-arrow-shape': 'triangle', 'target-arrow-color': '#9e9e9e', 'curve-style': 'bezier', 'arrow-scale': 0.6, label: 'data(label)', 'font-size': 6, color: '#777', 'text-rotation': 'autorotate', 'min-zoomed-font-size': 6 } }],
+    layout: { name: 'fcose', animate: false, nodeRepulsion: 12000, idealEdgeLength: 110 } });
+  const info = $('[data-dminfo]', bg);
+  const show = c => { const v = sc.categories[c]; if (!v) return; info.innerHTML = `${catChip(c)}<div class="section-d" style="margin-top:6px">Labels: ${esc(v.labels.join(', '))}</div><table class="kv">${Object.entries(v.props).sort().map(([k, t]) => `<tr><td>${esc(k)}</td><td style="color:var(--muted)">${esc(t)}</td></tr>`).join('')}</table>`; };
+  dm.on('tap', 'node', e => show(e.target.data('cat')));
+  const first = Object.keys(sc.categories)[0];
+  if (first) show(first);
+  const wait = $('[data-dm-wait]', bg);
+  if (!wait) return;
+  const done = () => wait.remove();
+  wait.addEventListener('transitionend', done);
+  wait.classList.add('is-done');
+  setTimeout(done, 400);
 }
 
 // ---------- export ---------------------------------------------------------------------
