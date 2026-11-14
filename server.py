@@ -1666,6 +1666,21 @@ def _test_graphql(graphql):
     return {"ok": ok, "message": message}
 
 
+def _log_cypher(statement, result=None, error=None):
+    """One Cypher statement in the query log. The password is not part of the statement."""
+    text = str(statement or "").strip()
+    if error is not None:
+        outcome = f"-> {error}"
+    elif isinstance(result, dict):
+        outcome = f"-> {len(result.get('nodes') or [])} nodes, {len(result.get('edges') or [])} edges"
+        note = (result.get("truncation") or {}).get("message")
+        if note:
+            outcome = f"{outcome}, {note}"
+    else:
+        outcome = "-> done"
+    diagnostics.record("query", f"Cypher\n{text}\n{outcome}")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "GraphExplorer/0.1"
 
@@ -1769,7 +1784,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/edges-between":
                 return self._json(src.edges_between(b.get("ids") or [], b))
             if u.path == "/api/cypher":
-                return self._json(src.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
+                statement = str(b.get("query") or "")
+                try:
+                    result = src.cypher(statement, b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b)
+                except Exception as exc:
+                    _log_cypher(statement, error=exc)
+                    raise
+                _log_cypher(statement, result)
+                return self._json(result)
             if u.path == "/api/graphql":
                 run = getattr(src, "run_document", None)
                 if not callable(run):

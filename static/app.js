@@ -1793,18 +1793,25 @@ function openGraphQLConnection(cur) {
   };
 }
 async function openDiagnostics() {
-  const bg = modal('Diagnostics', `<div class="section-d">Server is the HTTP listener. Explorer is this process: Wiz auth, GraphQL errors, and connection tests. Secrets are removed. Select the text to copy it.</div>
-    <div class="diag-bar"><label>Show <select data-dsource><option value="">All</option><option value="server">Server</option><option value="explorer">Explorer</option></select></label><button class="btn outline small" data-drefresh="1">Refresh</button></div>
+  const bg = modal('Diagnostics', `<div class="section-d">Queries shows the GraphQL document, its variables, and the response. Server is the HTTP listener. Explorer is auth and connection tests. Secrets are removed. Select the text to copy it.</div>
+    <div class="diag-bar"><label>Show <select data-dsource><option value="query">Queries</option><option value="">All</option><option value="server">Server</option><option value="explorer">Explorer</option></select></label><button class="btn outline small" data-drefresh="1">Refresh</button></div>
     <textarea class="diag-log" data-dlog readonly spellcheck="false"></textarea>`,
-    `<button class="btn outline" data-close="1">Close</button>`, { width: 720 });
+    `<button class="btn outline" data-close="1">Close</button>`, { width: 820 });
   const load = async () => {
     const source = $('[data-dsource]', bg).value;
+    const box = $('[data-dlog]', bg);
     try {
       const res = await api('/api/diagnostics' + (source ? `?source=${encodeURIComponent(source)}` : ''));
-      const lines = (res.entries || []).map(e => redactSecrets(`${e.t}  ${e.source}  ${e.message}`));
-      $('[data-dlog]', bg).value = lines.join('\n') || 'No log lines yet.';
+      const lines = (res.entries || []).map(e => {
+        const body = redactSecrets(e.message);
+        return body.includes('\n') ? `${e.t}  ${e.source}\n${body}` : `${e.t}  ${e.source}  ${body}`;
+      });
+      box.value = lines.join('\n\n') || (source === 'query'
+        ? 'No queries yet. Run a search or a saved query, then Refresh.'
+        : 'No log lines yet.');
+      box.scrollTop = box.scrollHeight;
     } catch (e) {
-      $('[data-dlog]', bg).value = redactSecrets(e.message);
+      box.value = redactSecrets(e.message);
     }
   };
   $('[data-dsource]', bg).onchange = load;

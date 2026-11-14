@@ -1131,6 +1131,42 @@ class GraphQLClient:
             self._inflight.pop(key, None)
         return value
 
+    def _log_query(self, document, variables, status, payload, error):
+        """Record the document that was sent. The bearer and the client secret are not."""
+        client = self.client_id or ""
+        for secret in self._secret_material():
+            if secret and secret != client:
+                diagnostics.note_secret(secret)
+        text = (document or "").strip()
+        label = f"HTTP {status}" if status else "no response"
+        if "__schema" in text:
+            outcome = f"{label}: {error}" if error else label
+            diagnostics.record("query", f"GraphQL introspection -> {outcome}")
+            return
+        if text.replace(" ", "") == "{__typename}":
+            outcome = f"{label}: {error}" if error else label
+            diagnostics.record("query", f"GraphQL __typename -> {outcome}")
+            return
+        match = re.match(r"(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        if match:
+            name = match.group(1)
+        elif "graphSearch" in text:
+            name = "graphSearch"
+        else:
+            name = "query"
+        try:
+            shown = json.dumps(variables or {}, sort_keys=True, default=str)
+        except TypeError:
+            shown = "{}"
+        brief = _graph_search_brief(payload)
+        if error:
+            outcome = f"{label}: {error}"
+        elif brief:
+            outcome = f"{label}, {brief}"
+        else:
+            outcome = label
+        diagnostics.record("query", f"GraphQL {name}\nvariables: {shown}\n{text}\n-> {outcome}")
+
     def _fetch(self, document, variables):
         body = json.dumps({"query": document, "variables": variables}).encode()
         last = RateLimited("The GraphQL API asked us to slow down (HTTP 429).")
@@ -1139,12 +1175,17 @@ class GraphQLClient:
         while True:
             self._sem.acquire()
             try:
-                status, headers, raw = self._send(body)
+                try:
+                    status, headers, raw = self._send(body)
+                except GraphQLCallError as exc:
+                    self._log_query(document, variables, None, None, exc)
+                    raise
             finally:
                 self._sem.release()
             if status == 401:
                 detail = self._refusal(status, raw)
                 diagnostics.record("explorer", detail)
+                self._log_query(document, variables, status, None, detail)
                 if auth_tries < 1 and self._use_oauth():
                     auth_tries += 1
                     self._minted = ""
@@ -1156,6 +1197,7 @@ class GraphQLClient:
                 raise GraphQLCallError(detail)
             if status == 429:
                 if attempt >= self.max_retries:
+                    self._log_query(document, variables, status, None, last)
                     raise last
                 self._sleep(self._retry_delay(headers, attempt))
                 attempt += 1
@@ -1164,13 +1206,16 @@ class GraphQLClient:
             if status >= 400:
                 message = self._scrub(_error_text(payload) or f"GraphQL request failed (HTTP {status}).")
                 diagnostics.record("explorer", message)
+                self._log_query(document, variables, status, payload, message)
                 raise GraphQLCallError(message)
             if isinstance(payload, dict) and payload.get("errors") and payload.get("data") is None:
                 message = self._scrub(_error_text(payload) or "GraphQL request failed.")
                 diagnostics.record("explorer", message)
+                self._log_query(document, variables, status, payload, message)
                 if _token_is_expired(message):
                     raise TokenExpired("token expired")
                 raise GraphQLCallError(message)
+            self._log_query(document, variables, status, payload, None)
             return payload
 
     def _refusal(self, status, raw):
@@ -1289,6 +1334,28 @@ def _entity_node(entity, full):
         "degree": None,
         "partial": partial,
     }
+
+
+def _graph_search_brief(payload):
+    """Counts only. Entity properties stay out of the log."""
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    result = (data or {}).get("graphSearch") if isinstance(data, dict) else None
+    if not isinstance(result, dict):
+        return ""
+    parts = []
+    total = result.get("totalCount")
+    if isinstance(total, int) and not isinstance(total, bool):
+        parts.append(f"totalCount {total}")
+    if result.get("maxCountReached"):
+        parts.append("maxCountReached")
+    count = 0
+    for node in result.get("nodes") or []:
+        count += len((node or {}).get("entities") or [])
+    parts.append(f"{count} entities")
+    page = result.get("pageInfo") or {}
+    if isinstance(page, dict) and page.get("hasNextPage"):
+        parts.append("hasNextPage")
+    return ", ".join(parts)
 
 
 def _graph_search(payload):

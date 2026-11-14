@@ -12,7 +12,9 @@ import threading
 import time
 
 _MAX = 400
+_QUERY_LIMIT = 8000
 _MIN_SECRET = 4
+_SOURCES = ("server", "explorer", "query")
 _lock = threading.Lock()
 _rows: list[dict] = []
 _noted: set[str] = set()
@@ -92,12 +94,23 @@ def _mask(match):
     return f"{groups[0]}[redacted]"
 
 
+def _shape(source, message):
+    """One stored line. Query entries keep their line breaks so a document can be copied."""
+    kind = source if source in _SOURCES else "explorer"
+    raw = redact(message)
+    if kind == "query":
+        lines = [" ".join(line.split()) for line in raw.splitlines()]
+        text = "\n".join(line for line in lines if line).strip()[:_QUERY_LIMIT]
+    else:
+        text = " ".join(raw.split())[:500]
+    return kind, text
+
+
 def record(source, message):
-    text = " ".join(redact(message).split())
+    kind, text = _shape(source, message)
     if not text:
         return
-    kind = source if source in ("server", "explorer") else "explorer"
-    row = {"t": time.strftime("%H:%M:%S"), "source": kind, "message": text[:500]}
+    row = {"t": time.strftime("%H:%M:%S"), "source": kind, "message": text}
     with _lock:
         _rows.append(row)
         if len(_rows) > _MAX:
@@ -109,8 +122,9 @@ def snapshot(source=None):
         rows = [dict(row) for row in _rows]
     cleaned = []
     for row in rows:
-        row["message"] = " ".join(redact(row["message"]).split())[:500]
+        _, message = _shape(row.get("source"), row.get("message"))
+        row["message"] = message
         cleaned.append(row)
-    if source in ("server", "explorer"):
+    if source in _SOURCES:
         return [row for row in cleaned if row["source"] == source]
     return cleaned

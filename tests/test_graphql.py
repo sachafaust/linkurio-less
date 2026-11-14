@@ -1210,6 +1210,12 @@ def test_source_switch():
               code == 200 and nodes and nodes[0]["id"] == "alpha-1" and nodes[0]["partial"] is True
               and TOKEN not in raw,
               safe(nodes[:1]))
+        code, raw, diag = http_json("GET", base + "/api/diagnostics?source=query")
+        logged = "\n".join(item.get("message") or "" for item in (diag.get("entries") or []) if isinstance(item, dict))
+        check("diagnostics keeps the search document and not the token",
+              code == 200 and "alpha" in logged and "graphSearch" in logged
+              and "fragment TypeRef" not in logged and TOKEN not in raw,
+              safe(logged[-500:]))
         code, raw, first = http_json("POST", base + "/api/expand", {"ids": ["alpha-1"], "visible": [], "limit": 1})
         code2, raw2, second = http_json("POST", base + "/api/expand", {
             "ids": ["alpha-1"], "visible": ["alpha-1", "beta-2"], "limit": 1,
@@ -1273,6 +1279,62 @@ def _hide_fixture(text):
     for secret in ("tinkerlab-graphql", "tinkerlab-access"):
         shown = shown.replace(secret, "[redacted]")
     return shown
+
+
+def test_query_log():
+    """Diagnostics keeps the GraphQL document and the outcome, not the token or entity properties."""
+    print("query log")
+    import diagnostics
+    def opener(request, timeout=None):
+        document = (json.loads(request.data.decode()).get("query") or "")
+        if "__schema" in document:
+            return Resp(200, json.dumps(introspection_payload()).encode())
+        if "Bad" in document:
+            return Resp(200, b'{"errors":[{"message":"invalid type for variable: \'query\'"}]}')
+        return Resp(200, json.dumps(graph_page(
+            [{"id": "a", "name": "alpha", "type": "Widget", "properties": {"secret": "do-not-log-props"}}],
+            False, None, 4)).encode())
+
+    src = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.example.test/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+    }, client=client(opener, result_ttl=0, schema_ttl=0))
+    src.client.execute(
+        "query Example($projectId: String!, $quick: Boolean) {\n"
+        "  graphSearch(projectId: $projectId, quick: $quick, query: { select: true }) {\n"
+        "    totalCount\n"
+        "    nodes { entities { id name type properties } }\n"
+        "  }\n"
+        "}\n",
+        {"projectId": "*", "quick": True, "token": TOKEN},
+        cache_ttl=0,
+    )
+    rows = [row["message"] for row in diagnostics.snapshot("query") if "Example" in row["message"]]
+    message = rows[-1] if rows else ""
+    check("a sent query keeps the document, the variables, and the counts",
+          "GraphQL Example" in message and "\n" in message
+          and '"projectId": "*"' in message and '"quick": true' in message
+          and "select: true" in message and "totalCount 4" in message and "1 entities" in message
+          and "do-not-log-props" not in message and TOKEN not in message and "Bearer" not in message,
+          safe(message)[:800])
+    src.client.execute(INTROSPECTION, {}, cache_ttl=0)
+    intro = [row["message"] for row in diagnostics.snapshot("query") if "introspection" in row["message"]]
+    check("introspection stays a short line",
+          bool(intro) and all("fragment TypeRef" not in item and "\n" not in item for item in intro),
+          safe(intro[-1] if intro else ""))
+    try:
+        src.client.execute(
+            "query Bad($query: String) {\n  graphSearch(query: $query) { totalCount }\n}\n",
+            {"query": {"select": True}},
+            cache_ttl=0,
+        )
+        check("a rejected query keeps the document and the error", False, "no error")
+    except GraphQLCallError:
+        failed = [row["message"] for row in diagnostics.snapshot("query") if "Bad" in row["message"]]
+        text = failed[-1] if failed else ""
+        check("a rejected query keeps the document and the error",
+              "invalid type for variable" in text and "$query" in text and "\n" in text and TOKEN not in text,
+              safe(text)[:500])
 
 
 def test_log_filter():
@@ -1390,6 +1452,7 @@ def main():
         test_cache_and_inflight()
         test_config_and_generic()
         test_source_switch()
+        test_query_log()
         test_log_filter()
         test_docker_fixture()
     finally:

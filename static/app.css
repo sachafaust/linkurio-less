@@ -82,7 +82,7 @@ body.dark #watermark { color: rgba(255,255,255,.08); }
 .land-help { margin-top: 10px; padding: 4px 0; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
 .conn-result { margin: 8px 0 0; min-height: 1.2em; white-space: pre-wrap; user-select: text; font-size: 12px; line-height: 1.4; color: var(--text); }
 .diag-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; }
-.diag-log { width: 100%; box-sizing: border-box; min-height: 280px; resize: vertical; padding: 8px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: text; color: var(--text); background: var(--input); border: 1px solid var(--line); border-radius: 3px; }
+.diag-log { width: 100%; box-sizing: border-box; min-height: 360px; resize: vertical; padding: 8px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: text; color: var(--text); background: var(--input); border: 1px solid var(--line); border-radius: 3px; }
 details.conn-more { margin-top: 10px; }
 details.conn-more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .land-help:hover { color: var(--primary); }

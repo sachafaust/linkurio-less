@@ -61,7 +61,7 @@ When `GRAPHQL_ENDPOINT` is unset, the same command starts container `gx-graphql`
 
 Copy `.env.example` to `.env` (gitignored) or export the same variables. The environment wins over `.env`. Use a user with the reader role. A bolt URI that already contains a user or password is refused. `NEO4J_PASSWORD` may be empty when Neo4j has no password. Leave the variable out only when it is unset; `run_local.py` then asks, and Enter sends an empty password.
 
-`python3 server.py` with no password still opens the page. Add Neo4j and Add GraphQL each write their own settings into `.env`. That file is gitignored. The password, client secret, and token are not written into `gx.local.json`, and the page does not show them again after you save. Test checks the form before it is saved. Diagnostics shows the server log and the explorer log.
+`python3 server.py` with no password still opens the page. Add Neo4j and Add GraphQL each write their own settings into `.env`. That file is gitignored. The password, client secret, and token are not written into `gx.local.json`, and the page does not show them again after you save. Test checks the form before it is saved. Diagnostics opens on Queries: the GraphQL document, its variables, and the response. Server and Explorer stay in the same list.
 
 `python3 server.py --fresh` starts this run with no Neo4j and no GraphQL connection, so the page opens without waiting on a saved database and does not list a Neo4j source until one is saved. The `.env` file stays for the next normal start. Add the connection from the page.
 
@@ -109,7 +109,7 @@ Or a `graphql` list in `gx.local.json`:
 
 `GRAPHQL_ENDPOINT` overrides a file entry with the same id. `GRAPHQL_LABEL`, `GRAPHQL_ID`, `GRAPHQL_TOKEN_ENV` (default `GRAPHQL_TOKEN`), and `GRAPHQL_PROJECT_ID` (default `*`) are optional. On a `wiz.io` host the adapter defaults to `wiz`. Any other host defaults to `generic`.
 
-The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. The server log, the explorer log, and Diagnostics remove passwords, client secrets, and bearer tokens. The client id stays in the connection form.
+The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. Diagnostics keeps the GraphQL document and its variables, and removes passwords, client secrets, and bearer tokens. The client id stays in the connection form.
 
 ## API
 
