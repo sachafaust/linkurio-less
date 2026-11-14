@@ -1793,10 +1793,71 @@ function openGraphQLConnection(cur) {
   };
 }
 async function openDiagnostics() {
-  const bg = modal('Diagnostics', `<div class="section-d">Queries shows the GraphQL document, its variables, and the response. Server is the HTTP listener. Explorer is auth and connection tests. Secrets are removed. Select the text to copy it.</div>
+  const bg = modal('Diagnostics', `<div class="section-d">Queries shows the GraphQL document, its variables, and the response. Server is the HTTP listener. Explorer is auth and connection tests. Secrets are removed. Drag the title to move this window, or expand it for a larger log. Select the text to copy it.</div>
     <div class="diag-bar"><label>Show <select data-dsource><option value="query">Queries</option><option value="">All</option><option value="server">Server</option><option value="explorer">Explorer</option></select></label><button class="btn outline small" data-drefresh="1">Refresh</button></div>
     <textarea class="diag-log" data-dlog readonly spellcheck="false"></textarea>`,
     `<button class="btn outline" data-close="1">Close</button>`, { width: 820 });
+  const dlg = $('.modal', bg);
+  dlg.classList.add('diag');
+  const head = $('.mh', dlg);
+  head.title = 'Drag to move';
+  const grow = document.createElement('button');
+  grow.className = 'x';
+  grow.type = 'button';
+  grow.title = 'Expand';
+  grow.setAttribute('data-dexpand', '1');
+  grow.innerHTML = ico('ArrowExpandAll');
+  $('.mh .x', bg).before(grow);
+  let parked = null;
+  grow.onclick = () => {
+    const full = dlg.classList.toggle('is-full');
+    if (full) {
+      parked = { left: dlg.style.left, top: dlg.style.top, width: dlg.style.width, height: dlg.style.height, moved: dlg.classList.contains('is-moved') };
+      dlg.classList.remove('is-moved');
+      dlg.style.left = '';
+      dlg.style.top = '';
+      dlg.style.width = '';
+      dlg.style.height = '';
+    } else if (parked) {
+      dlg.style.width = parked.width || '820px';
+      dlg.style.height = parked.height;
+      if (parked.moved) {
+        dlg.classList.add('is-moved');
+        dlg.style.left = parked.left;
+        dlg.style.top = parked.top;
+      }
+    }
+    grow.title = full ? 'Restore' : 'Expand';
+    head.title = full ? '' : 'Drag to move';
+    grow.innerHTML = ico(full ? 'ArrowCollapseAll' : 'ArrowExpandAll');
+  };
+  head.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button') || dlg.classList.contains('is-full')) return;
+    const rect = dlg.getBoundingClientRect();
+    if (!dlg.classList.contains('is-moved')) {
+      dlg.classList.add('is-moved');
+      dlg.style.left = `${rect.left}px`;
+      dlg.style.top = `${rect.top}px`;
+    }
+    const ox = e.clientX - rect.left;
+    const oy = e.clientY - rect.top;
+    head.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const left = Math.min(Math.max(72 - dlg.offsetWidth, ev.clientX - ox), window.innerWidth - 72);
+      const top = Math.min(Math.max(8, ev.clientY - oy), window.innerHeight - 40);
+      dlg.style.left = `${left}px`;
+      dlg.style.top = `${top}px`;
+    };
+    const up = () => {
+      head.removeEventListener('pointermove', move);
+      head.removeEventListener('pointerup', up);
+      head.removeEventListener('pointercancel', up);
+    };
+    head.addEventListener('pointermove', move);
+    head.addEventListener('pointerup', up);
+    head.addEventListener('pointercancel', up);
+    e.preventDefault();
+  });
   const load = async () => {
     const source = $('[data-dsource]', bg).value;
     const box = $('[data-dlog]', bg);
