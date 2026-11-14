@@ -1,5 +1,11 @@
 /* Graph Explorer for Neo4j — Explore-phase recreation of a Linkurious-style workspace.
-   Plain browser JS on purpose: the Python server does all Neo4j work (read-only). */
+   Plain browser JS on purpose: the Python server does all Neo4j work (read-only).
+
+   boot() loads styles, queries, status, and the data model, then marks S.ready.
+   runSearch() and pickSearch() fill the top search box.
+   renderLeftPanel() is the inspector.
+   openDataModel() draws the schema. It does not put those nodes on the canvas.
+*/
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -992,6 +998,9 @@ function showMenu(items, x, y, parent = null) {
   m.innerHTML = items.map((it, i) => it === '-' ? '<div class="sep"></div>' : it.header ? `<div class="mh">${esc(it.header)}</div>` :
     `<div class="mi ${it.disabled ? 'disabled' : ''} ${it.icon ? '' : 'noicon'}" data-i="${i}">${it.icon ? ico(it.icon) : ''}${it.html || esc(it.label)}<span class="r">${it.count != null ? `<span class="n">${it.count}</span>` : ''}${it.right ? esc(it.right) : ''}${it.sub ? ico('ChevronRight') : ''}</span></div>`).join('');
   $('#menus').appendChild(m); S.menuEvent = window.event;
+  // A hub can list more neighbor categories than the window is tall.
+  const maxH = Math.max(120, innerHeight - 16);
+  if (m.offsetHeight > maxH) { m.style.maxHeight = maxH + 'px'; m.style.overflow = 'auto'; }
   const W = m.offsetWidth, H = m.offsetHeight;
   m.style.left = Math.min(x, innerWidth - W - 8) + 'px'; m.style.top = Math.max(8, Math.min(y, innerHeight - H - 8)) + 'px';
   m._parent = parent;

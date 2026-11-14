@@ -14,3 +14,7 @@ gx.schema.json.tmp
 
 # Neo4j credentials. Copy .env.example to .env.
 .env
+
+# UI-suite output. The pictures in docs/screenshots/ are the curated set.
+tests/screenshots/
+tests/results.json

@@ -11,7 +11,7 @@ What it does, in order:
   4. loads data (wipes the database first):
        default        the Cartography fixture snapshot (data/cartography-fixtures.json.gz, 6,939 nodes / 11,054 rels,
                       real Cartography schema, produced from Cartography's own demo seeds + test fixtures)
-       --synthetic N  the synthetic Cartography-shaped generator, about N nodes (what the UI tests are written for)
+       --synthetic N  the synthetic Cartography-shaped generator, about N nodes (optional; the UI tests use the fixture snapshot)
        --both         fixtures + synthetic estate in one database
        --live-scale   the minimum supported graph: 15,000,000 nodes and 60,000,000 edges
        --keep-data    don't touch the data
@@ -19,9 +19,9 @@ What it does, in order:
 
 Other commands:
   --test        run the budget tests, the UI suite (33 checks) and a quick browser + API benchmark,
-                then keep serving. The UI tests need the synthetic estate, so --test loads --both
-                unless you chose a dataset. With --live-scale, --test runs the budget tests and the
-                live-scale checks against the 15M / 60M graph instead of the UI suite.
+                then keep serving. The UI tests run against the fixture snapshot. With --live-scale,
+                --test runs the budget tests and the live-scale checks against the 15M / 60M graph
+                instead of the UI suite.
   --stop        stop the server and the Neo4j container (data kept)
   --reset       remove the container and its volume (all data)
   --status      show what is running
@@ -346,7 +346,7 @@ def run_tests(args, env, url):
     say("API benchmark against this database (tests/bench_server.py)")
     subprocess.run([py, str(HERE / "tests" / "bench_server.py"), "--url", url.rstrip("/"), "--repeat", "3",
                     "--out", str(RUN / "bench-server.json")], env=env)
-    say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, docs/screenshots/app-*.png")
+    say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, tests/screenshots/app-*.png")
     return b.returncode or t.returncode
 
 
@@ -422,9 +422,6 @@ def main_in_venv(args):
         user, database = "neo4j", args.neo4j_database or "neo4j"
     env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": user, "NEO4J_PASSWORD": password,
            "NEO4J_DATABASE": database, "QUIET": "1"}
-    if args.test and not args.live_scale and args.synthetic is None and not args.keep_data and not args.both:
-        say("--test: loading fixtures + the synthetic estate (--both); the UI tests are written for the synthetic data")
-        args.both = True
     load_data(args, env)
 
     stop_server()
