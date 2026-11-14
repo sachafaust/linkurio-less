@@ -209,7 +209,7 @@ table.sel tr:hover td { background: var(--hover); cursor: pointer; }
 .dm-wait { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 18px; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; font-size: 13px; transition: opacity .2s ease; }
 .dm-wait b { font-weight: 500; }
 .dm-wait small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
-.dm-wait.is-done { opacity: 0; }
+.dm-wait.is-done { opacity: 0; pointer-events: none; }
 .modal.dm.is-full { width: calc(100vw - 32px); height: calc(100vh - 32px); max-width: none; max-height: none; }
 .modal.dm.is-full .mb { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .modal.dm.is-full .dm-layout { flex: 1; min-height: 0; }
