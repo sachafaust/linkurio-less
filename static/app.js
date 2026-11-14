@@ -1309,8 +1309,6 @@ function updateSaveChip() {
   renderLanding();
 }
 function renderLanding() {
-  const qEl = $('#land-queries');
-  if (qEl) qEl.innerHTML = S.queries.length ? `<div class="land-h">Security queries</div>` + S.queries.map((q, i) => `<button class="land-q" data-act="land-query" data-i="${i}"><b>${esc(q.name)}</b><small>${esc((q.tags || []).join(' · '))}</small></button>`).join('') : '';
   const vEl = $('#land-views');
   if (vEl) {
     const list = vizList().slice(0, 6);
@@ -1388,7 +1386,6 @@ const ACTIONS = {
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
   'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch, 'budget': openBudgetSettings,
   'focus-toggle': () => setFocus(!S.focus.on),
-  'land-query': el => { const q = S.queries[+el.dataset.i]; if (q) runQueryToGraph(q.cypher); },
   'land-view': el => loadViz(el.dataset.id),
   'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
   'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
