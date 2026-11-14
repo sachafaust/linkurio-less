@@ -49,6 +49,11 @@ GraphQL (optional second source; omit it to use Neo4j only):
     A graphql list in gx.local.json can name the endpoint and the token's
     variable. A token value in that file is removed. GRAPHQL_MAX_INFLIGHT
     caps concurrent requests (4).
+    GET /api/queries returns the library for the active source. Neo4j gets
+    data/queries.json. A Wiz source gets data/wiz-queries.json. A generic
+    endpoint gets none. POST /api/graphql runs one of those documents.
+    A Wiz status reads the node total from one graphSearch totalCount and
+    leaves the relationship total unknown.
 """
 from __future__ import annotations
 
@@ -1304,6 +1309,25 @@ def select_source(source_id):
     return public_status(consume=False)
 
 
+def query_library(src=None):
+    """Saved queries for the source that is open.
+
+    Neo4j is the Cypher library. Wiz is the graph-search library. A generic
+    GraphQL endpoint and a run with no connection have none.
+    """
+    src = current() if src is None else src
+    if src is None or isinstance(src, UnconfiguredNeo4j):
+        return []
+    kind = getattr(src, "kind", "")
+    if kind == "neo4j":
+        name = "queries.json"
+    elif kind == "graphql" and getattr(src, "adapter_name", "") == "wiz":
+        name = "wiz-queries.json"
+    else:
+        return []
+    return json.loads((ROOT / "data" / name).read_text())
+
+
 def _plain(value, label):
     text = "" if value is None else str(value)
     if "\n" in text or "\r" in text:
@@ -1702,7 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/styles":
                 return self._json(CFG)
             if u.path == "/api/queries":
-                return self._json(json.loads((ROOT / "data" / "queries.json").read_text()))
+                return self._json(query_library(src))
             if u.path == "/api/search":
                 return self._json(src.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
                                              q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))
@@ -1746,6 +1770,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(src.edges_between(b.get("ids") or [], b))
             if u.path == "/api/cypher":
                 return self._json(src.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
+            if u.path == "/api/graphql":
+                run = getattr(src, "run_document", None)
+                if not callable(run):
+                    raise ValueError("This source has no GraphQL. Switch to a GraphQL connection to run this query.")
+                caps = session_caps(b)
+                limit = min(caps["cypher_limit"], caps["remain_nodes"])
+                return self._json(run(b.get("document") or "", b.get("variables"), limit))
         except Exception as e:  # noqa: BLE001
             return self._api_error(e)
         self._send(404, b"not found", "text/plain")

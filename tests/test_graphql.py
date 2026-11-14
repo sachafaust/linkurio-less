@@ -200,7 +200,7 @@ def _input_type(name, fields):
     }
 
 
-def tenant_payload(query_non_null, contains_list, with_select, with_project, where_names=("name", "id")):
+def tenant_payload(query_non_null, contains_list, with_select, with_project, where_names=("name", "id"), with_quick=False, with_max=False):
     """A graphSearch argument small enough to prove the value is coerced."""
     string = named("SCALAR", "String")
     value_type = listing(non_null(string)) if contains_list else string
@@ -220,6 +220,11 @@ def tenant_payload(query_non_null, contains_list, with_select, with_project, whe
         {"name": "first", "type": named("SCALAR", "Int")},
         {"name": "after", "type": string},
     ])
+    if with_quick:
+        args.append({"name": "quick", "type": named("SCALAR", "Boolean")})
+    result_fields = [field("totalCount", named("SCALAR", "Int"))]
+    if with_max:
+        result_fields.append(field("maxCountReached", named("SCALAR", "Boolean")))
     return {"data": {"__schema": {
         "queryType": {"name": "Query"},
         "mutationType": None,
@@ -234,9 +239,8 @@ def tenant_payload(query_non_null, contains_list, with_select, with_project, whe
             _input_type("StringFilter", [field("CONTAINS", value_type), field("EQUALS", value_type)]),
             {"kind": "ENUM", "name": "GraphEntityType", "fields": None, "inputFields": None,
              "enumValues": [{"name": "VIRTUAL_MACHINE"}, {"name": "BUCKET"}], "possibleTypes": None},
-            {"kind": "OBJECT", "name": "GraphSearchResult", "fields": [
-                field("totalCount", named("SCALAR", "Int")),
-            ], "enumValues": None, "inputFields": None, "possibleTypes": None},
+            {"kind": "OBJECT", "name": "GraphSearchResult", "fields": result_fields,
+             "enumValues": None, "inputFields": None, "possibleTypes": None},
         ],
     }}}
 
@@ -336,6 +340,169 @@ def test_search_follows_the_tenant_schema():
           model.get("entities") == ["BUCKET", "VIRTUAL_MACHINE"] and model.get("filters") == ["id", "name"]
           and "Query" in (model.get("categories") or {}),
           safe(model.get("entities")))
+
+
+def test_wiz_library_and_node_total():
+    """Each connection has its own query library. Wiz node total is one totalCount."""
+    print("wiz library and node total")
+    wiz = json.loads((ROOT / "data" / "wiz-queries.json").read_text())
+    cypher = json.loads((ROOT / "data" / "queries.json").read_text())
+    names = [item["name"] for item in wiz]
+    check("the Wiz library is the two shared graph searches",
+          names == ["Internet-exposed EC2 instances", "Security groups open to 0.0.0.0/0"]
+          and all(item.get("variables") == {"projectId": "*", "first": 500, "quick": True} for item in wiz)
+          and all("$query" not in item["graphql"] and "quick: $quick" in item["graphql"] for item in wiz)
+          and "accessibleFrom.internet" in wiz[0]["graphql"]
+          and "0.0.0.0/0" in wiz[1]["graphql"]
+          and "CONTAINS_SRC_IP_RANGE" in wiz[1]["graphql"]
+          and all("cypher" in item for item in cypher),
+          safe(names))
+    class _Kind:
+        def __init__(self, kind, adapter=""):
+            self.kind = kind
+            self.adapter_name = adapter
+
+    neo = server.query_library(_Kind("neo4j"))
+    check("Neo4j still loads the Cypher library",
+          any(item.get("name") == "Publicly readable S3 buckets" for item in neo)
+          and all("cypher" in item for item in neo),
+          safe([item.get("name") for item in neo]))
+    empty = server.query_library(server.UnconfiguredNeo4j())
+    check("an unconfigured Neo4j has no query library", empty == [])
+    generic = GraphQLSource({
+        "id": "g", "label": "Generic", "endpoint": "https://example.test/graphql",
+        "adapter": "generic", "token_env": "GRAPHQL_TOKEN",
+    }, client=client(lambda request, timeout=None: Resp(200, b'{"data":{"__typename":"Query"}}')))
+    check("a generic source has no query library", server.query_library(generic) == [])
+    check("a Wiz source loads the graph-search library",
+          [item["name"] for item in server.query_library(GraphQLSource({
+              "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.io/graphql",
+              "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+          }, client=client(lambda request, timeout=None: Resp(200, b'{"data":{}}'))))] == names)
+
+    built = gql.entity_count_request(tenant_payload(True, True, True, True, with_quick=True, with_max=True), "*")
+    document, variables = built
+    check("the count inlines the query and sends quick",
+          "query: { select: true }" in document
+          and "$quick: Boolean" in document
+          and "$query" not in document
+          and "maxCountReached" in document
+          and variables == {"projectId": "*", "first": 1, "quick": True},
+          document)
+    check("missing graphSearch arguments skip the count",
+          gql.entity_count_request(introspection_payload(), "*") is None)
+
+    seen = []
+
+    def opener(request, timeout=None):
+        body = json.loads(request.data.decode())
+        text = body.get("query") or ""
+        if "__schema" in text:
+            return Resp(200, json.dumps(tenant_payload(True, True, True, True, with_quick=True, with_max=True)).encode())
+        if "graphSearch" in text:
+            seen.append(body)
+            return Resp(200, b'{"data":{"graphSearch":{"totalCount":42,"maxCountReached":true}}}')
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    src = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.io/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN", "project_id": "*",
+    }, client=client(opener))
+    status = src.status()
+    sent = seen[-1] if seen else {}
+    check("status reports the node total as a floor and leaves edges unknown",
+          status.get("connected") is True and status.get("nodes") == 42
+          and status.get("edges") is None and status.get("nodes_floor") is True
+          and (sent.get("variables") or {}) == {"projectId": "*", "first": 1, "quick": True}
+          and "$query" not in (sent.get("query") or "")
+          and "query: { select: true }" in (sent.get("query") or ""),
+          safe(sent)[:500])
+
+    def fail_count(request, timeout=None):
+        text = json.loads(request.data.decode()).get("query") or ""
+        if "__schema" in text:
+            return Resp(200, json.dumps(tenant_payload(True, True, True, True, with_quick=True)).encode())
+        if "graphSearch" in text:
+            return Resp(500, b'{"errors":[{"message":"count failed"}]}')
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    failed = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.io/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+    }, client=client(fail_count, max_retries=0))
+    quiet = failed.status()
+    check("a count failure leaves the node total unknown and stays connected",
+          quiet.get("connected") is True and quiet.get("nodes") is None and quiet.get("edges") is None
+          and "error" not in quiet,
+          safe(quiet))
+
+    bare = []
+
+    def bare_opener(request, timeout=None):
+        text = json.loads(request.data.decode()).get("query") or ""
+        bare.append(text)
+        if "__schema" in text:
+            return Resp(200, json.dumps(introspection_payload()).encode())
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    bare_status = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.example.test/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+    }, client=client(bare_opener)).status()
+    check("a schema with no graphSearch arguments does not send a count",
+          bare_status.get("nodes") is None and bare_status.get("connected") is True
+          and not any("EntityTotal" in text or "graphSearch(" in text for text in bare),
+          safe(bare_status))
+
+    pages = []
+
+    def page_opener(request, timeout=None):
+        body = json.loads(request.data.decode())
+        pages.append(body.get("variables") or {})
+        after = pages[-1].get("after")
+        if after == "c2":
+            return Resp(200, json.dumps(graph_page(
+                [{"id": "b", "name": "b", "type": "FIREWALL", "properties": {"region": "eu"}}],
+                False, None, 2)).encode())
+        return Resp(200, json.dumps(graph_page(
+            [{"id": "a", "name": "a", "type": "VIRTUAL_MACHINE", "properties": {"region": "us"}}],
+            True, "c2", 2)).encode())
+
+    runner = GraphQLSource({
+        "id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.io/graphql",
+        "adapter": "wiz", "token_env": "GRAPHQL_TOKEN",
+    }, client=client(page_opener))
+    placed = runner.run_document(wiz[0]["graphql"], dict(wiz[0]["variables"]), limit=500)
+    check("a saved query pages entities and caps first at 200",
+          [node["id"] for node in placed["nodes"]] == ["a", "b"]
+          and placed["edges"] == []
+          and placed["nodes"][0]["props"].get("region") == "us"
+          and placed["nodes"][0]["partial"] is False
+          and pages[0].get("first") == 200 and pages[0].get("after") is None
+          and pages[1].get("first") == 200 and pages[1].get("after") == "c2"
+          and "query" not in pages[0],
+          safe(pages))
+    one = runner.run_document(wiz[0]["graphql"], dict(wiz[0]["variables"]), limit=1)
+    check("the canvas limit stops the walk",
+          [node["id"] for node in one["nodes"]] == ["a"] and one["truncated"] is True)
+
+    sent_mutation = []
+
+    def mutation_opener(request, timeout=None):
+        sent_mutation.append(1)
+        return Resp(200, b'{"data":{"__typename":"Query"}}')
+
+    try:
+        runner.client = client(mutation_opener)
+        runner.run_document("mutation { updateSecretInstance { id } }", {})
+        check("a mutation is not sent", False, "no error")
+    except QueryRejected as exc:
+        check("a mutation is not sent", "not sent" in str(exc) and not sent_mutation, safe(exc))
+    try:
+        generic.run_document("query { __typename }", {})
+        check("a generic source refuses a saved query", False, "no error")
+    except ValueError as exc:
+        check("a generic source refuses a saved query", "no instance adapter" in str(exc), safe(exc))
 
 
 def test_wiz_auth():
@@ -976,6 +1143,17 @@ def test_source_switch():
             check("explorer starts beside the mock", False, "status never answered")
             return
         check("explorer starts beside the mock", True)
+        code, raw, neo_queries = http_json("GET", base + "/api/queries")
+        neo_names = [item.get("name") for item in neo_queries] if isinstance(neo_queries, list) else []
+        check("Neo4j queries stay Cypher",
+              code == 200 and "Publicly readable S3 buckets" in neo_names
+              and all(isinstance(item, dict) and "cypher" in item for item in neo_queries)
+              and "graphSearch" not in raw and TOKEN not in raw,
+              safe(neo_names))
+        code, raw, denied_gql = http_json("POST", base + "/api/graphql", {"document": "query { __typename }", "variables": {}})
+        check("GraphQL queries are refused on Neo4j",
+              code == 400 and "no GraphQL" in (denied_gql.get("error") or "") and TOKEN not in raw,
+              safe(denied_gql))
         ids = [item["id"] for item in status.get("sources") or []]
         check("status starts on Neo4j and lists Wiz without the token",
               status.get("source", {}).get("id") == "neo4j" and ids == ["neo4j", "wiz"]
@@ -1001,6 +1179,24 @@ def test_source_switch():
               and wiz.get("nodes") is None and wiz.get("edges") is None
               and wiz.get("connected") is True and TOKEN not in raw,
               safe(raw[:400]))
+        code, raw, library = http_json("GET", base + "/api/queries")
+        lib_names = [item.get("name") for item in library] if isinstance(library, list) else []
+        check("Wiz queries are the two graph searches",
+              code == 200 and lib_names == [
+                  "Internet-exposed EC2 instances", "Security groups open to 0.0.0.0/0"]
+              and all("graphSearch" in (item.get("graphql") or "") and "cypher" not in item for item in library)
+              and "MATCH" not in raw and TOKEN not in raw,
+              safe(lib_names))
+        first = library[0] if isinstance(library, list) and library else {}
+        code, raw, placed = http_json("POST", base + "/api/graphql", {
+            "document": first.get("graphql") or "",
+            "variables": first.get("variables") or {},
+        })
+        placed_ids = [node.get("id") for node in placed.get("nodes") or []]
+        check("a Wiz query places the mock entities",
+              code == 200 and placed_ids == ["alpha-1", "beta-2", "gamma-3"]
+              and placed.get("edges") == [] and TOKEN not in raw,
+              safe({"ids": placed_ids, "error": placed.get("error")}))
         code, raw, schema = http_json("GET", base + "/api/schema")
         check("the data model comes from introspection",
               code == 200 and "Widget" in (schema.get("categories") or {})
@@ -1185,6 +1381,7 @@ def main():
     try:
         test_search_document()
         test_search_follows_the_tenant_schema()
+        test_wiz_library_and_node_total()
         test_wiz_auth()
         test_mutations()
         test_introspection_model()

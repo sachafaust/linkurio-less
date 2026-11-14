@@ -88,7 +88,7 @@ The first launch writes a canvas working set to `gx.local.json` from CPU and RAM
 
 ## GraphQL source
 
-The page shows one source at a time. Search, expand, filters, layout, and the data model follow that source. Cypher and saved queries stay with Neo4j, and those controls leave the page while a GraphQL source is active. GraphQL results stay in the GraphQL view. Wiz is the first adapter. Search builds `graphSearch` from the tenant schema (the `query` input, its entity types, and the name filter), then loads an entity by `id` and walks cursor pages. A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists. `python3 run_local.py` starts the local `gx-graphql` fixture when `GRAPHQL_ENDPOINT` is unset, and `python3 tests/test_graphql.py` checks that fixture when Docker is running.
+The page shows one source at a time. Search, expand, filters, layout, the data model, and Queries follow that source. Neo4j opens the Cypher library. A Wiz source opens the two graph searches in `data/wiz-queries.json` (internet-exposed EC2 instances, and security groups open to `0.0.0.0/0`). Cypher stays on Neo4j. A generic endpoint has no saved queries. GraphQL results stay in the GraphQL view. Wiz is the first adapter. Search builds `graphSearch` from the tenant schema (the `query` input, its entity types, and the name filter), then loads an entity by `id` and walks cursor pages. The node total on a Wiz source is one `graphSearch` `totalCount`. Relationship totals stay unknown. A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists. `python3 run_local.py` starts the local `gx-graphql` fixture when `GRAPHQL_ENDPOINT` is unset, and `python3 tests/test_graphql.py` checks that fixture when Docker is running.
 
 Set the endpoint in the environment, in `.env`, or with Add GraphQL on the page. Wiz takes `GRAPHQL_CLIENT_ID` and `GRAPHQL_CLIENT_SECRET` and returns an access token from `https://auth.app.wiz.io/oauth/token` (or `auth.app.wiz.us` for a `.wiz.us` host). The body is form fields: `grant_type=client_credentials`, `client_id`, `client_secret`, and `audience=wiz-api`. The GraphQL call sends `Authorization: Bearer` and does not send the client id. A bearer you already have can be saved as `GRAPHQL_TOKEN` when there is no client secret. `GRAPHQL_AUTH_URL` overrides the auth host. The secret and the token stay in the gitignored file or in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token or client secret in that file is removed on startup.
 
@@ -126,7 +126,8 @@ The page calls these JSON endpoints on the same host. `POST /api/cypher` takes o
 | GET | `/api/diagnostics` | server and explorer log lines, with secrets removed |
 | GET | `/api/schema` | labels, relationship types, counts |
 | GET | `/api/styles` | colors, icons, captions |
-| GET | `/api/queries` | built-in saved queries |
+| GET | `/api/queries` | saved queries for the active source |
+| POST | `/api/graphql` | one read-only GraphQL query on the active GraphQL source |
 | GET | `/api/search` | nodes or relationships matching a string |
 | POST | `/api/nodes` | nodes by element id |
 | POST | `/api/neighbors` | neighbor counts for the selection |
@@ -161,7 +162,8 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `run_local.py` | venv, Docker Neo4j, GraphQL fixture, sample load, server |
 | `tools/graphql_fixture.py` | Wiz-shaped fixture served by container `gx-graphql` |
 | `data/cartography_styles.json` | category color, icon, caption |
-| `data/queries.json` | built-in queries |
+| `data/queries.json` | Neo4j Cypher library |
+| `data/wiz-queries.json` | Wiz graph-search library |
 | `docs/screenshots/` | UI-suite captures |
 | `docs/compare/` | Linkurious comparison sheets |
 | `tests/test_budget.py` | working-set math and a tiny read-only server check |

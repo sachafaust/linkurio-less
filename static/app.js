@@ -878,8 +878,17 @@ function panelEdgeGroup() {
   return rpFrame('EDGE GROUPING', null, `<div class="section-d" style="margin-top:6px">Group parallel edges of the same type and direction into one edge.</div>` + body);
 }
 function panelQueries() {
-  const saved = JSON.parse(localStorage.getItem('gx:queries') || '[]');
   const list = (arr, local) => arr.map((q, i) => `<div class="q-item" data-qrun="${local ? 'l' : 'b'}|${i}"><div class="q-name">${esc(q.name)}</div><div class="q-tags">${esc((q.tags || []).join(' · '))}${local ? ' · saved locally' : ''}</div></div>`).join('');
+  if (!sourceIsNeo4j()) {
+    const wiz = sourceIsGraphQL() && S.source.adapter === 'wiz';
+    const intro = wiz
+      ? 'Wiz graph search. Click a query to add its entities to the visualization.'
+      : (sourceIsGraphQL() ? 'This GraphQL source has no saved queries.' : 'Add a data connection to see its queries.');
+    const queries = wiz ? (S.queries || []) : [];
+    const empty = wiz && !queries.length ? '<div class="empty">No saved queries for this connection.</div>' : '';
+    return rpFrame('QUERIES', 'CodeBraces', `<div class="section-d" style="margin-top:6px">${intro}</div>${list(queries, false)}${empty}`, '<span></span>');
+  }
+  const saved = JSON.parse(localStorage.getItem('gx:queries') || '[]');
   return rpFrame('QUERIES', 'CodeBraces', `<div class="section-d" style="margin-top:6px">Read-only Cypher. Click a query to add its result to the visualization.</div>${list(S.queries, false)}${saved.length ? '<div class="section-t">My queries</div>' + list(saved, true) : ''}`, `<span></span><button class="btn primary" data-act="code-query">Code a query</button>`);
 }
 function panelTimeline() {
@@ -934,7 +943,8 @@ function backgroundMenuItems() {
     '-', { label: 'Refresh layout', act: () => runLayout() }, { label: 'Edit layout settings', act: () => openPanel('layout') },
     '-', { label: 'Collapse all groups', disabled: !S.activeRule, act: () => setAllGroups(false) }, { label: 'Expand all groups', disabled: !S.activeRule, act: () => setAllGroups(true) },
   ];
-  if (sourceIsNeo4j()) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) });
+  if (sourceIsNeo4j()) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => (S.queries || []).map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) });
+  else if (sourceIsGraphQL() && (S.queries || []).some(q => q.graphql)) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.filter(q => q.graphql).map(q => ({ label: q.name, act: () => runGraphqlToGraph(q) })) });
   return items;
 }
 async function expandSubmenu(nodes) {
@@ -1090,11 +1100,52 @@ async function runQueryToGraph(cypher, errEl = null) {
     return false;
   }
 }
+async function runGraphqlToGraph(query, errEl = null) {
+  let pushed = false;
+  try {
+    const want = Math.min(S.budget.cypher_limit || 500, S.budget.nodes);
+    pushUndo();
+    pushed = true;
+    if (S.budget.lru) evictOldest(want, want);
+    if (canvasNodes() >= S.budget.nodes) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      offerCanvasRoom('No room for query results.');
+      return false;
+    }
+    const r = await api('/api/graphql', graphBody({ document: query.graphql, variables: query.variables || {} }));
+    if (!r.nodes.length) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      const msg = r.truncation?.message || 'The query returned no entities.';
+      if ((r.truncation?.reasons || []).includes('node_budget')) offerCanvasRoom(msg);
+      else if (errEl) errEl.innerHTML = `<div class="err">${esc(msg)}</div>`;
+      else toast(msg);
+      return false;
+    }
+    const added = addGraph(r, null, { toastTruncation: false });
+    if (S.canvasRefused || !added.nodes().length) {
+      S.undo.pop(); updateUndoBtns(); pushed = false;
+      return false;
+    }
+    runLayout({ fit: true });
+    if (!r.truncation?.message) toast(`Added ${added.nodes().length} nodes from the query`);
+    else toast(r.truncation.message, 4500);
+    return true;
+  } catch (e) {
+    if (pushed) { S.undo.pop(); updateUndoBtns(); }
+    if (errEl) errEl.innerHTML = `<div class="err">${esc(e.message)}</div>`; else toast(e.message, 4000);
+    return false;
+  }
+}
+function instanceCountLine() {
+  if (!S.db || (S.db.known === false && !S.db.nodesKnown)) return 'instance totals stay on the source until you search or expand';
+  if (S.db.known) return `${Number(S.db.nodes || 0).toLocaleString()} nodes and ${Number(S.db.edges || 0).toLocaleString()} edges`;
+  const n = Number(S.db.nodes || 0).toLocaleString();
+  const nodes = S.db.nodesFloor ? `at least ${n} nodes` : `${n} nodes`;
+  return `${nodes}; relationship totals stay on the source`;
+}
 async function openDataModel() {
   if (document.querySelector('.modal.dm')) return;
-  const counts = S.db.known === false
-    ? 'instance totals stay on the source until you search or expand'
-    : `${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges`;
+  const counts = instanceCountLine();
   const bg = modal('Understand your data model', `<div class="dm-layout"><div class="dm-stage"><div id="dm-cy"></div><div class="dm-wait" data-dm-wait role="status"><span class="land-spin" aria-hidden="true"></span><span><b>Reading the data model…</b><small class="hidden" data-dm-note>A large database can take a minute.</small></span></div></div><div data-dminfo="1"><div class="section-d">Properties appear here.</div></div></div>
     <div class="section-d" data-dm-foot style="margin-top:8px">Whole graph: ${counts}. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas.</div>`, '', { width: 1100 });
   const box = $('.modal', bg);
@@ -1302,7 +1353,7 @@ function toggleTheme() { document.body.classList.toggle('dark'); localStorage.se
 const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
-  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => { if (!sourceIsNeo4j()) { toast(sourceIsGraphQL() ? 'Saved queries are Cypher. They run on the Neo4j source.' : 'Saved queries are Cypher. They run on a Neo4j connection.'); return; } openPanel('queries'); }, 'data-model': openDataModel, 'help': openHelp,
+  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => { if (!sourceIsNeo4j() && !sourceIsGraphQL()) { toast('Add a data connection to open its queries.'); return; } openPanel('queries'); }, 'data-model': openDataModel, 'help': openHelp,
   'connection-neo4j': () => openConnection('neo4j'),
   'connection-graphql': () => openConnection('graphql'),
   'diagnostics': openDiagnostics,
@@ -1372,7 +1423,7 @@ $('#rightpanel').addEventListener('click', e => {
   if (d.gtog) { S.activeRule = S.activeRule === d.gtog ? null : d.gtog; applyNodeGrouping(); afterGraphChange(); return; }
   if (d.gnew) return openRuleDialog();
   if (d.egtog) { S.edgeGroups.has(d.egtog) ? S.edgeGroups.delete(d.egtog) : S.edgeGroups.add(d.egtog); afterGraphChange(); return; }
-  if (d.qrun) { const [k, i] = d.qrun.split('|'); const q = k === 'b' ? S.queries[+i] : JSON.parse(localStorage.getItem('gx:queries') || '[]')[+i]; return runQueryToGraph(q.cypher); }
+  if (d.qrun) { const [k, i] = d.qrun.split('|'); const q = k === 'b' ? S.queries[+i] : JSON.parse(localStorage.getItem('gx:queries') || '[]')[+i]; if (!q) return; if (q.graphql) return runGraphqlToGraph(q); return runQueryToGraph(q.cypher); }
 });
 $('#rightpanel').addEventListener('change', e => {
   const d = e.target.dataset;
@@ -1595,6 +1646,7 @@ async function refreshConnectionLinks() {
 async function refreshAfterConnectionSave(st) {
   try {
     await applyServerBudget(st);
+    try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
     if (window.cy && typeof cy.nodes === 'function') {
       try { S.schema = await api('/api/schema'); }
       catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
@@ -1765,6 +1817,8 @@ function rememberCounts(st) {
   S.db = {
     nodes: st.nodes == null ? 0 : Number(st.nodes) || 0,
     edges: st.edges == null ? 0 : Number(st.edges) || 0,
+    nodesKnown: st.nodes != null,
+    nodesFloor: !!st.nodes_floor,
     known: st.nodes != null && st.edges != null,
   };
 }
@@ -1772,7 +1826,13 @@ function connectionText(st) {
   const src = st.source || { label: 'No connection', kind: 'none' };
   if (src.kind === 'none') return st.error ? redactSecrets(st.error) : 'No data connection. Use Add Neo4j or Add GraphQL.';
   if (src.kind === 'graphql') {
-    const counts = st.nodes == null ? 'instances load as you explore' : `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges`;
+    let counts = 'instances load as you explore';
+    if (st.nodes != null && st.edges == null) {
+      const n = Number(st.nodes).toLocaleString();
+      counts = st.nodes_floor ? `at least ${n} nodes` : `${n} nodes`;
+    } else if (st.nodes != null && st.edges != null) {
+      counts = `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges).toLocaleString()} edges`;
+    }
     return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + redactSecrets(st.error) : ''}`;
   }
   if (st.nodes == null) return `${st.database || 'Neo4j'} · read-only${st.error ? ' · ' + redactSecrets(st.error) : ''}`;
@@ -1794,7 +1854,7 @@ function paintSource(st) {
   if (kicker) kicker.textContent = gql ? `Read-only ${S.source.label}` : (neo ? 'Read-only Neo4j' : 'No data connection');
   const lead = $('#land-lead');
   if (lead) lead.textContent = gql
-    ? 'Search a node or open the data model. Results stay in this view. Nothing is copied into Neo4j.'
+    ? 'Search a node, open a saved query, or open the data model. Results stay in this view. Nothing is copied into Neo4j.'
     : (neo
       ? 'Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.'
       : 'Add Neo4j or GraphQL. Nothing is loaded until a connection is saved.');
@@ -1803,7 +1863,9 @@ function paintSource(st) {
   const landNodes = $('#land-nodes');
   if (landNodes) {
     landNodes.textContent = st.nodes == null ? '—' : Number(st.nodes).toLocaleString();
-    landNodes.title = st.nodes == null ? 'Instances load when you search or expand.' : '';
+    landNodes.title = st.nodes == null
+      ? 'Instances load when you search or expand.'
+      : (st.nodes_floor ? 'The source stopped counting. This number is a lower bound.' : '');
     $('#land-edges').textContent = st.edges == null ? '—' : Number(st.edges || 0).toLocaleString();
     $('#land-db').textContent = gql ? (S.source.label || '') : (neo ? (st.database || '') : '—');
   }
@@ -1823,7 +1885,6 @@ function syncSourceActions() {
     S.searchKind = 'node';
     $$('.sd-head [data-kind]').forEach(x => x.classList.toggle('on', x.dataset.kind === 'node'));
   }
-  if (!neo && S.rightPanel === 'queries') openPanel('queries');
 }
 function fillSourceSelects() {
   const many = (S.sources || []).length > 1;
@@ -1855,6 +1916,7 @@ async function switchSource(id) {
   const stopWait = typeof armLandWait === 'function' ? armLandWait() : () => {};
   try {
     const st = await api('/api/source', { id });
+    try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
     if (dirty) {
       cy.elements().remove();
       S.undo = []; S.redo = [];

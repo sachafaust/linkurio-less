@@ -214,6 +214,62 @@ def _wiz_document(query_type, full, project):
     )
 
 
+def _object_field_names(types, type_ref):
+    node = type_ref if isinstance(type_ref, dict) else {}
+    while isinstance(node, dict) and node.get("kind") in ("NON_NULL", "LIST"):
+        node = node.get("ofType") or {}
+    named = types.get((node or {}).get("name") or "") or {}
+    return {
+        item.get("name") for item in named.get("fields") or []
+        if isinstance(item, dict) and item.get("name")
+    }
+
+
+def entity_count_request(payload, project_id="*"):
+    """One graphSearch that reads totalCount. None when graphSearch has no arguments.
+
+    The query object is inlined. quick, projectId, and first are sent only when
+    the tenant publishes those arguments. A $query variable is not sent.
+    """
+    field = _graph_search_field(payload)
+    if not field:
+        return None
+    _, types = _schema_types(payload)
+    decls, args, variables = [], [], {}
+    for name, value, fallback in (
+        ("projectId", project_id or "*", "String!"),
+        ("first", 1, "Int"),
+        ("quick", True, "Boolean"),
+    ):
+        arg = _field_arg(field, name)
+        if not arg:
+            continue
+        printed = _print_type(arg.get("type")) or fallback
+        decls.append(f"${name}: {printed}")
+        args.append(f"{name}: ${name}")
+        variables[name] = value
+    query_arg = _field_arg(field, "query")
+    if query_arg:
+        query_fields = _input_fields(types, query_arg.get("type"))
+        literal = "{ select: true }" if "select" in query_fields else "{}"
+        args.append(f"query: {literal}")
+    result_names = _object_field_names(types, field.get("type"))
+    if result_names and "totalCount" not in result_names:
+        return None
+    lines = ["totalCount"]
+    if "maxCountReached" in result_names:
+        lines.append("maxCountReached")
+    head = f"query EntityTotal({', '.join(decls)})" if decls else "query EntityTotal"
+    document = (
+        f"{head} {{\n"
+        f"  graphSearch({', '.join(args)}) {{\n"
+        f"    " + "\n    ".join(lines) + "\n"
+        f"  }}\n"
+        f"}}\n"
+    )
+    return document, variables
+
+
 def _clean_value(types, type_ref, value):
     """Keep only values the input type accepts. A list and a single value coerce either way."""
     if not isinstance(type_ref, dict):
@@ -1259,6 +1315,27 @@ class WizAdapter:
     def __init__(self, source):
         self.source = source
 
+    def entity_total(self):
+        """Read totalCount with one graphSearch. None when the schema has no arguments.
+
+        A failure is the caller's to catch. maxCountReached means the number is a
+        floor, not the size of the tenant.
+        """
+        built = entity_count_request(self._schema_payload(), self.source.project_id)
+        if not built:
+            return None
+        document, variables = built
+        payload = self.source.client.execute(
+            document, variables, cache_ttl=self.source.client.schema_ttl)
+        data = ((payload or {}).get("data") or {}).get("graphSearch") or {}
+        total = data.get("totalCount")
+        if isinstance(total, bool) or not isinstance(total, int):
+            if isinstance(total, float) and total.is_integer():
+                total = int(total)
+            else:
+                return None
+        return {"count": int(total), "floor": bool(data.get("maxCountReached"))}
+
     def _schema_payload(self):
         payload = self.source.client.execute(INTROSPECTION, {}, cache_ttl=self.source.client.schema_ttl)
         schema = ((payload or {}).get("data") or {}).get("__schema")
@@ -1565,6 +1642,16 @@ class GraphQLSource:
             out["error"] = str(exc)
         except Exception as exc:  # noqa: BLE001
             out["error"] = self.client._scrub(exc)[:300]
+        if out["connected"] and self.adapter_name == "wiz":
+            try:
+                total = self.adapter.entity_total()
+            except Exception:  # noqa: BLE001
+                total = None
+            count = total.get("count") if isinstance(total, dict) else None
+            if isinstance(count, int) and not isinstance(count, bool):
+                out["nodes"] = count
+                if total.get("floor"):
+                    out["nodes_floor"] = True
         return out
 
     def schema(self, refresh=False):
@@ -1601,3 +1688,76 @@ class GraphQLSource:
 
     def cypher(self, query, params=None, limit=None, body=None):
         raise ValueError("This source has no Cypher. Switch to Neo4j to run Cypher.")
+
+    def run_document(self, document, variables=None, limit=200):
+        """Run one saved graph search and return its entities.
+
+        graphSearch returns entities, not relationships, so the edge list stays
+        empty. first is capped at one page of 200. The cursor walks at most
+        MAX_PAGES, and limit is how many entities still fit on the canvas.
+        """
+        if self.adapter_name != "wiz":
+            raise ValueError(GenericAdapter.message)
+        document = str(document or "")
+        assert_query_only(document)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 200
+        limit = max(0, min(limit, 200 * MAX_PAGES))
+        if limit <= 0:
+            report = _truncation("canvas is full", ["node_budget"], nodes_returned=0, edges_returned=0)
+            return {"nodes": [], "edges": [], "truncated": True, "truncation": report}
+        variables = dict(variables or {})
+        page_first = None
+        if "first" in variables:
+            try:
+                asked = int(variables["first"])
+            except (TypeError, ValueError):
+                asked = 200
+            page_first = max(1, min(asked, 200))
+        can_page = "$after" in document
+        found, seen = [], set()
+        cursor = variables.get("after")
+        pages, total, more = 0, None, False
+        while len(found) < limit and pages < MAX_PAGES:
+            page_vars = dict(variables)
+            if page_first is not None:
+                page_vars["first"] = max(1, min(page_first, limit - len(found)))
+            if can_page:
+                page_vars["after"] = cursor
+            payload = self.client.execute(document, page_vars)
+            paths, page_total, has_next, end = _graph_search(payload)
+            if isinstance(page_total, int) and not isinstance(page_total, bool):
+                total = page_total
+            pages += 1
+            for entity in (entity for path in paths for entity in path):
+                ident = str(entity.get("id") or "")
+                if not ident or ident in seen:
+                    continue
+                if len(found) >= limit:
+                    more = True
+                    break
+                seen.add(ident)
+                found.append(entity)
+            if len(found) >= limit:
+                more = more or bool(has_next)
+                break
+            if not can_page or not has_next or not end or end == cursor:
+                more = False
+                break
+            cursor = end
+        else:
+            more = True
+        reasons, message = [], None
+        if more:
+            reasons.append("row_limit")
+            message = f"query stopped at {len(found):,} of more entities"
+        report = _truncation(message, reasons, nodes_returned=len(found), edges_returned=0)
+        return {
+            "nodes": [_entity_node(entity, full=True) for entity in found],
+            "edges": [],
+            "total": total,
+            "truncated": report["truncated"],
+            "truncation": report,
+        }
