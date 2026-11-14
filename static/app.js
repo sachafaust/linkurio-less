@@ -156,7 +156,7 @@ function updateBudgetChip() {
   el.textContent = `${n.toLocaleString()} / ${S.budget.nodes.toLocaleString()} nodes · ${e.toLocaleString()} / ${S.budget.edges.toLocaleString()} edges`;
   el.classList.toggle('warn', n >= S.budget.nodes || e >= S.budget.edges);
   const file = S.budget.configFile || 'gx.local.json';
-  el.title = `Working set on screen, saved in ${file} and used the next time the server starts. This machine allows up to ${S.budget.serverNodes.toLocaleString()} nodes and ${S.budget.serverEdges.toLocaleString()} edges. The whole graph stays in Neo4j.`;
+  el.title = `Working set on screen, saved in ${file} and used the next time the server starts. This machine allows up to ${S.budget.serverNodes.toLocaleString()} nodes and ${S.budget.serverEdges.toLocaleString()} edges. The rest of the graph stays on the source.`;
 }
 // cytoscape's add() calls edge.parallelEdges() for every new edge only to clear caches; that scan is
 // O(degree), so adding the RESOURCE fan-out of a hub costs O(degree^2) (8.5 s for 100k edges / 20 hubs).
@@ -190,7 +190,7 @@ function evictOldest(needN, needE, keepIds) {
 function offerCanvasRoom(why) {
   const filtered = cy.nodes('.filtered').filter(n => !n.data('group')).length;
   const bg = modal('Canvas is full', `<div class="warnbox">${ico('AlertCircleOutline')} ${esc(why || 'The working set is full.')}</div>
-    <div class="section-d">The canvas holds at most ${S.budget.nodes.toLocaleString()} nodes and ${S.budget.edges.toLocaleString()} edges. Remove filtered nodes, or collapse the largest hub, to free room. The rest of the graph stays in Neo4j.</div>`,
+    <div class="section-d">The canvas holds at most ${S.budget.nodes.toLocaleString()} nodes and ${S.budget.edges.toLocaleString()} edges. Remove filtered nodes, or collapse the largest hub, to free room. The rest of the graph stays on the source.</div>`,
     `<button class="btn outline" data-close="1">Close</button><button class="btn outline" data-room="collapse">Collapse a hub</button><button class="btn primary" data-room="filtered" ${filtered ? '' : 'disabled'}>Remove filtered nodes (${filtered})</button>`);
   const filteredBtn = $('[data-room=filtered]', bg);
   if (filteredBtn) filteredBtn.onclick = () => { if (!filtered) return; removeFiltered(); bg.remove(); };
@@ -233,7 +233,14 @@ function addGraph(g, around = null, opts = {}) {
     // small batches: a ring around the expanded node; big batches: a sunflower spiral (no overlaps, O(n))
     const big = k > 60; const a = big ? i * 2.399963 : (2 * Math.PI * i) / Math.max(1, k);
     const r = big ? 34 * Math.sqrt(i + (around ? 4 : 0)) : around ? 90 + 6 * Math.sqrt(k) : 30 * Math.sqrt(i);
-    const data = { id: n.id, labels: n.labels, category: n.category, props: n.props, degree: n.degree ?? 0, _seq: S.seq++ };
+    // Neo4j always sends a number. A partial GraphQL node keeps a null degree so
+    // the first expand asks for a neighbor summary instead of treating it as isolated.
+    const data = {
+      id: n.id, labels: n.labels, category: n.category, props: n.props,
+      degree: n.partial ? (n.degree == null ? null : n.degree) : (n.degree ?? 0),
+      _seq: S.seq++,
+    };
+    if (n.partial) data.partial = true;
     data._s = nodeSize(data);
     return { group: 'nodes', data, position: { x: c0.x + r * Math.cos(a), y: c0.y + r * Math.sin(a) } };
   });
@@ -246,7 +253,9 @@ function addGraph(g, around = null, opts = {}) {
   }
   if (edgeEls.length > roomE) { edgeEls.length = roomE; trimmed = true; }
   if (edgeEls.length) added = added.union(addEdgesFast(edgeEls));
-  const missingDeg = fresh.filter(n => n.degree == null).map(n => n.id);
+  if (g.degrees) Object.entries(g.degrees).forEach(([id, deg]) => { const el = cy.getElementById(id); if (el.nonempty() && deg != null) el.data('degree', deg); });
+  // A partial node keeps its short property list until the selection panel opens it.
+  const missingDeg = fresh.filter(n => n.degree == null && !n.partial).map(n => n.id);
   if (missingDeg.length) api('/api/nodes', { ids: missingDeg }).then(r => { r.nodes.forEach(n => { const el = cy.getElementById(n.id); if (el.nonempty()) el.data('degree', n.degree); }); R.redraw(); });
   let message = g.truncation?.message || null;
   if (trimmed && !S.canvasRefused) message = message || `Stopped at the canvas budget (${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges).`;
@@ -283,6 +292,7 @@ let overlayQueued = false;
 function drawOverlay() { if (!overlayQueued) { overlayQueued = true; requestAnimationFrame(() => { overlayQueued = false; paintOverlay(); }); } }
 function hiddenCount(n) {
   const d = n._private.data; if (d.group || d.hubgroup) return 0;
+  if (d.degree == null) return null;
   let shown = 0;
   for (const e of n._private.edges) { const ed = e._private.data; if (ed.virtual) { const o = ed.source === d.id ? e.target() : e.source(); shown += o._private.data.count || 0; } else if (!ed.meta) shown++; }
   return Math.max(0, (d.degree || 0) - shown);
@@ -543,6 +553,14 @@ function openHubFilter(g) {
 }
 async function expandDefault(node) {
   if (node.data('hubgroup')) return loadHubGroup(node);
+  // Neo4j nodes already carry a degree. A GraphQL node asks for one page of
+  // neighbor counts first, then uses the same hub grouping.
+  if (node.data('degree') == null && !node.data('group')) {
+    try {
+      const sum = await api('/api/neighbors', { ids: [node.id()], visible: realNodes().map(n => n.id()) });
+      if (typeof sum.degree === 'number') node.data('degree', sum.degree);
+    } catch (e) { return toast('Expand failed: ' + e.message, 4000); }
+  }
   const hidden = hiddenCount(node);
   if (hidden === 0) return toast('All neighbors are already displayed');
   if (hidden > HUB_THRESHOLD) return groupHub(node);
@@ -628,11 +646,12 @@ function renderLeftPanel() {
         <div class="lp-cats">${catChip(d.category)} ${d.mixed ? '<span class="cat" style="background:#9e9e9e">MIXED</span>' : ''}</div>
         <div class="props">${d.members.map(id => { const m = cy.getElementById(id); return `<div class="prop" data-goto="${esc(id)}"><div class="k">${esc(m.data('category'))}</div><div class="v">${esc(nodeCaption(m.data()))}</div></div>`; }).join('')}</div>`;
     } else if (el.isNode()) {
+      if (d.partial) ensureFullProps(el);
       const st = catStyle(d.category);
       main = `<div class="lp-head"><div class="lp-title" title="${esc(nodeCaption(d))}">${esc(nodeCaption(d))}</div><div class="lp-id" title="${esc(d.id)}">#${esc(shortId(d.id))}</div></div>
         <div class="lp-cats">${d.labels.map(l => l === d.category ? catChip(l) : `<span class="cat light" style="background:#e6e6e6">${esc(l)}</span>`).join('')}
           <span class="swatch" style="background:${nodeColor(d)}" data-lp="design"></span><span class="pct">${st.size}%</span></div>
-        ${propList(d.props)}`;
+        ${d.partial ? '<div class="section-d">Reading properties…</div>' : ''}${propList(d.props)}`;
     } else {
       const s = cy.getElementById(d.source), t = cy.getElementById(d.target);
       main = `<div class="lp-head"><div class="lp-title">${esc(d.type)}${d.meta ? ` (${d.count})` : ''}</div><div class="lp-id" title="${esc(d.id)}">${d.meta ? 'group' : '#' + esc(shortId(d.id))}</div></div>
@@ -647,6 +666,23 @@ function renderLeftPanel() {
   lp.innerHTML = `<div class="lp-main">${main}</div>${side}`;
   const inp = $('.searchbox input', lp);
   if (inp) { inp.value = TBL.q; inp.oninput = () => { TBL.q = inp.value; filterPropList(); }; filterPropList(); }
+}
+function ensureFullProps(el) {
+  const d = el.data();
+  if (!el.isNode() || !d.partial || d._propsLoading) return;
+  el.data('_propsLoading', true);
+  api('/api/nodes', { ids: [d.id] }).then(r => {
+    const n = (r.nodes || [])[0];
+    el.data('_propsLoading', false);
+    if (!n) return;
+    el.data({
+      props: n.props || {}, partial: false,
+      degree: n.degree == null ? el.data('degree') : n.degree,
+      category: n.category || el.data('category'), labels: n.labels || el.data('labels'),
+    });
+    if (S.selPanelOpen && cy.$(':selected').length === 1 && cy.$(':selected').id() === el.id()) renderLeftPanel();
+    if (window.R) R.redraw();
+  }).catch(e => { el.data('_propsLoading', false); toast(e.message, 4000); });
 }
 function propList(props) {
   const keys = Object.keys(props || {}).sort();
@@ -1021,7 +1057,9 @@ async function runQueryToGraph(cypher, errEl = null) {
 }
 async function openDataModel() {
   if (document.querySelector('.modal.dm')) return;
-  const counts = `${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges`;
+  const counts = S.db.known === false
+    ? 'instance totals stay on the source until you search or expand'
+    : `${(S.db.nodes || 0).toLocaleString()} nodes and ${(S.db.edges || 0).toLocaleString()} edges`;
   const bg = modal('Understand your data model', `<div class="dm-layout"><div class="dm-stage"><div id="dm-cy"></div><div class="dm-wait" data-dm-wait role="status"><span class="land-spin" aria-hidden="true"></span><span><b>Reading the data model…</b><small class="hidden" data-dm-note>A large database can take a minute.</small></span></div></div><div data-dminfo="1"><div class="section-d">Properties appear here.</div></div></div>
     <div class="section-d" data-dm-foot style="margin-top:8px">Whole graph: ${counts}. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas.</div>`, '', { width: 1100 });
   const box = $('.modal', bg);
@@ -1054,7 +1092,7 @@ async function openDataModel() {
   if (!bg.isConnected) return;
   const foot = $('[data-dm-foot]', bg);
   if (foot) foot.textContent = `Whole graph: ${counts}. These are counts, not elements, so this view does not grow with the graph and does not put those nodes on the canvas. ${Object.keys(sc.categories).length} node categories · ${Object.keys(sc.types).length} relationship types. Click a category for its properties.`;
-  const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: `${c} (${v.count})`, cat: c } })),
+  const els = [...Object.entries(sc.categories).map(([c, v]) => ({ data: { id: 'c:' + c, label: v.count == null ? c : `${c} (${v.count})`, cat: c } })),
     ...sc.links.filter(l => l.source !== l.target).map((l, i) => ({ data: { id: 'l' + i, source: 'c:' + l.source, target: 'c:' + l.target, label: l.type } }))];
   dm = cytoscape({ container: $('#dm-cy', bg), elements: els, wheelSensitivity: 0.3, style: [
     { selector: 'node', style: { 'background-color': e => catStyle(e.data('cat')).color, label: 'data(label)', 'font-size': 9, 'text-valign': 'bottom', width: 22, height: 22, 'border-width': 1.5, 'border-color': '#fff', 'background-image': e => catStyle(e.data('cat')).icon ? iconUri(catStyle(e.data('cat')).icon) : 'none', 'background-fit': 'contain', 'text-outline-color': '#f8f8f8', 'text-outline-width': 2 } },
@@ -1198,9 +1236,14 @@ function openHelp() {
     ${k('←/↑/→/↓', 'Move camera')}${k('+', 'Zoom in')}${k('-', 'Zoom out')}${k('Ctrl+click', 'Add/remove from selection')}${k('Ctrl+A', 'Select all nodes')}${k('Ctrl+Backspace', 'Remove selection from visualization')}
     ${k('Ctrl+drag', 'Lasso')}${k('Ctrl+Shift+drag', 'Edge lasso')}${k('Shift+click', 'Select direct neighbors')}${k('Ctrl+C', 'Copy selected nodes')}${k('Ctrl+V', 'Paste copied nodes')}${k('Ctrl+Z', 'Undo')}${k('Ctrl+Y', 'Redo')}${k('Double-click', 'Expand node / toggle group')}${k('Esc', 'Clear selection')}</table></div>
     <div style="flex:1"><div class="section-t">Connection</div><table class="kv" data-conn="1"><tr><td>Loading…</td></tr></table><div class="section-d" style="margin-top:10px">Unofficial Explore-phase prototype inspired by a commercial graph-investigation UI. Not affiliated with or endorsed by its vendor. Read-only access to Neo4j.</div></div></div>`, '', { width: 900 });
-  api('/api/status').then(s => { const t = $('[data-conn]'); if (t) t.innerHTML = Object.entries(s).map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(String(b))}</td></tr>`).join(''); }).catch(e => { const t = $('[data-conn]'); if (t) t.innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; });
+  api('/api/status').then(s => { const t = $('[data-conn]'); if (t) t.innerHTML = Object.entries(s).filter(([a]) => !/token|authorization|password|secret/i.test(a)).map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b && typeof b === 'object' ? JSON.stringify(b) : String(b))}</td></tr>`).join(''); }).catch(e => { const t = $('[data-conn]'); if (t) t.innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; });
+}
+function sourceMenuItem() {
+  if (!S.sources || S.sources.length < 2) return null;
+  return { label: 'Data source', icon: 'DatabaseOutline', sub: S.sources.map(s => ({ label: `${s.id === S.source?.id ? '✓ ' : ''}${s.label}`, act: () => switchSource(s.id) })) };
 }
 function mainMenuItems() {
+  const source = sourceMenuItem();
   return [
     { label: 'New visualization', icon: 'FileOutline', act: newViz },
     { label: 'Open…', icon: 'FolderOpenOutline', act: openVizDialog },
@@ -1208,6 +1251,7 @@ function mainMenuItems() {
     { label: 'Save as…', icon: 'ContentCopy', act: () => openSaveDialog(true) },
     { label: S.viz.autosave ? 'Switch auto-save off' : 'Switch auto-save on', disabled: !S.viz.saved, act: () => { S.viz.autosave = !S.viz.autosave; updateSaveChip(); } },
     '-', { label: 'Export', icon: 'Download', sub: [{ label: 'Image (PNG)…', icon: 'ImageOutline', act: openExportImage }, { label: 'Data (CSV, JSON)…', icon: 'Table', act: () => openExportData(false) }] },
+    ...(source ? ['-', source] : []),
     '-', { label: 'Understand your data model', icon: 'DatabaseOutline', act: openDataModel },
     { label: 'Canvas budget…', icon: 'Cog', act: openBudgetSettings },
     { label: document.body.classList.contains('dark') ? 'Light theme' : 'Dark theme', icon: 'ThemeLightDark', act: toggleTheme },
@@ -1439,7 +1483,7 @@ async function applyServerBudget(st) {
   }
   S.budget.reason = cfg.reason || '';
   applyBudgetNumbers(cfg);
-  S.db = { nodes: st.nodes || 0, edges: st.edges || 0 };
+  rememberCounts(st);
   updateBudgetChip();
   if (announce) toast(`Working set set for this machine: ${S.budget.nodes.toLocaleString()} nodes, ${S.budget.edges.toLocaleString()} edges`, 4500);
 }
@@ -1447,7 +1491,7 @@ function openBudgetSettings() {
   const b = S.budget;
   const file = b.configFile || 'gx.local.json';
   const hw = b.resources ? `${b.resources.cpu} CPU cores, ${Number(b.resources.ram_gb).toLocaleString()} GB RAM on this machine.` : '';
-  const bg = modal('Canvas budget', `<div class="section-d">Saved in ${esc(file)} and used again the next time the server starts. This server accepts up to ${b.serverNodes.toLocaleString()} nodes and ${b.serverEdges.toLocaleString()} edges. The rest of the graph stays in Neo4j.</div>
+  const bg = modal('Canvas budget', `<div class="section-d">Saved in ${esc(file)} and used again the next time the server starts. This server accepts up to ${b.serverNodes.toLocaleString()} nodes and ${b.serverEdges.toLocaleString()} edges. The rest of the graph stays on the source.</div>
     <div class="section-d" data-breason="1">${esc(b.reason || hw)}</div>
     <div class="field">Nodes<input type="number" data-bn="1" min="1" max="${b.serverNodes}" value="${b.nodes}"></div>
     <div class="field">Edges<input type="number" data-be="1" min="1" max="${b.serverEdges}" value="${b.edges}"></div>
@@ -1489,27 +1533,112 @@ function openBudgetSettings() {
 }
 
 // ---------- boot -----------------------------------------------------------------------
+function rememberCounts(st) {
+  S.db = {
+    nodes: st.nodes == null ? 0 : Number(st.nodes) || 0,
+    edges: st.edges == null ? 0 : Number(st.edges) || 0,
+    known: st.nodes != null && st.edges != null,
+  };
+}
+function connectionText(st) {
+  const src = st.source || { label: 'Neo4j', kind: 'neo4j' };
+  if (src.kind === 'graphql') {
+    const counts = st.nodes == null ? 'instances load as you explore' : `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges`;
+    return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + st.error : ''}`;
+  }
+  return `${st.server || ''} · ${st.database || ''} · ${Number(st.nodes || 0).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges · read-only`;
+}
+function paintSource(st) {
+  S.status = st;
+  S.source = st.source || { id: 'neo4j', label: 'Neo4j', kind: 'neo4j' };
+  S.sources = st.sources || [S.source];
+  rememberCounts(st);
+  const text = connectionText(st);
+  const conn = $('#conn');
+  if (conn) conn.textContent = text;
+  const input = $('#search-input');
+  if (input) input.title = text;
+  const gql = S.source.kind === 'graphql';
+  const kicker = $('#land-kicker');
+  if (kicker) kicker.textContent = gql ? `Read-only ${S.source.label}` : 'Read-only Neo4j';
+  const lead = $('#land-lead');
+  if (lead) lead.textContent = gql
+    ? 'Search a node or open the data model. Results stay in this view. Nothing is copied into Neo4j.'
+    : 'Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.';
+  const note = $('#land-cypher-note');
+  if (note) note.textContent = gql ? 'Cypher runs on the Neo4j source.' : 'Write one read-only statement.';
+  const landNodes = $('#land-nodes');
+  if (landNodes) {
+    landNodes.textContent = st.nodes == null ? '—' : Number(st.nodes).toLocaleString();
+    landNodes.title = st.nodes == null ? 'Instances load when you search or expand.' : '';
+    $('#land-edges').textContent = st.edges == null ? '—' : Number(st.edges || 0).toLocaleString();
+    $('#land-db').textContent = gql ? (S.source.label || '') : (st.database || '');
+  }
+  const err = $('#land-error');
+  if (err) { err.textContent = st.error || ''; err.classList.toggle('hidden', !st.error); }
+  fillSourceSelects();
+}
+function fillSourceSelects() {
+  const many = (S.sources || []).length > 1;
+  for (const sel of ['#source-pick', '#source-bar'].map(s => $(s)).filter(Boolean)) {
+    const current = S.source?.id || 'neo4j';
+    sel.innerHTML = (S.sources || []).map(s => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('');
+    sel.value = current;
+    sel.disabled = !S.ready;
+    sel.classList.toggle('hidden', !many);
+  }
+  const lab = $('#land-source');
+  if (lab) lab.classList.toggle('hidden', !many);
+}
+let sourceSwitching = false;
+async function switchSource(id) {
+  if (!id || sourceSwitching || (S.source && id === S.source.id)) { fillSourceSelects(); return; }
+  const dirty = window.cy && typeof cy.nodes === 'function' && cy.nodes().length > 0;
+  if (dirty && !confirm('Switching the data source clears the canvas. The other source is left as it is.')) {
+    fillSourceSelects();
+    return;
+  }
+  sourceSwitching = true;
+  const stopWait = typeof armLandWait === 'function' ? armLandWait() : () => {};
+  try {
+    const st = await api('/api/source', { id });
+    if (dirty) {
+      cy.elements().remove();
+      S.undo = []; S.redo = [];
+      afterGraphChange();
+    }
+    paintSource(st);
+    try { S.schema = await api('/api/schema'); }
+    catch (e) { S.schema = { categories: {}, types: {}, links: [] }; toast(e.message, 5000); }
+    initStyles();
+    if (window.R) restyle();
+    toast(S.source.label);
+  } catch (e) {
+    toast(e.message, 4000);
+    fillSourceSelects();
+  } finally {
+    sourceSwitching = false;
+    stopWait();
+  }
+}
 async function boot() {
   paintIcons(); if (localStorage.getItem('gx:theme') === 'dark') document.body.classList.add('dark');
   sizeOverlay();
+  for (const sel of ['#source-pick', '#source-bar']) {
+    const node = $(sel);
+    if (node) node.addEventListener('change', () => switchSource(node.value));
+  }
   S.cfg = await api('/api/styles');
   try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
   try {
     const st = await api('/api/status');
-    $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · ${st.edges.toLocaleString()} edges · read-only`;
-    $('#search-input').title = $('#conn').textContent;
-    const landNodes = $('#land-nodes');
-    if (landNodes) {
-      landNodes.textContent = st.nodes.toLocaleString();
-      $('#land-edges').textContent = st.edges.toLocaleString();
-      $('#land-db').textContent = st.database || '';
-    }
+    paintSource(st);
     await applyServerBudget(st);
   }
   catch (e) {
-    $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`;
+    $('#conn').innerHTML = `<span class="err">Cannot reach the data source: ${esc(e.message)}</span>`;
     const landMeta = $('#land-meta');
-    if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = 'Neo4j is not reachable.'; }
+    if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = 'The data source is not reachable.'; }
   }
   const stopWait = armLandWait();
   try {
@@ -1535,6 +1664,7 @@ async function boot() {
   window.addEventListener('resize', () => { sizeOverlay(); R.resize(); drawOverlay(); });
   updateUndoBtns(); updateSaveChip(); afterGraphChange();
   S.ready = true;
+  fillSourceSelects();
   const q = new URLSearchParams(location.search);
   if (q.get('viz')) loadViz(q.get('viz'));
   } finally {

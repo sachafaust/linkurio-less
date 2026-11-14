@@ -1,8 +1,14 @@
-"""Read-only Neo4j graph explorer backend (stdlib HTTP server + official neo4j driver).
+"""Read-only graph explorer backend (stdlib HTTP server + official neo4j driver).
 
 Serves ./static and a small JSON API. Every Cypher statement runs in a READ
 transaction (session default_access_mode=READ + execute_read), and user-written
 Cypher is also screened for write clauses before it is sent.
+
+Neo4j is one data source. A GraphQL endpoint configured below is a second
+source, shown on its own and never copied into Neo4j. The handlers call the
+same methods on whichever source is active: status, schema, search, nodes,
+neighbor_summary, expand, edges_between, and cypher. The bearer token stays
+in the environment.
 
 Config (environment variables; a gitignored .env fills any of the four that are unset):
     NEO4J_URI       bolt://localhost:7687   (host only: put the user and password in the variables below)
@@ -27,6 +33,15 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     EDGE_WALK_MAX   edge fill will not walk a node with more relationships than this (2000)
     SEARCH_SCAN_CAP nodes scanned per search without a full-text index (200000)
     CACHE_TTL / SCHEMA_TTL  seconds to cache neighbor summaries (60) / the schema (600)
+
+GraphQL (optional second source; omit it to use Neo4j only):
+    GRAPHQL_ENDPOINT    https://api.us2.app.wiz.io/graphql
+    GRAPHQL_TOKEN       bearer token. Never written to disk, logs, or the page.
+    GRAPHQL_ADAPTER     wiz (default on a wiz.io host) or generic
+    GRAPHQL_LABEL / GRAPHQL_ID / GRAPHQL_TOKEN_ENV / GRAPHQL_PROJECT_ID
+    A graphql list in gx.local.json can name the endpoint and the token's
+    variable. A token value in that file is removed. GRAPHQL_MAX_INFLIGHT
+    caps concurrent requests (4).
 """
 from __future__ import annotations
 
@@ -45,6 +60,17 @@ import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
 from neo4j.graph import Node, Path as NPath, Relationship
 
+from graphql_source import (
+    GraphQLCallError,
+    GraphQLConfigError,
+    GraphQLSource,
+    QueryRejected,
+    RateLimited,
+    TokenExpired,
+    resolve_graphql_sources,
+    sources_from_config,
+    without_secrets,
+)
 from neo4j_env import Neo4jConfigError, neo4j_settings
 
 ROOT = Path(__file__).resolve().parent
@@ -406,8 +432,12 @@ def _normalize_config(data):
     gpu = data.get("gpu") if data.get("gpu") in ("hardware", "software", "unknown") else "unknown"
     source = data.get("source") if data.get("source") in ("auto", "user") else "user"
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
-    return {**clamped, "lru": bool(data.get("lru")), "reason": reason[:500],
-            "source": source, "gpu": gpu, "renderer": str(data.get("renderer") or "")[:120]}
+    result = {**clamped, "lru": bool(data.get("lru")), "reason": reason[:500],
+              "source": source, "gpu": gpu, "renderer": str(data.get("renderer") or "")[:120]}
+    graphql = sources_from_config(data)
+    if graphql:
+        result["graphql"] = graphql
+    return result
 
 
 def _config_from_suggestion(sug, source, gpu, renderer):
@@ -435,6 +465,14 @@ def _ensure_config_locked():
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             raw = None
+        if isinstance(raw, dict):
+            cleaned, removed = without_secrets(raw)
+            if removed:
+                try:
+                    _write_config(path, cleaned)
+                except OSError as e:
+                    print(f"WARNING: could not remove a GraphQL token from {path.name}: {e}")
+                raw = cleaned
         norm = _normalize_config(raw) if isinstance(raw, dict) else None
         if norm:
             _WORKING = norm
@@ -488,6 +526,8 @@ def _store_config_locked(body, source):
         "lru": body["lru"] if "lru" in body else current.get("lru"),
         "reason": reason, "source": source, "gpu": gpu, "renderer": renderer,
     }
+    if current.get("graphql"):
+        merged["graphql"] = current["graphql"]
     norm = _normalize_config(merged)
     if norm is None:
         raise ValueError("nodes and edges must be at least 1")
@@ -695,6 +735,9 @@ class Graph:
         settings = settings or neo4j_settings()
         self.uri = settings.uri
         self.db = settings.database
+        self.id = "neo4j"
+        self.label = "Neo4j"
+        self.kind = "neo4j"
         self.driver = GraphDatabase.driver(self.uri, auth=(settings.user, settings.password))
         self._fulltext = os.environ.get("SEARCH_FULLTEXT_INDEX") or None
         self._ft_checked = bool(self._fulltext)
@@ -1036,6 +1079,110 @@ class Graph:
 
 
 GRAPH: Graph | None = None
+SOURCES: dict = {}
+ACTIVE = "neo4j"
+
+# Both sources implement these. The handlers call them and do not branch on
+# the kind, except the source list itself.
+SOURCE_METHODS = (
+    "status", "schema", "search", "nodes", "neighbor_summary",
+    "expand", "edges_between", "cypher",
+)
+
+
+def bind_sources(graph, config):
+    """Neo4j plus any configured GraphQL source. The active source starts as Neo4j."""
+    global GRAPH, SOURCES, ACTIVE
+    GRAPH = graph
+    sources = {"neo4j": graph}
+    for spec in resolve_graphql_sources(config):
+        sources[spec["id"]] = GraphQLSource(spec)
+        print(f"GraphQL source {spec['label']} ({spec['adapter']}) at {urlparse(spec['endpoint']).netloc}.")
+    SOURCES = sources
+    if ACTIVE not in SOURCES:
+        ACTIVE = "neo4j"
+
+
+def current():
+    if SOURCES:
+        return SOURCES.get(ACTIVE) or SOURCES.get("neo4j") or GRAPH
+    return GRAPH
+
+
+def source_catalog():
+    rows = []
+    for sid, src in SOURCES.items():
+        row = {
+            "id": getattr(src, "id", sid),
+            "label": getattr(src, "label", sid),
+            "kind": getattr(src, "kind", "neo4j"),
+        }
+        adapter = getattr(src, "adapter_name", None)
+        if adapter:
+            row["adapter"] = adapter
+        rows.append(row)
+    return rows
+
+
+def _secret_values():
+    names = {"GRAPHQL_TOKEN"}
+    for src in SOURCES.values():
+        env_name = getattr(src, "token_env", None)
+        if env_name:
+            names.add(env_name)
+    return [value for name in names if (value := os.environ.get(name))]
+
+
+def _scrub_public(value, secrets):
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret and secret in value:
+                value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, dict):
+        return {key: _scrub_public(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_public(item, secrets) for item in value]
+    return value
+
+
+def public_status(consume=False):
+    """Status for the active source, plus the list of sources. No token."""
+    src = current()
+    kind = getattr(src, "kind", "neo4j")
+    try:
+        if kind == "neo4j":
+            status = src.status(consume_config_created=consume)
+        else:
+            status = src.status()
+            status["budget"] = budget_payload(consume_created=consume)
+    except Exception as exc:  # noqa: BLE001
+        status = {
+            "connected": False, "read_only": True, "nodes": None, "edges": None,
+            "server": "", "database": getattr(src, "label", ""),
+            "error": str(exc)[:300],
+            "budget": budget_payload(consume_created=consume),
+        }
+    status["source"] = {
+        "id": getattr(src, "id", ACTIVE),
+        "label": getattr(src, "label", ACTIVE),
+        "kind": kind,
+    }
+    adapter = getattr(src, "adapter_name", None)
+    if adapter:
+        status["source"]["adapter"] = adapter
+    status["sources"] = source_catalog()
+    return _scrub_public(status, _secret_values())
+
+
+def select_source(source_id):
+    """Switch the view. The other source is left untouched."""
+    global ACTIVE
+    source_id = str(source_id or "")
+    if source_id not in SOURCES:
+        raise ValueError("Unknown data source")
+    ACTIVE = source_id
+    return public_status(consume=False)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1060,23 +1207,46 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _api_error(self, exc):
+        secrets = _secret_values()
+        if isinstance(exc, TokenExpired):
+            return self._json({"error": "token expired"}, 401)
+        if isinstance(exc, RateLimited):
+            return self._json({"error": "The GraphQL API asked us to slow down (HTTP 429)."}, 429)
+        if isinstance(exc, QueryRejected):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 400)
+        if isinstance(exc, PermissionError):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 403)
+        if isinstance(exc, (ValueError, GraphQLConfigError)):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 400)
+        if isinstance(exc, neo4j.exceptions.Neo4jError):
+            return self._json({"error": _scrub_public(f"{exc.code}: {exc.message}", secrets)}, 400)
+        if isinstance(exc, GraphQLCallError):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 502)
+        return self._json({"error": _scrub_public(str(exc), secrets)}, 500)
+
     def do_GET(self):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        src = current()
         try:
             if u.path == "/api/status":
-                return self._json(GRAPH.status(consume_config_created=True))
+                return self._json(public_status(consume=True))
+            if u.path == "/api/sources":
+                return self._json(_scrub_public(source_catalog(), _secret_values()))
             if u.path == "/api/schema":
-                return self._json(GRAPH.schema(refresh=q.get("refresh") == "1"))
+                return self._json(src.schema(refresh=q.get("refresh") == "1"))
             if u.path == "/api/styles":
                 return self._json(CFG)
             if u.path == "/api/queries":
                 return self._json(json.loads((ROOT / "data" / "queries.json").read_text()))
             if u.path == "/api/search":
-                return self._json(GRAPH.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
-                                               q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))
+                return self._json(src.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
+                                             q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))
         except Exception as e:  # noqa: BLE001
-            return self._json({"error": str(e)}, 500)
+            if isinstance(e, (TokenExpired, RateLimited, QueryRejected, GraphQLCallError, GraphQLConfigError, ValueError)):
+                return self._api_error(e)
+            return self._json({"error": _scrub_public(str(e), _secret_values())}, 500)
         path = (STATIC / (u.path.lstrip("/") or "index.html")).resolve()
         if u.path == "/":
             path = STATIC / "index.html"
@@ -1086,12 +1256,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        src = current()
         try:
             b = self._body()
+            if u.path == "/api/source":
+                return self._json(select_source(b.get("id")))
             if u.path == "/api/nodes":
-                return self._json(GRAPH.nodes(b["ids"]))
+                return self._json(src.nodes(b["ids"]))
             if u.path == "/api/neighbors":
-                return self._json(GRAPH.neighbor_summary(b["ids"], b.get("visible", [])))
+                return self._json(src.neighbor_summary(b["ids"], b.get("visible", [])))
             if u.path == "/api/budget/suggest":
                 return self._json(suggest_for(b))
             if u.path == "/api/budget/refine":
@@ -1099,26 +1272,19 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/budget":
                 return self._json({"config": save_config(b), "config_file": config_path().name})
             if u.path == "/api/expand":
-                return self._json(GRAPH.expand(b.get("ids") or [], b.get("visible") or [], b.get("categories"), b.get("types"),
-                                               b.get("limit", EXPAND_LIMIT), b.get("order", "neighbors"), b.get("offset", 0),
-                                               b.get("q") or None, b))
+                return self._json(src.expand(b.get("ids") or [], b.get("visible") or [], b.get("categories"), b.get("types"),
+                                             b.get("limit", EXPAND_LIMIT), b.get("order", "neighbors"), b.get("offset", 0),
+                                             b.get("q") or None, b))
             if u.path == "/api/edges-between":
-                return self._json(GRAPH.edges_between(b.get("ids") or [], b))
+                return self._json(src.edges_between(b.get("ids") or [], b))
             if u.path == "/api/cypher":
-                return self._json(GRAPH.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
-        except PermissionError as e:
-            return self._json({"error": str(e)}, 403)
-        except ValueError as e:
-            return self._json({"error": str(e)}, 400)
-        except neo4j.exceptions.Neo4jError as e:
-            return self._json({"error": f"{e.code}: {e.message}"}, 400)
+                return self._json(src.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
         except Exception as e:  # noqa: BLE001
-            return self._json({"error": str(e)}, 500)
+            return self._api_error(e)
         self._send(404, b"not found", "text/plain")
 
 
 def main():
-    global GRAPH
     try:
         settings = neo4j_settings()
     except Neo4jConfigError as e:
@@ -1127,12 +1293,12 @@ def main():
     cfg = ensure_config()
     print(f"Working set: {cfg['nodes']} nodes / {cfg['edges']} edges "
           f"({cfg['source']}) from {config_path()}.")
-    GRAPH = Graph(settings)
+    bind_sources(Graph(settings), cfg)
     try:
         st = GRAPH.status()
         print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")
     except Exception as e:  # noqa: BLE001
-        print(f"WARNING: cannot reach Neo4j yet: {e}")
+        print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}")
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 8744))
     srv = ThreadingHTTPServer((host, port), Handler)
     print(f"Open http://{host}:{port}/")

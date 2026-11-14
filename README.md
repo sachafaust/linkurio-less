@@ -4,6 +4,8 @@
 
 Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`data/cartography_styles.json`), and the built-in queries (`data/queries.json`).
 
+A GraphQL endpoint is a separate source on the same page. Wiz is the first adapter. See [GraphQL source](#graphql-source).
+
 Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`. Cytoscape holds the graph model. `static/render.js` draws it on Canvas2D. ForceAtlas2 runs in a web worker.
 
 ## What it looks like
@@ -72,13 +74,39 @@ python3 server.py    # http://127.0.0.1:8744
 
 The first launch writes a canvas working set to `gx.local.json` from CPU and RAM. The first browser open adds the GPU. Canvas budget in the status bar edits nodes, edges, neighbors per expand, and rows per query. Save writes the file for the next launch. The file is gitignored. `GX_CONFIG` points somewhere else. `MAX_NODES`, `MAX_EDGES`, `EXPAND_LIMIT`, and `CYPHER_ROW_LIMIT` fix the ceiling when you want one.
 
+## GraphQL source
+
+The page shows one source at a time. GraphQL results stay in the GraphQL view. Wiz is the first adapter (`graphSearch`, `_vertexID`, cursor pages). A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists.
+
+Set the endpoint and a ready bearer token in the environment or in `.env`. The token stays in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token value in that file is removed on startup.
+
+```bash
+GRAPHQL_ENDPOINT=https://api.us2.app.wiz.io/graphql
+GRAPHQL_TOKEN=...
+GRAPHQL_ADAPTER=wiz
+```
+
+Or a `graphql` list in `gx.local.json`:
+
+```json
+"graphql": [
+  {"id": "wiz", "label": "Wiz", "endpoint": "https://api.us2.app.wiz.io/graphql", "adapter": "wiz", "token_env": "GRAPHQL_TOKEN", "project_id": "*"}
+]
+```
+
+`GRAPHQL_ENDPOINT` overrides a file entry with the same id. `GRAPHQL_LABEL`, `GRAPHQL_ID`, `GRAPHQL_TOKEN_ENV` (default `GRAPHQL_TOKEN`), and `GRAPHQL_PROJECT_ID` (default `*`) are optional. On a `wiz.io` host the adapter defaults to `wiz`. Any other host defaults to `generic`.
+
+The client sends queries only. A mutation is refused before the request is built. HTTP 401 is shown as "token expired". HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time.
+
 ## API
 
 The page calls these JSON endpoints on the same host. `POST /api/cypher` takes one read-only Cypher statement and returns its nodes, relationships, and rows. A statement with no `LIMIT` is capped at the working set.
 
 | Method | Path | Returns |
 |---|---|---|
-| GET | `/api/status` | connection, counts, working set, safety ceiling |
+| GET | `/api/status` | connection, counts, working set, safety ceiling, active source |
+| GET | `/api/sources` | sources you can pick. The token is omitted |
+| POST | `/api/source` | `{"id":"wiz"}` switches the active source |
 | GET | `/api/schema` | labels, relationship types, counts |
 | GET | `/api/styles` | colors, icons, captions |
 | GET | `/api/queries` | built-in saved queries |
@@ -108,7 +136,8 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 
 | Path | Role |
 |---|---|
-| `server.py` | HTTP server and read-only Cypher |
+| `server.py` | HTTP server, source switch, and read-only Cypher |
+| `graphql_source.py` | GraphQL client, introspection model, and the Wiz adapter |
 | `neo4j_env.py` | `NEO4J_*` from the environment, then `.env` |
 | `static/app.js` | UI |
 | `static/render.js` | Canvas2D renderer |
@@ -118,5 +147,6 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `docs/screenshots/` | UI-suite captures |
 | `docs/compare/` | Linkurious comparison sheets |
 | `tests/test_budget.py` | working-set math and a tiny read-only server check |
+| `tests/test_graphql.py` | mocked GraphQL API, paging, and the source switch |
 | `tests/test_neo4j_env.py` | credential loading |
 | `tests/run_ui_tests.py` | Playwright UI suite. Set `CHROME` to override the browser |

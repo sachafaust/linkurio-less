@@ -15,8 +15,12 @@
   <div id="landing">
     <div class="land">
       <h1 class="land-logo"><img src="/logo.jpg" alt="linkurio-less"></h1>
-      <div class="land-kicker">Read-only Neo4j</div>
-      <p class="land-lead">Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.</p>
+      <div class="land-kicker" id="land-kicker">Read-only Neo4j</div>
+      <p class="land-lead" id="land-lead">Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.</p>
+      <label class="land-source hidden" id="land-source">Data source
+        <select id="source-pick"></select>
+      </label>
+      <p class="land-error hidden" id="land-error" role="status"></p>
       <div class="land-stats" id="land-meta">
         <div><b id="land-nodes">—</b><span>Nodes</span></div>
         <div><b id="land-edges">—</b><span>Relationships</span></div>
@@ -29,7 +33,7 @@
       <div class="land-grid">
         <button class="land-act" data-act="focus-search"><i data-icon="Magnify"></i><span><b>Search</b><small>Find a node or relationship and place it on the canvas.</small></span></button>
         <button class="land-act" data-act="explore-queries"><i data-icon="CodeBraces"></i><span><b>Queries</b><small>Open a saved query and add its result.</small></span></button>
-        <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small>Write one read-only statement.</small></span></button>
+        <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small id="land-cypher-note">Write one read-only statement.</small></span></button>
         <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
       </div>
       <button class="land-help" data-act="help"><i data-icon="HelpCircleOutline"></i>Help and shortcuts</button>
@@ -74,7 +78,7 @@
   <aside id="rightpanel" class="hidden"></aside>
   <aside id="leftpanel" class="hidden"></aside>
 
-  <div id="statusbar"><span id="viz-title" class="chip hidden"></span><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span></div>
+  <div id="statusbar"><span id="viz-title" class="chip hidden"></span><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span><select id="source-bar" class="hidden" title="Data source"></select></div>
   <div id="watermark">GRAPH&nbsp;EXPLORER <small>for Neo4j</small></div>
   <div class="card toolbar" id="zoomctl">
     <button data-act="zoom-out" title="Zoom out (-)"><i data-icon="Minus"></i></button>
