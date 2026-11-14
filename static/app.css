@@ -46,11 +46,34 @@ body.dark #watermark { color: rgba(255,255,255,.08); }
 .btn:disabled { opacity: .45; cursor: default; }
 #conn { display: none; } /* connection info lives in the search box tooltip and the gear menu; Linkurious shows nothing here */
 /* landing */
-#landing { position: absolute; top: 26%; left: 50%; transform: translateX(-210px); display: flex; flex-direction: column; align-items: flex-start; gap: 10px; z-index: 2; }
-.landing-title { color: var(--text); font-size: 14px; margin-bottom: 4px; }
-.pill { display: inline-flex; gap: 8px; align-items: center; background: var(--card); box-shadow: var(--shadow); border-radius: 20px; padding: 7px 16px 7px 12px; font-size: 14px; }
-.pill:hover { background: var(--hover); }
-.pill .blue { color: #1976d2; } .pill .red { color: #d32f2f; }
+#landing { position: absolute; top: 64px; left: 68px; right: 68px; bottom: 56px; z-index: 2; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.land { pointer-events: auto; width: min(680px, 100%); max-height: 100%; overflow: auto; background: var(--card); border-radius: 4px; box-shadow: var(--shadow); padding: 28px 28px 16px; }
+.land-logo { margin: 0; }
+.land-logo img { display: block; width: min(460px, 100%); height: auto; border-radius: 18px; }
+.land-kicker { margin-top: 16px; font-size: 11px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase; color: var(--primary); }
+.land-lead { margin: 8px 0 0; max-width: 58ch; color: var(--muted); }
+.land-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.land-stats > div { min-width: 0; padding: 12px 14px 12px 0; }
+.land-stats > div + div { padding-left: 14px; border-left: 1px solid var(--line); }
+.land-stats b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.land-stats span { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
+.land-stats.is-msg { display: block; padding: 12px 0; font-size: 13px; color: var(--text); }
+.land-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+.land-act { display: flex; gap: 12px; align-items: flex-start; text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); }
+.land-act:hover { border-color: var(--primary); background: var(--hover); }
+.land-act i { width: 32px; height: 32px; padding: 6px; border-radius: 4px; color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); flex: none; }
+.land-act b { display: block; font-weight: 500; }
+.land-act small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.land-help { margin-top: 10px; padding: 4px 0; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.land-help:hover { color: var(--primary); }
+.land-help i { width: 16px; height: 16px; }
+.land-act:focus-visible, .land-help:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (max-width: 860px) {
+  #landing { left: 12px; right: 58px; top: 60px; }
+  .land { padding: 18px 16px 12px; }
+  .land-grid { grid-template-columns: 1fr; }
+  .land-stats b { font-size: 16px; }
+}
 /* search */
 #search { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: 420px; z-index: 6; }
 #search-input { width: 100%; height: 34px; border: 1px solid #d6d6d6; border-radius: 3px; padding: 0 60px 0 12px; font: inherit; background: var(--input); color: var(--text); outline: none; }

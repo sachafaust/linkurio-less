@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Graph Explorer (Neo4j)</title>
+<title>linkurio-less</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
+<link rel="icon" type="image/png" href="/favicon.png">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -13,12 +13,23 @@
   <canvas id="overlay"></canvas>
 
   <div id="landing">
-    <div class="landing-title">Get started with one of the options:</div>
-    <button class="pill" data-act="focus-search"><i data-icon="Magnify" class="blue"></i>Search for nodes/edges</button>
-    <button class="pill" data-act="explore-queries"><i data-icon="CodeBraces"></i>Explore queries</button>
-    <button class="pill" data-act="code-query"><i data-icon="CodeBracesBox"></i>Code a query</button>
-    <button class="pill" data-act="data-model"><i data-icon="DatabaseOutline" class="red"></i>Understand your data model</button>
-    <button class="pill" data-act="help"><i data-icon="HelpCircleOutline"></i>Help</button>
+    <div class="land">
+      <h1 class="land-logo"><img src="/logo.jpg" alt="linkurio-less"></h1>
+      <div class="land-kicker">Read-only Neo4j</div>
+      <p class="land-lead">Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.</p>
+      <div class="land-stats" id="land-meta">
+        <div><b id="land-nodes">—</b><span>Nodes</span></div>
+        <div><b id="land-edges">—</b><span>Relationships</span></div>
+        <div><b id="land-db">—</b><span>Database</span></div>
+      </div>
+      <div class="land-grid">
+        <button class="land-act" data-act="focus-search"><i data-icon="Magnify"></i><span><b>Search</b><small>Find a node or relationship and place it on the canvas.</small></span></button>
+        <button class="land-act" data-act="explore-queries"><i data-icon="CodeBraces"></i><span><b>Queries</b><small>Open a saved query and add its result.</small></span></button>
+        <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small>Write one read-only statement.</small></span></button>
+        <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
+      </div>
+      <button class="land-help" data-act="help"><i data-icon="HelpCircleOutline"></i>Help and shortcuts</button>
+    </div>
   </div>
 
   <div class="card toolbar" id="topleft">
