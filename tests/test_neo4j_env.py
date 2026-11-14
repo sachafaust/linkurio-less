@@ -868,7 +868,9 @@ def test_fresh_start_ignores_saved_connection():
         sources = [item.get("id") for item in (status or {}).get("sources") or []]
         leaked = [item for item in secrets if item in log or item in body]
         check(proc.poll() is None and bool(status) and status.get("connected") is False
-              and sources == ["neo4j"]
+              and sources == []
+              and (status.get("source") or {}).get("kind") == "none"
+              and "neo4j" not in body
               and "no data connection" in (status.get("error") or "")
               and "This run has no data connection" in log
               and "Connected to" not in log
@@ -892,33 +894,42 @@ def test_fresh_start_ignores_saved_connection():
               and all(item not in schema_raw for item in secrets),
               "schema refuses at once instead of initializing Neo4j",
               f"HTTP {schema_code} in {elapsed:.2f}s")
+        refused = socket.socket()
+        refused.bind(("127.0.0.1", 0))
+        refused_port = refused.getsockname()[1]
+        refused.close()
+        added = f"http://127.0.0.1:{refused_port}/graphql"
         save_code, save_raw = _request(port, "/api/connection", {
             "graphql": {
-                "endpoint": "https://added.example.test/graphql",
+                "endpoint": added,
                 "adapter": "generic",
                 "label": "Added",
                 "token": typed_token,
             },
-        }, timeout=5)
+        }, timeout=15)
         saved = json.loads(save_raw) if save_code == 200 else {}
         saved_status = saved.get("status") or {}
         saved_ids = [item.get("id") for item in saved_status.get("sources") or []]
         log += _drain(proc)
         text = dotenv.read_text(encoding="utf-8")
         saved_sources = json.dumps(saved_status.get("sources") or [])
+        gone = _request(port, "/api/source", {"id": "neo4j"}, timeout=5)
         check(save_code == 200 and saved_status.get("connected") is False
-              and saved_ids == ["neo4j", "graphql"]
+              and saved_ids == ["graphql"]
+              and (saved_status.get("source") or {}).get("kind") == "graphql"
+              and "neo4j" not in saved_ids
+              and gone[0] == 400
               and "config.example.test" not in saved_sources
               and "Connected to" not in log
               and "cannot reach Neo4j" not in log
               and all(item not in save_raw and item not in log for item in secrets)
               and f"NEO4J_PASSWORD={saved_password}" in text
-              and "https://added.example.test/graphql" in text
+              and added in text
               and f"GRAPHQL_TOKEN={typed_token}" in text
               and file_secret in text
               and "GX_FRESH" not in text
               and inherited_password not in text,
-              "saving GraphQL during a fresh run leaves the Neo4j password in .env")
+              "saving GraphQL during a fresh run leaves the Neo4j password in .env and does not add Neo4j")
     finally:
         _stop(proc)
         shutil.rmtree(folder, ignore_errors=True)

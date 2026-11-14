@@ -21,7 +21,9 @@ function redactSecrets(text) {
 async function api(path, body) {
   const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
   const j = await r.json();
-  if (!r.ok || j.error) throw new Error(redactSecrets(j.error || r.statusText));
+  // A connection problem is status.error on HTTP 200. Throwing on that field
+  // left the server on the new source and the page on the old one.
+  if (!r.ok) throw new Error(redactSecrets(j.error || r.statusText));
   return j;
 }
 function lighten(hex) { const n = parseInt(hex.slice(1), 16); const [r, g, b] = [n >> 16, (n >> 8) & 255, n & 255]; return (r * 299 + g * 587 + b * 114) / 1000 > 170; }
@@ -919,6 +921,9 @@ function selectSubmenu() {
 function sourceIsGraphQL() {
   return S.source && S.source.kind === 'graphql';
 }
+function sourceIsNeo4j() {
+  return S.source && S.source.kind === 'neo4j';
+}
 function backgroundMenuItems() {
   const items = [
     { label: 'Select', icon: 'Select', sub: selectSubmenu },
@@ -929,7 +934,7 @@ function backgroundMenuItems() {
     '-', { label: 'Refresh layout', act: () => runLayout() }, { label: 'Edit layout settings', act: () => openPanel('layout') },
     '-', { label: 'Collapse all groups', disabled: !S.activeRule, act: () => setAllGroups(false) }, { label: 'Expand all groups', disabled: !S.activeRule, act: () => setAllGroups(true) },
   ];
-  if (!sourceIsGraphQL()) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) });
+  if (sourceIsNeo4j()) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) });
   return items;
 }
 async function expandSubmenu(nodes) {
@@ -951,7 +956,7 @@ function nodeMenuItems(node) {
     { label: 'Select', icon: 'Select', sub: () => { const nb = nodes.neighborhood().nodes(); const cats = {}; nb.forEach(n => { cats[n.data('category')] = (cats[n.data('category')] || 0) + 1; });
       return [{ label: 'All neighbors', right: String(nb.length), act: () => nodes.union(nb).select() }, '-', { header: 'Neighbors by node category' }, ...Object.keys(cats).sort().map(c => ({ html: catChip(c), right: String(cats[c]), act: () => nb.filter(n => n.data('category') === c).select() }))]; } },
   ];
-  if (!sourceIsGraphQL()) items.push({ label: 'Queries', icon: 'CodeBraces', sub: () => [{ label: 'Cypher for this selection…', act: () => openCodeQuery(`MATCH (n)-[r]-(m) WHERE elementId(n) IN ${JSON.stringify(nodes.map(n => n.id()))}\nRETURN n, r, m LIMIT 100`) }] });
+  if (sourceIsNeo4j()) items.push({ label: 'Queries', icon: 'CodeBraces', sub: () => [{ label: 'Cypher for this selection…', act: () => openCodeQuery(`MATCH (n)-[r]-(m) WHERE elementId(n) IN ${JSON.stringify(nodes.map(n => n.id()))}\nRETURN n, r, m LIMIT 100`) }] });
   items.push(
     '-', { label: pinned ? 'Unpin' : 'Pin', icon: 'PinOutline', act: () => { nodes.forEach(n => n.data('pinned', !pinned)); R.redraw(); markDirty(); } },
     { label: 'Remove from visualization', icon: 'MinusCircleOutline', act: () => removeEles(nodes) },
@@ -1034,7 +1039,12 @@ function openAdvancedSearch() {
   go();
 }
 function openCodeQuery(text = 'MATCH (a:AWSAccount)-[r:RESOURCE]->(b:AWSS3Bucket)\nRETURN a, r, b LIMIT 50') {
-  if (sourceIsGraphQL()) { toast('Cypher runs on the Neo4j source. Switch the data source to write a statement.'); return; }
+  if (!sourceIsNeo4j()) {
+    toast(sourceIsGraphQL()
+      ? 'Cypher runs on the Neo4j source. Switch the data source to write a statement.'
+      : 'Cypher runs on a Neo4j connection.');
+    return;
+  }
   const bg = modal('Code a query', `<div class="section-d">Read-only Cypher. Write clauses (CREATE, MERGE, SET, DELETE, …) are refused, and every query runs in a READ transaction.</div>
     <textarea class="cypher" data-cq="1" spellcheck="false">${esc(text)}</textarea><div data-cqout="1"></div>`,
     `<input type="text" data-cqname="1" placeholder="Name to save locally" style="margin-right:auto;padding:7px;border:1px solid #c8c8c8;border-radius:3px"><button class="btn outline" data-cqsave="1">Save</button><button class="btn outline" data-cqprev="1">Preview</button><button class="btn primary" data-cqadd="1">Add to visualization</button>`, { width: 820 });
@@ -1292,7 +1302,7 @@ function toggleTheme() { document.body.classList.toggle('dark'); localStorage.se
 const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
-  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => { if (sourceIsGraphQL()) { toast('Saved queries are Cypher. They run on the Neo4j source.'); return; } openPanel('queries'); }, 'data-model': openDataModel, 'help': openHelp,
+  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => { if (!sourceIsNeo4j()) { toast(sourceIsGraphQL() ? 'Saved queries are Cypher. They run on the Neo4j source.' : 'Saved queries are Cypher. They run on a Neo4j connection.'); return; } openPanel('queries'); }, 'data-model': openDataModel, 'help': openHelp,
   'connection-neo4j': () => openConnection('neo4j'),
   'connection-graphql': () => openConnection('graphql'),
   'diagnostics': openDiagnostics,
@@ -1590,6 +1600,7 @@ async function refreshAfterConnectionSave(st) {
       catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
       initStyles();
       if (window.R) restyle();
+      if (S.rightPanel) renderRightPanel();
     }
     await refreshConnectionLinks();
   } catch (e) {
@@ -1758,7 +1769,8 @@ function rememberCounts(st) {
   };
 }
 function connectionText(st) {
-  const src = st.source || { label: 'Neo4j', kind: 'neo4j' };
+  const src = st.source || { label: 'No connection', kind: 'none' };
+  if (src.kind === 'none') return st.error ? redactSecrets(st.error) : 'No data connection. Use Add Neo4j or Add GraphQL.';
   if (src.kind === 'graphql') {
     const counts = st.nodes == null ? 'instances load as you explore' : `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges`;
     return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + redactSecrets(st.error) : ''}`;
@@ -1777,20 +1789,23 @@ function paintSource(st) {
   const input = $('#search-input');
   if (input) input.title = text;
   const gql = S.source.kind === 'graphql';
+  const neo = S.source.kind === 'neo4j';
   const kicker = $('#land-kicker');
-  if (kicker) kicker.textContent = gql ? `Read-only ${S.source.label}` : 'Read-only Neo4j';
+  if (kicker) kicker.textContent = gql ? `Read-only ${S.source.label}` : (neo ? 'Read-only Neo4j' : 'No data connection');
   const lead = $('#land-lead');
   if (lead) lead.textContent = gql
     ? 'Search a node or open the data model. Results stay in this view. Nothing is copied into Neo4j.'
-    : 'Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.';
+    : (neo
+      ? 'Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.'
+      : 'Add Neo4j or GraphQL. Nothing is loaded until a connection is saved.');
   const note = $('#land-cypher-note');
-  if (note) note.textContent = gql ? 'Cypher runs on the Neo4j source.' : 'Write one read-only statement.';
+  if (note) note.textContent = neo ? 'Write one read-only statement.' : 'Cypher runs on a Neo4j connection.';
   const landNodes = $('#land-nodes');
   if (landNodes) {
     landNodes.textContent = st.nodes == null ? '—' : Number(st.nodes).toLocaleString();
     landNodes.title = st.nodes == null ? 'Instances load when you search or expand.' : '';
     $('#land-edges').textContent = st.edges == null ? '—' : Number(st.edges || 0).toLocaleString();
-    $('#land-db').textContent = gql ? (S.source.label || '') : (st.database || '');
+    $('#land-db').textContent = gql ? (S.source.label || '') : (neo ? (st.database || '') : '—');
   }
   const err = $('#land-error');
   if (err) {
@@ -1802,13 +1817,13 @@ function paintSource(st) {
   fillSourceSelects();
 }
 function syncSourceActions() {
-  const gql = sourceIsGraphQL();
-  document.querySelectorAll('[data-neo4j-only]').forEach(el => el.classList.toggle('hidden', gql));
-  if (gql && S.searchKind === 'edge') {
+  const neo = S.source && S.source.kind === 'neo4j';
+  document.querySelectorAll('[data-neo4j-only]').forEach(el => el.classList.toggle('hidden', !neo));
+  if (!neo && S.searchKind === 'edge') {
     S.searchKind = 'node';
     $$('.sd-head [data-kind]').forEach(x => x.classList.toggle('on', x.dataset.kind === 'node'));
   }
-  if (gql && S.rightPanel === 'queries') openPanel('queries');
+  if (!neo && S.rightPanel === 'queries') openPanel('queries');
 }
 function fillSourceSelects() {
   const many = (S.sources || []).length > 1;
@@ -1823,10 +1838,16 @@ function fillSourceSelects() {
   if (lab) lab.classList.toggle('hidden', !many);
 }
 let sourceSwitching = false;
+let sourceWanted = null;
 async function switchSource(id) {
-  if (!id || sourceSwitching || (S.source && id === S.source.id)) { fillSourceSelects(); return; }
+  if (!id) { fillSourceSelects(); return; }
+  // A second change while the schema is loading used to be ignored, and the
+  // picker snapped back. Keep the latest choice and apply it when this one ends.
+  if (sourceSwitching) { sourceWanted = id; return; }
+  if (S.source && id === S.source.id) { fillSourceSelects(); return; }
   const dirty = window.cy && typeof cy.nodes === 'function' && cy.nodes().length > 0;
   if (dirty && !confirm('Switching the data source clears the canvas. The other source is left as it is.')) {
+    sourceWanted = null;
     fillSourceSelects();
     return;
   }
@@ -1844,6 +1865,8 @@ async function switchSource(id) {
     catch (e) { S.schema = { categories: {}, types: {}, links: [] }; toast(e.message, 5000); }
     initStyles();
     if (window.R) restyle();
+    // Design reads the schema already in memory. Replace it when the source changes.
+    if (S.rightPanel) renderRightPanel();
     toast(S.source.label);
   } catch (e) {
     toast(e.message, 4000);
@@ -1851,6 +1874,9 @@ async function switchSource(id) {
   } finally {
     sourceSwitching = false;
     stopWait();
+    const next = sourceWanted;
+    sourceWanted = null;
+    if (next && (!S.source || next !== S.source.id)) switchSource(next);
   }
 }
 async function boot() {

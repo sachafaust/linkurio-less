@@ -17,7 +17,8 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     NEO4J_DATABASE  neo4j
     GX_ENV          path to a different .env file
     --fresh         this process starts with no Neo4j and no GraphQL connection.
-                    The saved .env is left as it is for the next normal start.
+                    The page lists no Neo4j source until one is saved. The saved
+                    .env is left as it is for the next normal start.
     HOST / PORT     127.0.0.1 / 8744
     SEARCH_FULLTEXT_INDEX  name of a Neo4j full-text index for search (auto-detects "gx_search",
                     made by tools/create_fulltext_index.py)
@@ -1177,21 +1178,33 @@ SOURCE_METHODS = (
 
 
 def bind_sources(graph, config):
-    """Neo4j plus any configured GraphQL source. The active source starts as Neo4j."""
+    """Configured sources only. Neo4j without a password is not a source.
+
+    The page can still open. Add Neo4j or Add GraphQL creates the first source.
+    When Neo4j is configured it stays active across a GraphQL save. When it is
+    not, the GraphQL source that was just saved becomes the active one.
+    """
     global GRAPH, SOURCES, ACTIVE
     GRAPH = graph
-    sources = {"neo4j": graph}
+    sources = {}
+    if graph is not None and not isinstance(graph, UnconfiguredNeo4j):
+        sources["neo4j"] = graph
     for spec in resolve_graphql_sources(config):
         sources[spec["id"]] = GraphQLSource(spec)
         print(f"GraphQL source {spec['label']} ({spec['adapter']}) at {urlparse(spec['endpoint']).netloc}.")
     SOURCES = sources
-    if ACTIVE not in SOURCES:
-        ACTIVE = "neo4j"
+    if ACTIVE not in sources:
+        if "neo4j" in sources:
+            ACTIVE = "neo4j"
+        elif sources:
+            ACTIVE = next(iter(sources))
+        else:
+            ACTIVE = ""
 
 
 def current():
     if SOURCES:
-        return SOURCES.get(ACTIVE) or SOURCES.get("neo4j") or GRAPH
+        return SOURCES.get(ACTIVE) or SOURCES.get("neo4j") or next(iter(SOURCES.values()))
     return GRAPH
 
 
@@ -1244,6 +1257,17 @@ def _scrub_public(value, secrets=()):
 def public_status(consume=False):
     """Status for the active source, plus the list of sources. No token."""
     src = current()
+    if isinstance(src, UnconfiguredNeo4j) or src is None:
+        message = getattr(src, "message", None) or "No data connection. Use Add Neo4j or Add GraphQL."
+        status = {
+            "connected": False, "read_only": True,
+            "uri": "", "database": "", "server": "",
+            "nodes": None, "edges": None, "error": message,
+            "budget": budget_payload(consume_created=consume),
+            "source": {"id": "", "label": "No connection", "kind": "none"},
+            "sources": source_catalog(),
+        }
+        return _scrub_public(status, _secret_values())
     kind = getattr(src, "kind", "neo4j")
     try:
         if kind == "neo4j":
