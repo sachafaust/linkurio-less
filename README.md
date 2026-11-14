@@ -55,7 +55,7 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 
 ## Your own Neo4j
 
-Copy `.env.example` to `.env` (gitignored) or export the same variables. The environment wins over `.env`. Use a user with the reader role. A bolt URI that already contains a user or password is refused.
+Copy `.env.example` to `.env` (gitignored) or export the same variables. The environment wins over `.env`. Use a user with the reader role. A bolt URI that already contains a user or password is refused. `NEO4J_PASSWORD` may be empty when Neo4j has no password. Leave the variable out only when it is unset; `run_local.py` then asks, and Enter sends an empty password.
 
 ```bash
 NEO4J_URI=bolt://127.0.0.1:7687

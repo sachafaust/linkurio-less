@@ -122,7 +122,11 @@ def redact_uri(uri):
 
 
 def neo4j_settings(environ=None, path=None):
-    """Read the connection settings. Raises Neo4jConfigError when the password is missing."""
+    """Read the connection settings. Raises Neo4jConfigError when the password is unset.
+
+    An empty password is a real password and is sent to Neo4j unchanged. Only a
+    missing NEO4J_PASSWORD is refused.
+    """
     environ = os.environ if environ is None else environ
     where = load_credential_env(path=path, environ=environ)
     uri = (environ.get("NEO4J_URI") or "bolt://localhost:7687").strip()
@@ -136,10 +140,10 @@ def neo4j_settings(environ=None, path=None):
         raise Neo4jConfigError(
             "NEO4J_URI includes a user or a password. Keep the URI as the host, "
             "and set NEO4J_USER and NEO4J_PASSWORD.")
-    if password is None or password.strip() == "":
+    if password is None:
         raise Neo4jConfigError(
             "NEO4J_PASSWORD is not set. Export it, or put it in "
-            f"{where.name} (gitignored). The explorer reads NEO4J_URI, NEO4J_USER, "
-            "NEO4J_PASSWORD, and NEO4J_DATABASE.",
+            f"{where.name} (gitignored). An empty value is allowed when Neo4j has no password. "
+            "The explorer reads NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, and NEO4J_DATABASE.",
             missing_password=True)
     return Settings(uri, user, password, database)

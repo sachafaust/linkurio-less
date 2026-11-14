@@ -7,7 +7,7 @@ Cypher is also screened for write clauses before it is sent.
 Config (environment variables; a gitignored .env fills any of the four that are unset):
     NEO4J_URI       bolt://localhost:7687   (host only: put the user and password in the variables below)
     NEO4J_USER      neo4j
-    NEO4J_PASSWORD  (required)
+    NEO4J_PASSWORD  (required; empty is allowed when Neo4j has no password)
     NEO4J_DATABASE  neo4j
     GX_ENV          path to a different .env file
     HOST / PORT     127.0.0.1 / 8744
