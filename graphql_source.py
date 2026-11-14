@@ -7,8 +7,8 @@ file. Wiz exchanges the client id and client secret for an access token.
 The GraphQL call sends that token as Authorization: Bearer and does not send
 the client id. Mutations are refused before that request is built.
 
-Wiz is the first adapter: graphSearch, the ``_vertexID`` id field, and cursor
-pages. A source with no adapter still exposes the data model from
+Wiz is the first adapter: graphSearch, entity id lookup, and cursor pages.
+A source with no adapter still exposes the data model from
 introspection and does not invent an instance query.
 """
 from __future__ import annotations
@@ -87,8 +87,10 @@ fragment TypeRef on __Type {
 }
 """
 
+# Wiz declares graphSearch.query as GraphEntityQueryInput! A nullable $query is
+# rejected as the wrong type for that variable. $after stays nullable: the first page sends null.
 SEARCH_QUERY = """
-query GraphSearch($query: GraphEntityQueryInput, $projectId: String!, $first: Int, $after: String) {
+query GraphSearch($query: GraphEntityQueryInput!, $projectId: String!, $first: Int, $after: String) {
   graphSearch(query: $query, projectId: $projectId, first: $first, after: $after) {
     totalCount
     pageInfo { hasNextPage endCursor }
@@ -98,7 +100,7 @@ query GraphSearch($query: GraphEntityQueryInput, $projectId: String!, $first: In
 """
 
 DETAIL_QUERY = """
-query GraphSearch($query: GraphEntityQueryInput, $projectId: String!, $first: Int, $after: String) {
+query GraphSearch($query: GraphEntityQueryInput!, $projectId: String!, $first: Int, $after: String) {
   graphSearch(query: $query, projectId: $projectId, first: $first, after: $after) {
     totalCount
     pageInfo { hasNextPage endCursor }
@@ -695,9 +697,17 @@ class GraphQLClient:
 
     def _scrub(self, text):
         text = str(text or "")
+        secrets = []
+        client = self.client_id or ""
         for secret in self._secret_material():
-            if secret in text:
-                text = text.replace(secret, "[redacted]")
+            if not secret or secret == client:
+                continue
+            diagnostics.note_secret(secret)
+            secrets.append(secret)
+        text = diagnostics.redact(text, secrets)
+        # The client id stays on the connection form. Error text still hides it.
+        if len(client) >= 4 and client in text:
+            text = text.replace(client, "[redacted]")
         return text[:500]
 
     def _note(self, message):
@@ -994,9 +1004,10 @@ def _graph_search(payload):
 class WizAdapter:
     """Wiz graphSearch. One cursor page is fetched at a time.
 
-    Neighbors use a relationship clause in both directions. The edge type is
-    ``related`` because graphSearch returns the entities, not the relationship
-    name. A tenant that rejects the clause returns that error to the page.
+    Neighbors use the relationship clause the Wiz clients send: the outer
+    entity is the neighbor, and ``with`` selects the node on the canvas by id.
+    The canvas edge type is ``related`` because the result is the entity, not
+    the relationship name.
     """
 
     def __init__(self, source):
@@ -1081,27 +1092,24 @@ class WizAdapter:
             return {"nodes": []}
         found = []
         # One page per chunk. The caller asks for the nodes it is opening, not the graph.
+        # The id on the canvas is the entity id graphSearch returned.
         for start in range(0, min(len(wanted), 200), 50):
             chunk = wanted[start:start + 50]
-            query = {"select": True, "where": {"_vertexID": {"EQUALS": chunk}}}
+            query = {"select": True, "where": {"id": {"EQUALS": chunk}}}
             payload = self._run(query, self._variables(query, len(chunk)), full=True)
             paths, _, _, _ = _graph_search(payload)
             found.extend(entity for path in paths for entity in path if str(entity.get("id")) in set(chunk))
         return {"nodes": [_entity_node(entity, full=True) for entity in found]}
 
     def _neighbor_query(self, anchor, categories=None, types=None, q=None):
+        # Same shape as the Wiz clients: the neighbor is the outer entity, and
+        # `with` names the node already on the canvas. Relationship type is
+        # {EXACT: [name]}. A missing type asks for every relationship.
         rel_types = [item for item in (types or []) if item and item != "related"]
+        clause = {"with": {"where": {"id": {"EQUALS": [anchor]}}}}
         if rel_types:
-            clause = [{"type": name, "reverse": direction} for name in rel_types for direction in (False, True)]
-        else:
-            clause = [{"reverse": False}, {"reverse": True}]
-        query = {
-            "select": True,
-            "relationships": [{
-                "type": clause,
-                "with": {"select": False, "where": {"_vertexID": {"EQUALS": [anchor]}}},
-            }],
-        }
+            clause["type"] = {"EXACT": rel_types}
+        query = {"select": True, "relationships": [clause]}
         if categories:
             query["type"] = list(categories)
         text = str(q or "").strip()

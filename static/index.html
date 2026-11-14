@@ -32,8 +32,8 @@
       </p>
       <div class="land-grid">
         <button class="land-act" data-act="focus-search"><i data-icon="Magnify"></i><span><b>Search</b><small>Find a node or relationship and place it on the canvas.</small></span></button>
-        <button class="land-act" data-act="explore-queries"><i data-icon="CodeBraces"></i><span><b>Queries</b><small>Open a saved query and add its result.</small></span></button>
-        <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small id="land-cypher-note">Write one read-only statement.</small></span></button>
+        <button class="land-act" data-act="explore-queries" data-neo4j-only><i data-icon="CodeBraces"></i><span><b>Queries</b><small>Open a saved query and add its result.</small></span></button>
+        <button class="land-act" data-act="code-query" data-neo4j-only><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small id="land-cypher-note">Write one read-only statement.</small></span></button>
         <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
       </div>
       <div class="land-connect" id="land-connect">
@@ -49,7 +49,7 @@
     <button data-act="main-menu" title="Menu"><i data-icon="Menu"></i></button>
     <button data-act="undo" id="btn-undo" title="Undo (Ctrl+Z)"><i data-icon="ArrowLeft"></i></button>
     <button data-act="redo" id="btn-redo" title="Redo (Ctrl+Y)"><i data-icon="ArrowRight"></i></button>
-    <button data-act="code-query" title="Code a query"><i data-icon="CodeBracesBox"></i></button>
+    <button data-act="code-query" data-neo4j-only title="Code a query"><i data-icon="CodeBracesBox"></i></button>
     <button data-act="more-menu" title="More"><i data-icon="DotsHorizontal"></i></button>
   </div>
   <button class="card" id="open-selpanel" data-act="open-selpanel" title="Open selection panel"><i data-icon="DockLeft"></i></button>
@@ -60,7 +60,7 @@
     <button id="search-clear" title="Clear"><i data-icon="Close"></i></button>
     <div id="search-dd" class="card hidden">
       <div class="sd-head">
-        <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span>
+        <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a><span data-neo4j-only> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span></span>
         <span class="sd-scope"><a data-scope="all" class="on">ALL</a> - <a data-scope="local">LOCAL</a></span>
         <a class="sd-adv" data-act="advanced-search">Advanced</a>
       </div>

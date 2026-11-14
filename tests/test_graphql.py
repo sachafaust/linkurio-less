@@ -2,11 +2,15 @@
 """GraphQL source: queries only, introspection, paging, and the source switch.
 
 The live section starts a mock GraphQL API and a second explorer on free ports.
-It does not wipe Neo4j and it does not use ports 8744 or 8755. If Neo4j is down,
-the switch still runs and the count comparison is skipped.
+It does not wipe Neo4j and it does not use ports 8744, 8755, 8766, or 8791.
+If Neo4j is down, the switch still runs and the count comparison is skipped.
+
+The last section starts the gx-graphql fixture container when Docker is running
+and checks search, expand, and a minted access token against it.
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -45,7 +49,7 @@ from graphql_source import (  # noqa: E402
 
 TOKEN = "graphql-test-token-do-not-log"
 FAILS = []
-BUSY_PORTS = {8744, 8755}
+BUSY_PORTS = {8744, 8755, 8766, 8791}
 
 
 def check(name, cond, detail=""):
@@ -161,6 +165,32 @@ def graph_page(entities, has_next, cursor, total):
         "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
         "nodes": [{"entities": entities}],
     }}}
+
+
+def test_search_document():
+    """Wiz graphSearch.query is GraphEntityQueryInput!. A nullable variable is the wrong type."""
+    print("search document")
+    for label, document in (("search", gql.SEARCH_QUERY), ("detail", gql.DETAIL_QUERY)):
+        check(f"{label} query variable is required",
+              "$query: GraphEntityQueryInput!" in document,
+              document.split("{", 1)[0].strip())
+    spec = importlib.util.spec_from_file_location("graphql_fixture", ROOT / "tools" / "graphql_fixture.py")
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    nullable = gql.SEARCH_QUERY.replace("GraphEntityQueryInput!", "GraphEntityQueryInput")
+    code, body = fixture.answer(nullable, {"query": {"select": True}, "projectId": "*", "first": 5})
+    message = json.dumps(body)
+    check("fixture rejects a nullable query variable",
+          code == 200 and "errors" in body and "GraphEntityQueryInput!" in message and "data" not in body,
+          message[:300])
+    code, body = fixture.answer(gql.SEARCH_QUERY, {
+        "query": {"select": True, "where": {"name": {"CONTAINS": ["alpha"]}}},
+        "projectId": "*", "first": 5,
+    })
+    entities = (((body.get("data") or {}).get("graphSearch") or {}).get("nodes") or [{}])[0].get("entities") or []
+    check("fixture accepts the required query variable",
+          code == 200 and entities and entities[0].get("id") == "alpha-1" and "errors" not in body,
+          json.dumps(body)[:300])
 
 
 def test_wiz_auth():
@@ -355,8 +385,8 @@ def test_paging_and_wiz_shape():
           f"{len(calls)} calls, {len(page['nodes'])} nodes, more={page['more']}")
     calls.clear()
     looked = src.nodes(["alpha-1", "beta-9"])
-    sent = calls[0]["query"]["where"]["_vertexID"]["EQUALS"]
-    check("id lookup sends _vertexID EQUALS as a list and asks for properties",
+    sent = calls[0]["query"]["where"]["id"]["EQUALS"]
+    check("id lookup sends id EQUALS as a list and asks for properties",
           sent == ["alpha-1", "beta-9"] and "properties" in calls[0]["document"]
           and looked["nodes"][0]["partial"] is False,
           safe(sent))
@@ -682,8 +712,9 @@ def start_mock():
             if variables.get("after") == "p2":
                 return 200, graph_page([entities[2]], False, None, 2)
             return 200, graph_page([entities[1]], True, "p2", 2)
-        if "_vertexID" in where:
-            wanted = set(where["_vertexID"].get("EQUALS") or [])
+        if "id" in where or "_vertexID" in where:
+            spec = where.get("id") or where.get("_vertexID") or {}
+            wanted = set(spec.get("EQUALS") or [])
             found = [item for item in entities if item["id"] in wanted]
             return 200, graph_page(found, False, None, len(found))
         found = [item for item in entities if not text or text.lower() in item["name"].lower()]
@@ -893,6 +924,109 @@ def test_source_switch():
             pass
 
 
+def _hide_fixture(text):
+    shown = safe(text)
+    for secret in ("tinkerlab-graphql", "tinkerlab-access"):
+        shown = shown.replace(secret, "[redacted]")
+    return shown
+
+
+def test_log_filter():
+    """Passwords, client secrets, and bearer tokens stay out of the log."""
+    print("log filter")
+    import diagnostics
+    secret = "log-secret-zz-9f3a"
+    token = "log-token-zz-9f3a"
+    previous = os.environ.get("GRAPHQL_TOKEN")
+    os.environ["GRAPHQL_TOKEN"] = token
+    try:
+        diagnostics.note_secret(secret)
+        diagnostics.record("explorer", "token expired")
+        diagnostics.record("explorer", "Data connection saved.")
+        diagnostics.record("server", f"client id stays visible: gx-client-zz password={secret}")
+        diagnostics.record("explorer", f'Authorization: Bearer {token} GRAPHQL_TOKEN={token}')
+        diagnostics.record("explorer", '{"client_secret": "%s", "access_token": "%s"}' % (secret, token))
+        diagnostics.record("server", "bolt://reader:%s@127.0.0.1:7687" % secret)
+        rows = diagnostics.snapshot()
+        blob = "\n".join(row["message"] for row in rows)
+        leaked = [item for item in (secret, token) if item in blob]
+        check("the log keeps ordinary words and removes credential values",
+              not leaked
+              and "token expired" in blob
+              and "Data connection saved." in blob
+              and "gx-client-zz" in blob
+              and "password=[redacted]" in blob
+              and "Bearer [redacted]" in blob
+              and "bolt://reader:[redacted]@127.0.0.1:7687" in blob,
+              safe(blob[-500:]).replace(secret, "[redacted]").replace(token, "[redacted]"))
+    finally:
+        if previous is None:
+            os.environ.pop("GRAPHQL_TOKEN", None)
+        else:
+            os.environ["GRAPHQL_TOKEN"] = previous
+
+
+def test_docker_fixture():
+    """Search and expand against the gx-graphql container. Skip when Docker is down."""
+    print("docker fixture")
+    import run_local
+    if not run_local.docker_daemon():
+        print("  skip docker GraphQL fixture (Docker is not running)")
+        return
+    try:
+        endpoint = run_local.start_graphql_fixture()
+    except RuntimeError as exc:
+        check("gx-graphql fixture starts", False, _hide_fixture(exc)[:300])
+        return
+    check("gx-graphql fixture starts", endpoint.endswith("/graphql"))
+    client = GraphQLClient(
+        endpoint, token=None, client_id=run_local.GQL_CLIENT_ID,
+        client_secret=run_local.GQL_CLIENT_SECRET, auth_url=run_local.graphql_auth_url(),
+        timeout=15, max_retries=1, backoff=0, result_ttl=0, schema_ttl=0)
+    source = GraphQLSource({
+        "id": "wiz", "label": "Wiz fixture", "endpoint": endpoint, "adapter": "wiz",
+        "auth_url": run_local.graphql_auth_url(), "client_id": run_local.GQL_CLIENT_ID,
+    }, client=client)
+    status = source.status()
+    blob = json.dumps(status)
+    check("fixture status is connected with a minted token",
+          status.get("connected") is True and status.get("adapter") == "wiz"
+          and "tinkerlab-graphql" not in blob and "tinkerlab-access" not in blob,
+          _hide_fixture(blob)[:300])
+    schema = source.schema()
+    categories = schema.get("categories") or {}
+    owner = ((categories.get("Widget") or {}).get("props") or {}).get("owner")
+    check("fixture data model comes from introspection",
+          "Widget" in categories and owner == "-> Widget",
+          _hide_fixture(sorted(categories)))
+    found = source.search(q="alpha", limit=5)
+    nodes = found.get("nodes") or []
+    check("fixture search returns alpha",
+          bool(nodes) and nodes[0]["id"] == "alpha-1" and nodes[0]["partial"] is True,
+          _hide_fixture(nodes[:1]))
+    first = source.expand(["alpha-1"], [], limit=1)
+    second = source.expand(["alpha-1"], ["alpha-1", "beta-2"], limit=1)
+    check("fixture expand pages neighbors",
+          [node["id"] for node in first.get("nodes") or []] == ["beta-2"]
+          and first.get("more") is True
+          and first["edges"][0]["type"] == "related"
+          and first["edges"][0]["id"] == "alpha-1:related:beta-2"
+          and [node["id"] for node in second.get("nodes") or []] == ["gamma-3"],
+          _hide_fixture({"first": first.get("nodes"), "second": second.get("nodes"), "more": first.get("more")}))
+    details = source.nodes(["alpha-1"])
+    props = ((details.get("nodes") or [{}])[0]).get("props") or {}
+    check("fixture node load returns properties",
+          props.get("region") == "us2" and props.get("note") == "full"
+          and details["nodes"][0]["partial"] is False,
+          _hide_fixture(props))
+    refused = False
+    try:
+        source.cypher("MATCH (n) RETURN n")
+    except ValueError as exc:
+        refused = "no Cypher" in str(exc)
+    check("fixture source has no Cypher", refused)
+
+
 def main():
     saved = {key: os.environ.get(key) for key in list(os.environ) if key.startswith("GRAPHQL_") or key in ("GX_ENV", "GX_CONFIG")}
     for key in list(saved):
@@ -901,6 +1035,7 @@ def main():
     empty.close()
     os.environ["GX_ENV"] = empty.name
     try:
+        test_search_document()
         test_wiz_auth()
         test_mutations()
         test_introspection_model()
@@ -909,6 +1044,8 @@ def main():
         test_cache_and_inflight()
         test_config_and_generic()
         test_source_switch()
+        test_log_filter()
+        test_docker_fixture()
     finally:
         os.environ.pop("GX_ENV", None)
         for key in list(os.environ):

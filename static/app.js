@@ -8,10 +8,20 @@ const svgIcon = (name, fill = 'currentColor') => `<svg viewBox="0 0 24 24"><path
 const ico = name => `<i data-icon="${name}">${svgIcon(name)}</i>`;
 function paintIcons(root = document) { $$('i[data-icon]', root).forEach(i => { if (!i.firstChild) i.innerHTML = svgIcon(i.dataset.icon); }); }
 function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), ms); }
+// Logs and error text. Graph properties are left as the source returned them.
+function redactSecrets(text) {
+  return String(text == null ? '' : text)
+    .replace(/(authorization\s*[:=]\s*"?(?:bearer|basic)\s+)([^\s"]+)/gi, '$1[redacted]')
+    .replace(/(^|[^A-Za-z0-9_])((?:bearer|basic)\s+)([A-Za-z0-9\-._~+/]{8,}={0,2})/gi, '$1$2[redacted]')
+    .replace(/(^|[^A-Za-z0-9_])((?:access_token|refresh_token|id_token|client_secret|password|passwd|token|secret)=)([^&\s#]+)/gi, '$1$2[redacted]')
+    .replace(/("(?:access_token|refresh_token|id_token|client_secret|password|passwd|token|secret|authorization)"\s*:\s*")([^"\\]*)(")/gi, '$1[redacted]$3')
+    .replace(/(^|[^A-Za-z0-9_])((?:NEO4J_PASSWORD|GRAPHQL_TOKEN|GRAPHQL_CLIENT_SECRET)\s*=\s*)(\S+)/gi, '$1$2[redacted]')
+    .replace(/((?:bolt|neo4j)(?:\+s|\+ssc)?:\/\/[^/\s:@]+:)([^@\s]+)(@)/gi, '$1[redacted]$3');
+}
 async function api(path, body) {
   const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
   const j = await r.json();
-  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  if (!r.ok || j.error) throw new Error(redactSecrets(j.error || r.statusText));
   return j;
 }
 function lighten(hex) { const n = parseInt(hex.slice(1), 16); const [r, g, b] = [n >> 16, (n >> 8) & 255, n & 255]; return (r * 299 + g * 587 + b * 114) / 1000 > 170; }
@@ -906,8 +916,11 @@ function selectSubmenu() {
     ...Object.keys(cats).sort().map(c => ({ html: catChip(c), right: String(cats[c]), act: () => selectOnly(nodes.filter(n => n.data('category') === c)) })),
   ];
 }
+function sourceIsGraphQL() {
+  return S.source && S.source.kind === 'graphql';
+}
 function backgroundMenuItems() {
-  return [
+  const items = [
     { label: 'Select', icon: 'Select', sub: selectSubmenu },
     { label: 'Invert selection', icon: 'SwapHorizontal', act: () => { const s = cy.$(':selected'); const all = cy.elements(':visible'); s.unselect(); all.difference(s).nodes().select(); } },
     { label: 'Lasso', icon: 'Lasso', act: () => { S.lassoMode = 'node'; toast('Draw around the nodes to select'); } },
@@ -915,8 +928,9 @@ function backgroundMenuItems() {
     { label: 'Remove filtered items', icon: 'MinusCircleOutline', disabled: !cy.elements('.filtered').length, act: removeFiltered },
     '-', { label: 'Refresh layout', act: () => runLayout() }, { label: 'Edit layout settings', act: () => openPanel('layout') },
     '-', { label: 'Collapse all groups', disabled: !S.activeRule, act: () => setAllGroups(false) }, { label: 'Expand all groups', disabled: !S.activeRule, act: () => setAllGroups(true) },
-    '-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) },
   ];
+  if (!sourceIsGraphQL()) items.push('-', { label: 'Queries', icon: 'CodeBraces', sub: () => S.queries.map(q => ({ label: q.name, act: () => runQueryToGraph(q.cypher) })) });
+  return items;
 }
 async function expandSubmenu(nodes) {
   const r = await api('/api/neighbors', { ids: nodes.map(n => n.id()), visible: realNodes().map(n => n.id()) });
@@ -936,10 +950,12 @@ function nodeMenuItems(node) {
     { label: 'Expand', icon: 'ArrowExpandAll', sub: () => expandSubmenu(nodes), disabled: g },
     { label: 'Select', icon: 'Select', sub: () => { const nb = nodes.neighborhood().nodes(); const cats = {}; nb.forEach(n => { cats[n.data('category')] = (cats[n.data('category')] || 0) + 1; });
       return [{ label: 'All neighbors', right: String(nb.length), act: () => nodes.union(nb).select() }, '-', { header: 'Neighbors by node category' }, ...Object.keys(cats).sort().map(c => ({ html: catChip(c), right: String(cats[c]), act: () => nb.filter(n => n.data('category') === c).select() }))]; } },
-    { label: 'Queries', icon: 'CodeBraces', sub: () => [{ label: 'Cypher for this selection…', act: () => openCodeQuery(`MATCH (n)-[r]-(m) WHERE elementId(n) IN ${JSON.stringify(nodes.map(n => n.id()))}\nRETURN n, r, m LIMIT 100`) }] },
+  ];
+  if (!sourceIsGraphQL()) items.push({ label: 'Queries', icon: 'CodeBraces', sub: () => [{ label: 'Cypher for this selection…', act: () => openCodeQuery(`MATCH (n)-[r]-(m) WHERE elementId(n) IN ${JSON.stringify(nodes.map(n => n.id()))}\nRETURN n, r, m LIMIT 100`) }] });
+  items.push(
     '-', { label: pinned ? 'Unpin' : 'Pin', icon: 'PinOutline', act: () => { nodes.forEach(n => n.data('pinned', !pinned)); R.redraw(); markDirty(); } },
     { label: 'Remove from visualization', icon: 'MinusCircleOutline', act: () => removeEles(nodes) },
-  ];
+  );
   if (g) items.splice(0, 1, { label: S.collapsed.has('open:' + node.id()) ? 'Collapse group' : 'Expand group', icon: 'SelectGroup', act: () => toggleGroup(node.id()) });
   items.push('-', { label: 'Export selection data', icon: 'Download', act: () => openExportData(true) });
   return items;
@@ -980,19 +996,20 @@ async function openSelectiveExpand(nodes, summary = null, preCat = null) {
 function openAdvancedSearch() {
   closeSearch();
   const cats = Object.keys(S.schema?.categories || {}).sort(); const types = Object.keys(S.schema?.types || {}).sort();
+  const gql = sourceIsGraphQL();
   const bg = modal('Advanced search', `<div class="row" style="gap:12px;flex-wrap:wrap">
       <input type="text" data-aq="1" value="${esc($('#search-input').value)}" placeholder="Search text" style="flex:1;min-width:200px;padding:7px;border:1px solid #c8c8c8;border-radius:3px">
-      <select data-akind="1" style="padding:6px"><option value="node">Nodes</option><option value="edge">Edges</option></select>
+      <select data-akind="1" style="padding:6px"><option value="node">Nodes</option>${gql ? '' : '<option value="edge">Edges</option>'}</select>
       <select data-acat="1" style="padding:6px"><option value="">Any category</option>${cats.map(c => `<option>${esc(c)}</option>`).join('')}</select>
       <select data-aprop="1" style="padding:6px"><option value="">Property…</option></select><input type="text" data-aval="1" placeholder="exact value" style="width:130px;padding:7px;border:1px solid #c8c8c8;border-radius:3px">
-      <label class="row" title="Uses the full-text index if configured"><input type="checkbox" data-afz="1"> fuzzy</label></div>
+      ${gql ? '' : '<label class="row" title="Uses the full-text index if configured"><input type="checkbox" data-afz="1"> fuzzy</label>'}</div>
     <div data-ares="1" style="margin-top:10px"></div>`, `<span data-atotal="1" style="margin-right:auto;color:var(--muted);font-size:13px"></span><button class="btn outline" data-apage="-1">‹</button><button class="btn outline" data-apage="1">›</button><button class="btn outline" data-aaddsel="1">Add selected</button><button class="btn primary" data-aadd="1">Add all</button>`, { width: 900 });
   let off = 0, res = [];
   const kindSel = $('[data-akind]', bg), catSel = $('[data-acat]', bg), propSel = $('[data-aprop]', bg);
   const fillCats = () => { const k = kindSel.value; catSel.innerHTML = `<option value="">${k === 'node' ? 'Any category' : 'Any type'}</option>` + (k === 'node' ? cats : types).map(c => `<option>${esc(c)}</option>`).join(''); fillProps(); };
   const fillProps = () => { const c = catSel.value; const props = c && kindSel.value === 'node' ? Object.keys(S.schema.categories[c]?.props || {}).sort() : []; propSel.innerHTML = '<option value="">Property…</option>' + props.map(p => `<option>${esc(p)}</option>`).join(''); };
   async function go() {
-    const k = kindSel.value; const p = new URLSearchParams({ q: $('[data-aq]', bg).value, type: k, limit: 20, offset: off, category: catSel.value, prop: propSel.value, value: $('[data-aval]', bg).value, fuzzy: $('[data-afz]', bg).checked ? '1' : '0' });
+    const k = kindSel.value; const p = new URLSearchParams({ q: $('[data-aq]', bg).value, type: k, limit: 20, offset: off, category: catSel.value, prop: propSel.value, value: $('[data-aval]', bg).value, fuzzy: $('[data-afz]', bg)?.checked ? '1' : '0' });
     try {
       const r = await api('/api/search?' + p);
       res = k === 'node' ? r.nodes : r.edges;
@@ -1002,7 +1019,7 @@ function openAdvancedSearch() {
   }
   const deb = () => { off = 0; clearTimeout(bg._t); bg._t = setTimeout(go, 250); };
   kindSel.onchange = () => { fillCats(); deb(); }; catSel.onchange = () => { fillProps(); deb(); }; propSel.onchange = deb;
-  $$('[data-aq],[data-aval]', bg).forEach(i => i.oninput = deb); $('[data-afz]', bg).onchange = deb;
+  $$('[data-aq],[data-aval]', bg).forEach(i => i.oninput = deb); const fuzzy = $('[data-afz]', bg); if (fuzzy) fuzzy.onchange = deb;
   $$('[data-apage]', bg).forEach(b => b.onclick = () => { off = Math.max(0, off + 20 * +b.dataset.apage); go(); });
   const add = pick => { if (!pick.length) return toast('Nothing selected'); pushUndo(); if (kindSel.value === 'node') addGraph({ nodes: pick, edges: [] }); else addGraph({ nodes: pick.flatMap(e => [e.sourceNode, e.targetNode]), edges: pick }); fetchEdgesAmongVisible(); bg.remove(); runLayout({ fit: true }); };
   $('[data-aadd]', bg).onclick = () => add(res);
@@ -1010,6 +1027,7 @@ function openAdvancedSearch() {
   go();
 }
 function openCodeQuery(text = 'MATCH (a:AWSAccount)-[r:RESOURCE]->(b:AWSS3Bucket)\nRETURN a, r, b LIMIT 50') {
+  if (sourceIsGraphQL()) { toast('Cypher runs on the Neo4j source. Switch the data source to write a statement.'); return; }
   const bg = modal('Code a query', `<div class="section-d">Read-only Cypher. Write clauses (CREATE, MERGE, SET, DELETE, …) are refused, and every query runs in a READ transaction.</div>
     <textarea class="cypher" data-cq="1" spellcheck="false">${esc(text)}</textarea><div data-cqout="1"></div>`,
     `<input type="text" data-cqname="1" placeholder="Name to save locally" style="margin-right:auto;padding:7px;border:1px solid #c8c8c8;border-radius:3px"><button class="btn outline" data-cqsave="1">Save</button><button class="btn outline" data-cqprev="1">Preview</button><button class="btn primary" data-cqadd="1">Add to visualization</button>`, { width: 820 });
@@ -1235,8 +1253,8 @@ function openHelp() {
   modal('Help', `<div style="display:flex;gap:24px"><div style="flex:1"><div class="section-t">Keyboard shortcuts</div><table class="kv">
     ${k('←/↑/→/↓', 'Move camera')}${k('+', 'Zoom in')}${k('-', 'Zoom out')}${k('Ctrl+click', 'Add/remove from selection')}${k('Ctrl+A', 'Select all nodes')}${k('Ctrl+Backspace', 'Remove selection from visualization')}
     ${k('Ctrl+drag', 'Lasso')}${k('Ctrl+Shift+drag', 'Edge lasso')}${k('Shift+click', 'Select direct neighbors')}${k('Ctrl+C', 'Copy selected nodes')}${k('Ctrl+V', 'Paste copied nodes')}${k('Ctrl+Z', 'Undo')}${k('Ctrl+Y', 'Redo')}${k('Double-click', 'Expand node / toggle group')}${k('Esc', 'Clear selection')}</table></div>
-    <div style="flex:1"><div class="section-t">Connection</div><table class="kv" data-conn="1"><tr><td>Loading…</td></tr></table><div class="section-d" style="margin-top:10px">Unofficial Explore-phase prototype inspired by a commercial graph-investigation UI. Not affiliated with or endorsed by its vendor. Read-only access to Neo4j.</div></div></div>`, '', { width: 900 });
-  api('/api/status').then(s => { const t = $('[data-conn]'); if (t) t.innerHTML = Object.entries(s).filter(([a]) => !/token|authorization|password|secret/i.test(a)).map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b && typeof b === 'object' ? JSON.stringify(b) : String(b))}</td></tr>`).join(''); }).catch(e => { const t = $('[data-conn]'); if (t) t.innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; });
+    <div style="flex:1"><div class="section-t">Connection</div><table class="kv" data-conn="1"><tr><td>Loading…</td></tr></table><div class="section-d" style="margin-top:10px">Unofficial Explore-phase prototype inspired by a commercial graph-investigation UI. Not affiliated with or endorsed by its vendor. Read-only. Search, expand, and the data model follow the source you pick. Cypher and saved queries run on Neo4j.</div></div></div>`, '', { width: 900 });
+  api('/api/status').then(s => { const t = $('[data-conn]'); if (t) t.innerHTML = Object.entries(s).filter(([a]) => !/token|authorization|password|secret/i.test(a)).map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(redactSecrets(b && typeof b === 'object' ? JSON.stringify(b) : String(b)))}</td></tr>`).join(''); }).catch(e => { const t = $('[data-conn]'); if (t) t.innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; });
 }
 function sourceMenuItem() {
   if (!S.sources || S.sources.length < 2) return null;
@@ -1267,7 +1285,7 @@ function toggleTheme() { document.body.classList.toggle('dark'); localStorage.se
 const ACTIONS = {
   'main-menu': el => { const r = el.getBoundingClientRect(); showMenu(mainMenuItems(), r.left, r.bottom + 6); },
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
-  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
+  'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => { if (sourceIsGraphQL()) { toast('Saved queries are Cypher. They run on the Neo4j source.'); return; } openPanel('queries'); }, 'data-model': openDataModel, 'help': openHelp,
   'connection-neo4j': () => openConnection('neo4j'),
   'connection-graphql': () => openConnection('graphql'),
   'diagnostics': openDiagnostics,
@@ -1557,33 +1575,40 @@ async function refreshConnectionLinks() {
   if (neo) neo.textContent = n.password_set ? 'Neo4j connection' : 'Add Neo4j';
   if (gql) gql.textContent = g.endpoint ? 'GraphQL connection' : 'Add GraphQL';
 }
+async function refreshAfterConnectionSave(st) {
+  try {
+    await applyServerBudget(st);
+    if (window.cy && typeof cy.nodes === 'function') {
+      try { S.schema = await api('/api/schema'); }
+      catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
+      initStyles();
+      if (window.R) restyle();
+    }
+    await refreshConnectionLinks();
+  } catch (e) {
+    toast(e.message, 4000);
+  }
+}
 async function finishConnectionSave(bg, res) {
   if (canvasDirty()) {
     cy.elements().remove();
     S.undo = []; S.redo = [];
     afterGraphChange();
   }
-  const st = res.status || res;
-  paintSource(st);
-  await applyServerBudget(st);
-  if (window.cy && typeof cy.nodes === 'function') {
-    try { S.schema = await api('/api/schema'); }
-    catch (e) { S.schema = { categories: {}, types: {}, links: [] }; }
-    initStyles();
-    if (window.R) restyle();
-  }
-  await refreshConnectionLinks();
   bg.remove();
   toast('Connection saved');
+  const st = res.status || res;
+  try { paintSource(st); } catch (e) { toast(e.message, 4000); }
+  refreshAfterConnectionSave(st);
 }
 async function showConnectionTest(bg, body) {
   const out = $('[data-cresult]', bg);
   if (out) out.textContent = 'Testing…';
   try {
     const res = await api('/api/connection/test', body);
-    if (out) out.textContent = res.message || (res.ok ? 'Connected.' : 'The connection failed.');
+    if (out) out.textContent = redactSecrets(res.message || (res.ok ? 'Connected.' : 'The connection failed.'));
   } catch (e) {
-    if (out) out.textContent = e.message;
+    if (out) out.textContent = redactSecrets(e.message);
   }
 }
 function wizAuthDefault(endpoint) {
@@ -1706,10 +1731,10 @@ async function openDiagnostics() {
     const source = $('[data-dsource]', bg).value;
     try {
       const res = await api('/api/diagnostics' + (source ? `?source=${encodeURIComponent(source)}` : ''));
-      const lines = (res.entries || []).map(e => `${e.t}  ${e.source}  ${e.message}`);
+      const lines = (res.entries || []).map(e => redactSecrets(`${e.t}  ${e.source}  ${e.message}`));
       $('[data-dlog]', bg).value = lines.join('\n') || 'No log lines yet.';
     } catch (e) {
-      $('[data-dlog]', bg).value = e.message;
+      $('[data-dlog]', bg).value = redactSecrets(e.message);
     }
   };
   $('[data-dsource]', bg).onchange = load;
@@ -1729,9 +1754,9 @@ function connectionText(st) {
   const src = st.source || { label: 'Neo4j', kind: 'neo4j' };
   if (src.kind === 'graphql') {
     const counts = st.nodes == null ? 'instances load as you explore' : `${Number(st.nodes).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges`;
-    return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + st.error : ''}`;
+    return `${src.label} · ${st.endpoint || ''} · ${counts} · read-only${st.error ? ' · ' + redactSecrets(st.error) : ''}`;
   }
-  if (st.nodes == null) return `${st.database || 'Neo4j'} · read-only${st.error ? ' · ' + st.error : ''}`;
+  if (st.nodes == null) return `${st.database || 'Neo4j'} · read-only${st.error ? ' · ' + redactSecrets(st.error) : ''}`;
   return `${st.server || ''} · ${st.database || ''} · ${Number(st.nodes || 0).toLocaleString()} nodes · ${Number(st.edges || 0).toLocaleString()} edges · read-only`;
 }
 function paintSource(st) {
@@ -1739,7 +1764,7 @@ function paintSource(st) {
   S.source = st.source || { id: 'neo4j', label: 'Neo4j', kind: 'neo4j' };
   S.sources = st.sources || [S.source];
   rememberCounts(st);
-  const text = connectionText(st);
+  const text = redactSecrets(connectionText(st));
   const conn = $('#conn');
   if (conn) conn.textContent = text;
   const input = $('#search-input');
@@ -1761,8 +1786,22 @@ function paintSource(st) {
     $('#land-db').textContent = gql ? (S.source.label || '') : (st.database || '');
   }
   const err = $('#land-error');
-  if (err) { err.textContent = st.error || ''; err.classList.toggle('hidden', !st.error); }
+  if (err) {
+    const text = st.error ? redactSecrets(st.error) : '';
+    err.textContent = text;
+    err.classList.toggle('hidden', !text);
+  }
+  syncSourceActions();
   fillSourceSelects();
+}
+function syncSourceActions() {
+  const gql = sourceIsGraphQL();
+  document.querySelectorAll('[data-neo4j-only]').forEach(el => el.classList.toggle('hidden', gql));
+  if (gql && S.searchKind === 'edge') {
+    S.searchKind = 'node';
+    $$('.sd-head [data-kind]').forEach(x => x.classList.toggle('on', x.dataset.kind === 'node'));
+  }
+  if (gql && S.rightPanel === 'queries') openPanel('queries');
 }
 function fillSourceSelects() {
   const many = (S.sources || []).length > 1;

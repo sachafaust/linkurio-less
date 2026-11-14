@@ -43,7 +43,9 @@ python3 run_local.py
 
 That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, browser 7474, password `tinkerlab-test`), wipes it, loads the Cartography fixture snapshot (6,939 nodes / 11,054 relationships), and opens http://127.0.0.1:8744. Ctrl+C stops the explorer. Neo4j keeps running.
 
-`python3 run_local.py --keep-data` leaves the database as it is. `--stop` stops the explorer and the container. `--reset` deletes the container and its volume.
+When `GRAPHQL_ENDPOINT` is unset, the same command starts container `gx-graphql` on 127.0.0.1:8791. That fixture is a small Wiz-shaped graph. The test client is `gx-graphql` and the test secret is `tinkerlab-graphql`. Pick **Wiz fixture** on the page. The fixture has no volume.
+
+`python3 run_local.py --keep-data` leaves the database as it is. `--stop` stops the explorer and both containers. `--reset` deletes the Neo4j container, its volume, and the GraphQL fixture.
 
 | Option | What it does |
 |---|---|
@@ -53,7 +55,7 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 | `--live-scale` | Stream exactly 15,000,000 nodes and 60,000,000 edges. Needs about 16 GB of RAM for Docker and 30 GB of disk. `--nodes` and `--edges` override the totals. |
 | `--max-nodes N --max-edges M` | Fixed safety ceiling. Omit both and the ceiling follows this machine's RAM. |
 | `--port 8755` `--no-browser` `--detach` | Explorer port, skip the browser, run in the background. |
-| `--test` | Budget tests plus the 33 UI checks, then keep serving. `--no-serve` exits after the tests. |
+| `--test` | Budget tests, GraphQL tests (mocked API and the `gx-graphql` fixture), and the 33 UI checks, then keep serving. `--no-serve` exits after the tests. |
 
 ## Your own Neo4j
 
@@ -84,7 +86,7 @@ The first launch writes a canvas working set to `gx.local.json` from CPU and RAM
 
 ## GraphQL source
 
-The page shows one source at a time. GraphQL results stay in the GraphQL view. Wiz is the first adapter (`graphSearch`, `_vertexID`, cursor pages). A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists.
+The page shows one source at a time. Search, expand, filters, layout, and the data model follow that source. Cypher and saved queries stay with Neo4j, and those controls leave the page while a GraphQL source is active. GraphQL results stay in the GraphQL view. Wiz is the first adapter (`graphSearch` with a required `GraphEntityQueryInput`, entity `id`, cursor pages). A generic endpoint exposes the data model from introspection and has no instance search until an adapter exists. `python3 run_local.py` starts the local `gx-graphql` fixture when `GRAPHQL_ENDPOINT` is unset, and `python3 tests/test_graphql.py` checks that fixture when Docker is running.
 
 Set the endpoint in the environment, in `.env`, or with Add GraphQL on the page. Wiz takes `GRAPHQL_CLIENT_ID` and `GRAPHQL_CLIENT_SECRET` and returns an access token from `https://auth.app.wiz.io/oauth/token` (or `auth.app.wiz.us` for a `.wiz.us` host). The body is form fields: `grant_type=client_credentials`, `client_id`, `client_secret`, and `audience=wiz-api`. The GraphQL call sends `Authorization: Bearer` and does not send the client id. A bearer you already have can be saved as `GRAPHQL_TOKEN` when there is no client secret. `GRAPHQL_AUTH_URL` overrides the auth host. The secret and the token stay in the gitignored file or in the environment. `gx.local.json` can name the endpoint and the variable that holds the token. A token or client secret in that file is removed on startup.
 
@@ -105,7 +107,7 @@ Or a `graphql` list in `gx.local.json`:
 
 `GRAPHQL_ENDPOINT` overrides a file entry with the same id. `GRAPHQL_LABEL`, `GRAPHQL_ID`, `GRAPHQL_TOKEN_ENV` (default `GRAPHQL_TOKEN`), and `GRAPHQL_PROJECT_ID` (default `*`) are optional. On a `wiz.io` host the adapter defaults to `wiz`. Any other host defaults to `generic`.
 
-The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. Diagnostics lists the server log and the explorer log with secrets removed.
+The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. The server log, the explorer log, and Diagnostics remove passwords, client secrets, and bearer tokens. The client id stays in the connection form.
 
 ## API
 
@@ -154,12 +156,13 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `neo4j_env.py` | `NEO4J_*` from the environment, then `.env` |
 | `static/app.js` | UI |
 | `static/render.js` | Canvas2D renderer |
-| `run_local.py` | venv, Docker Neo4j, sample load, server |
+| `run_local.py` | venv, Docker Neo4j, GraphQL fixture, sample load, server |
+| `tools/graphql_fixture.py` | Wiz-shaped fixture served by container `gx-graphql` |
 | `data/cartography_styles.json` | category color, icon, caption |
 | `data/queries.json` | built-in queries |
 | `docs/screenshots/` | UI-suite captures |
 | `docs/compare/` | Linkurious comparison sheets |
 | `tests/test_budget.py` | working-set math and a tiny read-only server check |
-| `tests/test_graphql.py` | mocked GraphQL API, paging, and the source switch |
+| `tests/test_graphql.py` | mocked GraphQL API, paging, the source switch, and the Docker fixture |
 | `tests/test_neo4j_env.py` | credential loading |
 | `tests/run_ui_tests.py` | Playwright UI suite. Set `CHROME` to override the browser |

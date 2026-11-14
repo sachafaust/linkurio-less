@@ -1217,16 +1217,21 @@ def _secret_values():
         env_name = getattr(src, "token_env", None)
         if env_name:
             names.add(env_name)
+    for name in names:
+        diagnostics.note_token_env(name)
     # An empty password is not a secret string. Scrubbing "" would blank the page.
-    return [value for name in names if (value := os.environ.get(name))]
+    # The client id is not in this list: the connection form shows it.
+    values = [value for name in names if (value := os.environ.get(name))]
+    for value in values:
+        diagnostics.note_secret(value)
+    return values
 
 
-def _scrub_public(value, secrets):
+def _scrub_public(value, secrets=()):
     if isinstance(value, str):
-        for secret in secrets:
-            if secret and secret in value:
-                value = value.replace(secret, "[redacted]")
-        return value
+        for item in secrets or ():
+            diagnostics.note_secret(item)
+        return diagnostics.redact(value, secrets)
     if isinstance(value, dict):
         return {key: _scrub_public(item, secrets) for key, item in value.items()}
     if isinstance(value, list):
@@ -1578,7 +1583,7 @@ def _test_graphql(graphql):
         message = "token expired"
         ok = False
     except Exception as exc:  # noqa: BLE001
-        message = _test_message(exc, [token, secret, client_id])
+        message = _test_message(exc, [token, secret])
         ok = False
     else:
         message = "GraphQL answered."
@@ -1702,9 +1707,9 @@ def main():
         settings = neo4j_settings()
     except Neo4jConfigError as e:
         if not e.missing_password:
-            print(f"error: {e}", file=sys.stderr)
+            print(f"error: {diagnostics.redact(e)}", file=sys.stderr)
             sys.exit(1)
-        print(f"WARNING: {e}", file=sys.stderr)
+        print(f"WARNING: {diagnostics.redact(e)}", file=sys.stderr)
         print("Neo4j is not configured. Open the page and use Add Neo4j or Add GraphQL.", file=sys.stderr)
         graph = UnconfiguredNeo4j()
     else:
@@ -1716,7 +1721,9 @@ def main():
     if isinstance(graph, Graph):
         try:
             st = GRAPH.status()
-            print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")
+            print(diagnostics.redact(
+                f"Connected to {st['uri']} ({st['server']}), db={st['database']}: "
+                f"{st['nodes']} nodes / {st['edges']} edges. READ-ONLY."))
         except Exception as e:  # noqa: BLE001
             print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}")
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 8744))

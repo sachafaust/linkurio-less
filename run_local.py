@@ -7,7 +7,9 @@ What it does, in order:
   1. checks Python 3.9+ (macOS's built-in /usr/bin/python3 is fine) and Docker (unless you pass --neo4j-uri to use your own Neo4j)
   2. creates .venv/ in this folder and installs requirements.txt (+ requirements-tests.txt with --with-tests/--test)
   3. starts Neo4j 5.26 community in Docker: container "gx-neo4j", volume "gx-neo4j-data", ports bound to
-     127.0.0.1 only, test password "tinkerlab-test"; reuses the container if it already exists
+     127.0.0.1 only, test password "tinkerlab-test"; reuses the container if it already exists.
+     Also starts container "gx-graphql" (a small Wiz-shaped fixture on 127.0.0.1:8791) when
+     GRAPHQL_ENDPOINT is unset, so the page has a GraphQL source beside Neo4j.
   4. loads data (wipes the database first):
        default        the Cartography fixture snapshot (data/cartography-fixtures.json.gz, 6,939 nodes / 11,054 rels,
                       real Cartography schema, produced from Cartography's own demo seeds + test fixtures)
@@ -18,11 +20,12 @@ What it does, in order:
   5. starts server.py on http://127.0.0.1:8744 and opens the browser (Ctrl+C stops the server; Neo4j keeps running)
 
 Other commands:
-  --test        run the budget tests, the UI suite (33 checks) and a quick browser + API benchmark,
-                then keep serving. The UI tests need the synthetic estate, so --test loads --both
-                unless you chose a dataset. With --live-scale, --test runs the budget tests and the
+  --test        run the budget tests, the GraphQL tests (mocked API plus the gx-graphql fixture),
+                the UI suite (33 checks) and a quick browser + API benchmark, then keep serving.
+                The UI tests need the synthetic estate, so --test loads --both unless you chose a
+                dataset. With --live-scale, --test runs the budget tests, the GraphQL tests, and the
                 live-scale checks against the 15M / 60M graph instead of the UI suite.
-  --stop        stop the server and the Neo4j container (data kept)
+  --stop        stop the server, the Neo4j container, and the GraphQL fixture (data kept)
   --reset       remove the container and its volume (all data)
   --status      show what is running
 
@@ -57,6 +60,12 @@ VENV = HERE / ".venv"
 RUN = HERE / ".run"
 CONTAINER, VOLUME, IMAGE = "gx-neo4j", "gx-neo4j-data", "neo4j:5.26-community"
 PASSWORD = "tinkerlab-test"  # test-only password for the throwaway local container
+GQL_CONTAINER = "gx-graphql"
+GQL_IMAGE = "python:3.12-alpine"
+GQL_PORT = 8791
+GQL_CLIENT_ID = "gx-graphql"
+GQL_CLIENT_SECRET = "tinkerlab-graphql"  # test-only secret for the local fixture
+GQL_ACCESS = "tinkerlab-access"
 SYNTH_UNIT = 1099           # nodes in one copy of the synthetic estate
 
 
@@ -182,12 +191,28 @@ def check_docker():
             f"       docker said: {(r.stderr or r.stdout).strip()[:300]}")
 
 
-def container_state():
-    r = docker("inspect", "-f", "{{.State.Status}}|{{range $p, $b := .HostConfig.PortBindings}}{{$p}}={{(index $b 0).HostPort}} {{end}}", CONTAINER, check=False)
+def docker_daemon():
+    """True when the docker CLI can talk to a running daemon."""
+    if not docker_bin():
+        return False
+    return docker("info", "--format", "{{.ServerVersion}}", check=False).returncode == 0
+
+
+def inspect_container(name):
+    r = docker("inspect", "-f", "{{.State.Status}}|{{range $p, $b := .HostConfig.PortBindings}}{{$p}}={{(index $b 0).HostPort}} {{end}}", name, check=False)
     if r.returncode != 0:
         return None, {}
     status, _, ports = r.stdout.strip().partition("|")
-    return status, dict(p.split("=") for p in ports.split())
+    parsed = {}
+    for item in ports.split():
+        if "=" in item:
+            key, value = item.split("=", 1)
+            parsed[key] = value
+    return status, parsed
+
+
+def container_state():
+    return inspect_container(CONTAINER)
 
 
 def mem_mb(text):
@@ -257,6 +282,89 @@ def start_neo4j(args):
     say(f"waiting for Neo4j at {uri} ...")
     neo4j_ready(uri, PASSWORD, args.wait)
     return uri, PASSWORD
+
+
+def graphql_endpoint(port=GQL_PORT):
+    return f"http://127.0.0.1:{port}/graphql"
+
+
+def graphql_auth_url(port=GQL_PORT):
+    return f"http://127.0.0.1:{port}/oauth/token"
+
+
+def _graphql_container_ok(port):
+    status, ports = inspect_container(GQL_CONTAINER)
+    if not status:
+        return False
+    mounted = docker("inspect", "-f", "{{range .Mounts}}{{.Destination}} {{end}}", GQL_CONTAINER, check=False)
+    host_port = ports.get("8791/tcp")
+    return host_port == str(port) and "/fixture.py" in (mounted.stdout or "")
+
+
+def start_graphql_fixture(port=GQL_PORT):
+    """Start or reuse gx-graphql and return its GraphQL URL.
+
+    The container is stateless. A container created with a different port or
+    without the fixture script is replaced. Neo4j is left alone.
+    """
+    if not docker_daemon():
+        raise RuntimeError("Docker is not running, so the GraphQL fixture container cannot start.")
+    script = HERE / "tools" / "graphql_fixture.py"
+    if not script.is_file():
+        raise RuntimeError(f"missing GraphQL fixture script: {script}")
+    status, _ports = inspect_container(GQL_CONTAINER)
+    if port_in_use(port) and status is None:
+        raise RuntimeError(
+            f"port {port} is already in use on 127.0.0.1, and it is not {GQL_CONTAINER}.")
+    if not _graphql_container_ok(port):
+        docker("rm", "-f", GQL_CONTAINER, check=False)
+        if port_in_use(port):
+            raise RuntimeError(f"port {port} is already in use on 127.0.0.1.")
+        say(f"starting GraphQL fixture ({GQL_IMAGE}) as {GQL_CONTAINER} on 127.0.0.1:{port}")
+        started = docker(
+            "run", "-d", "--name", GQL_CONTAINER,
+            "-p", f"127.0.0.1:{port}:8791",
+            "-v", f"{script}:/fixture.py:ro",
+            GQL_IMAGE, "python", "/fixture.py", "--host", "0.0.0.0", "--port", "8791",
+            check=False)
+        if started.returncode != 0:
+            detail = (started.stderr or started.stdout or "").strip()[:400]
+            raise RuntimeError(f"could not start {GQL_CONTAINER}: {detail}")
+    else:
+        say(f"reusing GraphQL fixture {GQL_CONTAINER} on 127.0.0.1:{port}")
+        restarted = docker("restart", GQL_CONTAINER, check=False)
+        if restarted.returncode != 0:
+            detail = (restarted.stderr or restarted.stdout or "").strip()[:400]
+            raise RuntimeError(f"could not restart {GQL_CONTAINER}: {detail}")
+    deadline = time.time() + 90
+    health = f"http://127.0.0.1:{port}/health"
+    last = "no response"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(health, timeout=2) as response:
+                if response.status == 200:
+                    return graphql_endpoint(port)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+        time.sleep(0.4)
+    logs = docker("logs", "--tail", "30", GQL_CONTAINER, check=False)
+    detail = (logs.stderr or logs.stdout or str(last)).strip()[:400]
+    raise RuntimeError(f"GraphQL fixture on port {port} did not become ready: {detail}")
+
+
+def graphql_fixture_env(env, endpoint):
+    """Point a server that has no GraphQL endpoint at the local fixture."""
+    if (env.get("GRAPHQL_ENDPOINT") or "").strip():
+        return env
+    env["GRAPHQL_ENDPOINT"] = endpoint
+    env["GRAPHQL_AUTH_URL"] = graphql_auth_url()
+    env["GRAPHQL_CLIENT_ID"] = GQL_CLIENT_ID
+    env["GRAPHQL_CLIENT_SECRET"] = GQL_CLIENT_SECRET
+    env["GRAPHQL_ADAPTER"] = "wiz"
+    env["GRAPHQL_LABEL"] = "Wiz fixture"
+    env["GRAPHQL_ID"] = "wiz"
+    env.pop("GRAPHQL_TOKEN", None)
+    return env
 
 
 def seed(env, *flags):
@@ -333,11 +441,13 @@ def run_tests(args, env, url):
     py = str(venv_python())
     say("budget tests (tests/test_budget.py)")
     b = subprocess.run([py, str(HERE / "tests" / "test_budget.py")], env=env)
+    say("GraphQL tests (tests/test_graphql.py): mocked API, then the gx-graphql fixture")
+    g = subprocess.run([py, str(HERE / "tests" / "test_graphql.py")], env=env)
     if args.live_scale:
         say("live-scale tests (tests/test_live_scale.py): the database must hold at least 15M nodes and 60M edges")
         t = subprocess.run([py, str(HERE / "tests" / "test_live_scale.py")],
                            env={**env, "REQUIRE_LIVE_SCALE": "1", "GX_URL": url.rstrip("/")})
-        return b.returncode or t.returncode
+        return b.returncode or g.returncode or t.returncode
     say("UI test suite (tests/run_ui_tests.py): starts its own server on a free port and drives headless Chromium")
     t = subprocess.run([py, str(HERE / "tests" / "run_ui_tests.py")], env=env)
     say(f"browser benchmark (tests/bench_ui.py --sizes {args.bench_sizes})")
@@ -347,7 +457,7 @@ def run_tests(args, env, url):
     subprocess.run([py, str(HERE / "tests" / "bench_server.py"), "--url", url.rstrip("/"), "--repeat", "3",
                     "--out", str(RUN / "bench-server.json")], env=env)
     say(f"results: tests/results.json, {RUN / 'bench-ui.json'}, {RUN / 'bench-server.json'}, docs/screenshots/app-*.png")
-    return b.returncode or t.returncode
+    return b.returncode or g.returncode or t.returncode
 
 
 def credential_target(args, environ=None):
@@ -388,18 +498,24 @@ def main_in_venv(args):
             if args.status:
                 status, ports = container_state()
                 print(f"container {CONTAINER}: {status or 'not created'} {ports or ''}")
+                gql_status, gql_ports = inspect_container(GQL_CONTAINER)
+                print(f"container {GQL_CONTAINER}: {gql_status or 'not created'} {gql_ports or ''}")
                 print(f"explorer on 127.0.0.1:{args.port}: {'up' if port_in_use(args.port) else 'down'}")
             elif args.reset:
                 docker("rm", "-f", CONTAINER, check=False)
                 docker("volume", "rm", VOLUME, check=False)
-                say(f"removed container {CONTAINER} and volume {VOLUME}")
+                docker("rm", "-f", GQL_CONTAINER, check=False)
+                say(f"removed container {CONTAINER}, volume {VOLUME}, and container {GQL_CONTAINER}")
             else:
                 docker("stop", CONTAINER, check=False)
-                say(f"stopped container {CONTAINER} (data kept in volume {VOLUME})")
+                docker("stop", GQL_CONTAINER, check=False)
+                say(f"stopped containers {CONTAINER} and {GQL_CONTAINER} (Neo4j data kept in volume {VOLUME})")
         return 0
 
+    from graphql_source import load_graphql_env
     from neo4j_env import Neo4jConfigError, load_credential_env
     load_credential_env()
+    load_graphql_env()
     using_own = bool(credential_target(args))
     if using_own:
         try:
@@ -422,6 +538,18 @@ def main_in_venv(args):
         user, database = "neo4j", args.neo4j_database or "neo4j"
     env = {**os.environ, "NEO4J_URI": uri, "NEO4J_USER": user, "NEO4J_PASSWORD": password,
            "NEO4J_DATABASE": database, "QUIET": "1"}
+    if not using_own or args.test:
+        if docker_daemon():
+            try:
+                fixture = start_graphql_fixture()
+            except RuntimeError as exc:
+                die(str(exc))
+            if graphql_fixture_env(env, fixture)["GRAPHQL_ENDPOINT"] == fixture:
+                say(f"GraphQL fixture: {fixture}  (client {GQL_CLIENT_ID})")
+            else:
+                say(f"GraphQL fixture is up for tests at {fixture}")
+        elif args.test:
+            say("Docker is not running; the GraphQL fixture section will skip")
     if args.test and not args.live_scale and args.synthetic is None and not args.keep_data and not args.both:
         say("--test: loading fixtures + the synthetic estate (--both); the UI tests are written for the synthetic data")
         args.both = True
@@ -433,7 +561,7 @@ def main_in_venv(args):
     if using_own:
         say(f"Graph Explorer is up: {url}")
     else:
-        say(f"Graph Explorer is up: {url}   (Neo4j Browser: http://127.0.0.1:{args.neo4j_http_port}  user neo4j / {PASSWORD})")
+        say(f"Graph Explorer is up: {url}   (Neo4j Browser: http://127.0.0.1:{args.neo4j_http_port}, user neo4j)")
     rc = 0
     if args.test:
         rc = run_tests(args, env, url)
@@ -486,10 +614,10 @@ def parse(argv):
     s.add_argument("--no-serve", action="store_true", help="stop the server when done (useful with --test in CI)")
     t = ap.add_argument_group("tests")
     t.add_argument("--with-tests", action="store_true", help="also install Playwright + Chromium")
-    t.add_argument("--test", action="store_true", help="run the budget tests and the UI suite, or with --live-scale the 15M/60M checks")
+    t.add_argument("--test", action="store_true", help="run the budget tests, the GraphQL tests, and the UI suite, or with --live-scale the 15M/60M checks")
     t.add_argument("--bench-sizes", default="10000", help="graph sizes for the browser benchmark (default 10000)")
     c = ap.add_argument_group("commands")
-    c.add_argument("--stop", action="store_true", help="stop the server and the Neo4j container")
+    c.add_argument("--stop", action="store_true", help="stop the server, the Neo4j container, and the GraphQL fixture")
     c.add_argument("--reset", action="store_true", help="remove the Neo4j container and its volume")
     c.add_argument("--status", action="store_true", help="show what is running")
     ap.add_argument("--_in-venv", action="store_true", help=argparse.SUPPRESS)
