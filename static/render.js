@@ -140,11 +140,18 @@
       const hl = V.highlightActive();
       const simpleEdges = lod < 2 || edges.length > 30000;
       if (simpleEdges) {
-        const byColor = new Map();
-        for (const e of edges) { const d = e._private.data; const col = e.selected() ? T.select : (e._private.classes.has('filtered') ? T.filteredEdge : V.edgeColor(d)); let a = byColor.get(col); if (!a) byColor.set(col, (a = [])); a.push(e); }
-        g.lineWidth = Math.max(0.5, 0.8) / z; g.globalAlpha = lod === 0 ? 0.45 : 0.7;
-        for (const [col, es] of byColor) { g.strokeStyle = col; g.beginPath(); for (const e of es) { const a = e.source()._private.position, b = e.target()._private.position; g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); } g.stroke(); }
-        g.globalAlpha = 1;
+        const faded = new Map(), bright = new Map();
+        for (const e of edges) {
+          const d = e._private.data, cls = e._private.classes, sel = e.selected(), path = cls.has('path'), dim = cls.has('dim') && !sel;
+          const col = sel ? T.select : cls.has('filtered') ? T.filteredEdge : path ? (T.coral || '#e07a5f') : V.edgeColor(d);
+          const bag = dim ? faded : bright; let a = bag.get(col); if (!a) bag.set(col, (a = [])); a.push(e);
+        }
+        const strokeBag = (bag, alpha) => {
+          g.save(); g.lineWidth = Math.max(0.5, 0.8) / z; g.globalAlpha = alpha;
+          for (const [col, es] of bag) { g.strokeStyle = col; g.beginPath(); for (const e of es) { const a = e.source()._private.position, b = e.target()._private.position; g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); } g.stroke(); }
+          g.restore();
+        };
+        strokeBag(faded, 0.18); strokeBag(bright, lod === 0 ? 0.45 : 0.7);
       } else {
         // halos under highlighted edges first (white ribbon, like the reference)
         if (hl) { g.strokeStyle = T.halo; g.lineCap = 'round'; for (const e of edges) if (e._private.classes.has('hl')) { const geo = edgeGeom(e); g.lineWidth = Math.max(10 / z, baseR * 0.95); strokeGeom(g, geo); } g.lineCap = 'butt'; }
@@ -153,15 +160,21 @@
 
       // nodes
       if (lod === 0) {
-        const byColor = new Map(); for (const n of vis) { const col = nodeFill(n, T); let a = byColor.get(col); if (!a) byColor.set(col, (a = [])); a.push(n); }
-        const s = Math.max(1.6, rs * 1.6) / z;
-        for (const [col, ns] of byColor) { g.fillStyle = col; for (const n of ns) { const p = n._private.position; g.fillRect(p.x - s / 2, p.y - s / 2, s, s); } }
+        paintNodes(g, vis, T, true);
         for (const n of vis) if (n.selected()) { const p = n._private.position; g.strokeStyle = T.select; g.lineWidth = 2 / z; g.beginPath(); g.arc(p.x, p.y, 4 / z, 0, TAU); g.stroke(); }
         return;
       }
       if (lod === 1) {
-        const byColor = new Map(); for (const n of vis) { const col = nodeFill(n, T); let a = byColor.get(col); if (!a) byColor.set(col, (a = [])); a.push(n); }
-        for (const [col, ns] of byColor) { g.fillStyle = col; g.beginPath(); for (const n of ns) { const p = n._private.position, r = V.nodeSize(n._private.data) / 2; g.moveTo(p.x + r, p.y); g.arc(p.x, p.y, r, 0, TAU); } g.fill(); }
+        paintNodes(g, vis, T, false);
+        const ring = (dim, alpha) => {
+          g.save(); g.strokeStyle = T.nodeBorder; g.lineWidth = 1.4 / z; g.globalAlpha = alpha; g.beginPath();
+          for (const n of vis) {
+            if ((n._private.classes.has('dim') && !n.selected()) !== dim) continue;
+            const p = n._private.position, r = V.nodeSize(n._private.data) / 2; g.moveTo(p.x + r, p.y); g.arc(p.x, p.y, r, 0, TAU);
+          }
+          g.stroke(); g.restore();
+        };
+        ring(false, 0.95); ring(true, 0.55);
         for (const n of vis) if (n.selected()) { const p = n._private.position, r = V.nodeSize(n._private.data) / 2; g.strokeStyle = T.select; g.lineWidth = 2 / z; g.beginPath(); g.arc(p.x, p.y, r + 2 / z, 0, TAU); g.stroke(); }
         return;
       }
@@ -174,7 +187,8 @@
       if (showLabels) {
         const occ = new Set(); const LC = 18;
         const fs = Math.min(15, Math.max(9, 12.5 * z)); // screen px
-        const ranked = order.slice().reverse();          // selected first
+        const rank = n => n.selected() ? 0 : (n._private.classes.has('dim') ? 2 : 1);
+        const ranked = order.slice().sort((a, b) => rank(a) - rank(b));
         g.textAlign = 'center'; g.textBaseline = 'top';
         for (const n of ranked) {
           const d = n._private.data; if (n._private.classes.has('filtered')) continue;
@@ -189,7 +203,9 @@
             let busy = false; for (let a = sx1; a <= sx2 && !busy; a++) for (let b = sy1; b <= sy2; b++) if (occ.has(a * 100003 + b)) { busy = true; break; }
             if (busy) continue; for (let a = sx1; a <= sx2; a++) for (let b = sy1; b <= sy2; b++) occ.add(a * 100003 + b);
           }
-          g.save(); g.setTransform(dpr, 0, 0, dpr, dpr * (tx * z + pan.x), dpr * (ty * z + pan.y));
+          const dimLabel = n._private.classes.has('dim') && !sel;
+          g.save(); if (dimLabel) g.globalAlpha = 0.35;
+          g.setTransform(dpr, 0, 0, dpr, dpr * (tx * z + pan.x), dpr * (ty * z + pan.y));
           g.font = font;
           if (sel) { g.fillStyle = T.labelBox; roundRect(g, -lw * z / 2 - 5, -2, lw * z + 10, fs * 1.2 * lines.length + 4, 4); g.fill(); }
           else if (n._private.classes.has('hl')) { /* sits on the halo */ }
@@ -206,7 +222,9 @@
           if (!show || e._private.classes.has('filtered')) continue;
           const txt = V.edgeCaption(d); if (!txt) continue;
           const geo = edgeGeom(e); const m = geoMid(geo); let ang = Math.atan2(geo.y2 - geo.y1, geo.x2 - geo.x1); if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
-          g.save(); g.setTransform(dpr, 0, 0, dpr, dpr * (m.x * z + pan.x), dpr * (m.y * z + pan.y)); g.rotate(ang);
+          const dimCap = e._private.classes.has('dim') && !e.selected();
+          g.save(); if (dimCap) g.globalAlpha = 0.35;
+          g.setTransform(dpr, 0, 0, dpr, dpr * (m.x * z + pan.x), dpr * (m.y * z + pan.y)); g.rotate(ang);
           g.font = `400 ${fs}px Roboto, Arial, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'bottom';
           g.strokeStyle = T.textHalo; g.lineWidth = 3; g.lineJoin = 'round'; g.strokeText(txt, 0, -2);
           g.fillStyle = e.selected() ? T.select : T.edgeText; g.fillText(txt, 0, -2); g.restore();
@@ -217,7 +235,8 @@
         for (const n of vis) {
           const d = n._private.data; if (n._private.classes.has('filtered')) continue;
           const p = n._private.position, r = V.nodeSize(d) / 2; const sx = p.x * z + pan.x, sy = p.y * z + pan.y, sr = r * z;
-          g.save(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+          g.save(); if (n._private.classes.has('dim') && !n.selected()) g.globalAlpha = 0.35;
+          g.setTransform(dpr, 0, 0, dpr, 0, 0);
           const h = V.hiddenCount(n);
           if (h > 0 && !d.hubgroup) { const bc = nodeFill(n, T); badge(g, sx + sr * 0.72, sy - sr * 0.72, Math.max(6, sr * 0.4), h > 999 ? '999+' : String(h), bc, isLight(bc) ? '#303030' : '#ffffff', T.nodeBorder); }
           if (d.group && !d.hubgroup) badge(g, sx + sr * 0.72, sy - sr * 0.72, Math.max(7, sr * 0.42), 'x' + d.count, T.groupBadge, '#fff');
@@ -229,17 +248,45 @@
     R.drawScene = drawScene;
 
     function nodeFill(n, T) { return n._private.classes.has('filtered') ? T.filteredNode : V.nodeColor(n._private.data); }
+    function paintNodes(g, vis, T, squares) {
+      const buckets = new Map();
+      for (const n of vis) {
+        const dim = n._private.classes.has('dim') && !n.selected();
+        const col = nodeFill(n, T); const k = (dim ? '1' : '0') + col;
+        let a = buckets.get(k); if (!a) buckets.set(k, (a = { dim, col, ns: [] })); a.ns.push(n);
+      }
+      const z = cy.zoom(), rs = V.defaultSize() / 2 * z;
+      for (const b of buckets.values()) {
+        g.save(); if (b.dim) g.globalAlpha = 0.22; g.fillStyle = b.col;
+        if (squares) {
+          const s = Math.max(1.6, rs * 1.6) / z;
+          for (const n of b.ns) { const p = n._private.position; g.fillRect(p.x - s / 2, p.y - s / 2, s, s); }
+        } else {
+          g.beginPath();
+          for (const n of b.ns) { const p = n._private.position, r = V.nodeSize(n._private.data) / 2; g.moveTo(p.x + r, p.y); g.arc(p.x, p.y, r, 0, TAU); }
+          g.fill();
+        }
+        g.restore();
+      }
+    }
     function drawNode(g, n, z, T) {
       const d = n._private.data, p = n._private.position, r = V.nodeSize(d) / 2; const filtered = n._private.classes.has('filtered');
+      const dim = n._private.classes.has('dim') && !n.selected();
+      g.save();
+      if (dim) g.globalAlpha = 0.22;
       if (n._private.classes.has('pulse')) { g.fillStyle = T.pulse; g.beginPath(); g.arc(p.x, p.y, r + 16, 0, TAU); g.fill(); }
       g.fillStyle = nodeFill(n, T); g.beginPath(); g.arc(p.x, p.y, r, 0, TAU); g.fill();
-      if (r * z >= 5) { g.strokeStyle = T.nodeBorder; g.lineWidth = Math.max(1 / z, r * 0.1); g.stroke(); }
       if (d.group && !d.hubgroup) { g.strokeStyle = T.groupStroke; g.lineWidth = 4; g.stroke(); }
       if (d.hubgroup) { g.setLineDash([5, 4]); g.strokeStyle = T.text; g.lineWidth = 1.5 / z; g.beginPath(); g.arc(p.x, p.y, r + 3, 0, TAU); g.stroke(); g.setLineDash([]); }
       if (!filtered) {
         const ic = V.nodeIcon(d);
         if (ic && r * z >= 7) { const px = r * 2 * 0.58 * z * DPR; const sp = iconSprite(ic.name, ic.color, px); if (sp) { const s = r * 0.58; g.drawImage(sp, p.x - s, p.y - s, s * 2, s * 2); } }
       }
+      g.restore();
+      g.save(); if (dim) g.globalAlpha = 0.55;
+      g.strokeStyle = T.nodeBorder; g.lineWidth = Math.max(1.25 / z, r * 0.08);
+      g.beginPath(); g.arc(p.x, p.y, r, 0, TAU); g.stroke();
+      g.restore();
       if (n.selected()) { g.strokeStyle = T.select; g.lineWidth = Math.max(2.2 / z, r * 0.12); g.beginPath(); g.arc(p.x, p.y, r + Math.max(3 / z, r * 0.16), 0, TAU); g.stroke(); }
     }
     function isLight(c) { const m = /^#([0-9a-f]{6})$/i.exec(c); if (!m) return false; const n = parseInt(m[1], 16); return ((n >> 16) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 > 170; }
@@ -276,13 +323,17 @@
       g.stroke();
     }
     function drawEdge(g, e, z, T) {
-      const d = e._private.data; const G = edgeGeom(e); const sel = e.selected(); const filtered = e._private.classes.has('filtered');
-      const col = sel ? T.select : filtered ? T.filteredEdge : V.edgeColor(d);
-      const w = Math.max(0.6 / z, V.edgeWidth(d) * 1.8 * (sel ? 1.3 : 1));
+      const d = e._private.data; const G = edgeGeom(e); const sel = e.selected(); const cls = e._private.classes; const filtered = cls.has('filtered');
+      const path = cls.has('path'), dim = cls.has('dim') && !sel;
+      const col = sel ? T.select : filtered ? T.filteredEdge : path ? (T.coral || '#e07a5f') : V.edgeColor(d);
+      const w = Math.max(0.6 / z, V.edgeWidth(d) * 1.8 * (sel || path ? 1.3 : 1));
+      g.save(); if (dim) g.globalAlpha = 0.18;
       g.strokeStyle = col; g.lineWidth = w; strokeGeom(g, G);
-      if (G.loop) return;
-      const al = Math.max(5 / z, 5 + w * 2.2), aw = al * 0.5;
-      g.fillStyle = col; g.beginPath(); g.moveTo(G.x2, G.y2); g.lineTo(G.x2 - G.ux * al - G.uy * aw, G.y2 - G.uy * al + G.ux * aw); g.lineTo(G.x2 - G.ux * al + G.uy * aw, G.y2 - G.uy * al - G.ux * aw); g.closePath(); g.fill();
+      if (!G.loop) {
+        const al = Math.max(5 / z, 5 + w * 2.2), aw = al * 0.5;
+        g.fillStyle = col; g.beginPath(); g.moveTo(G.x2, G.y2); g.lineTo(G.x2 - G.ux * al - G.uy * aw, G.y2 - G.uy * al + G.ux * aw); g.lineTo(G.x2 - G.ux * al + G.uy * aw, G.y2 - G.uy * al - G.ux * aw); g.closePath(); g.fill();
+      }
+      g.restore();
     }
     R.indexParallel = () => {
       const groups = new Map();

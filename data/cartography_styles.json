@@ -37,7 +37,14 @@
   "GCPOrganization",
   "GCPProject",
   "GCPInstance",
-  "GCPBucket"
+  "GCPBucket",
+  "AWSInspectorFinding",
+  "AWSGuardDutyFinding",
+  "GuardDutyFinding",
+  "CVE",
+  "Inspector",
+  "GuardDuty",
+  "Risk"
  ],
  "generic_labels": [
   "Tenant",
@@ -74,274 +81,418 @@
   "AWSAccountAccessKey",
   "Ontology"
  ],
+ "families": [
+  {
+   "id": "compute",
+   "label": "Compute",
+   "color": "#e07a2f"
+  },
+  {
+   "id": "storage",
+   "label": "Storage",
+   "color": "#15803d"
+  },
+  {
+   "id": "network",
+   "label": "Network",
+   "color": "#6d28d9"
+  },
+  {
+   "id": "identity",
+   "label": "Identity",
+   "color": "#be185d"
+  },
+  {
+   "id": "github",
+   "label": "GitHub",
+   "color": "#334155"
+  },
+  {
+   "id": "okta",
+   "label": "Okta",
+   "color": "#1d4ed8"
+  },
+  {
+   "id": "gcp",
+   "label": "GCP",
+   "color": "#047857"
+  },
+  {
+   "id": "findings",
+   "label": "Findings",
+   "color": "#d97706"
+  }
+ ],
  "categories": {
   "AWSAccount": {
-   "color": "#f37805",
+   "color": "#c2410c",
    "icon": "Aws",
+   "caption": [
+    "name",
+    "id"
+   ],
+   "family": "compute"
+  },
+  "AWSEC2Instance": {
+   "color": "#ea580c",
+   "icon": "Server",
+   "caption": [
+    "name",
+    "instanceid"
+   ],
+   "family": "compute"
+  },
+  "AWSLambda": {
+   "color": "#f97316",
+   "icon": "Lambda",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "AWSLoadBalancerV2": {
+   "color": "#fdba74",
+   "icon": "ScaleBalance",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "AWSS3Bucket": {
+   "color": "#15803d",
+   "icon": "BucketOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "AWSRDSInstance": {
+   "color": "#22c55e",
+   "icon": "Database",
+   "caption": [
+    "db_instance_identifier"
+   ],
+   "family": "storage"
+  },
+  "AWSKMSKey": {
+   "color": "#86efac",
+   "icon": "KeyVariant",
+   "caption": [
+    "description",
+    "key_id"
+   ],
+   "family": "storage"
+  },
+  "AWSVpc": {
+   "color": "#6d28d9",
+   "icon": "Lan",
+   "caption": [
+    "vpcid"
+   ],
+   "family": "network"
+  },
+  "AWSEC2Subnet": {
+   "color": "#7c3aed",
+   "icon": "IpNetworkOutline",
+   "caption": [
+    "name",
+    "subnetid"
+   ],
+   "family": "network"
+  },
+  "AWSEC2SecurityGroup": {
+   "color": "#8b5cf6",
+   "icon": "ShieldOutline",
+   "caption": [
+    "name",
+    "groupid"
+   ],
+   "family": "network"
+  },
+  "AWSIpPermissionInbound": {
+   "color": "#a78bfa",
+   "icon": "Wall",
+   "caption": [
+    "protocol",
+    "fromport"
+   ],
+   "family": "network"
+  },
+  "AWSIpRange": {
+   "color": "#c4b5fd",
+   "icon": "IpOutline",
+   "caption": [
+    "range"
+   ],
+   "family": "network"
+  },
+  "AWSUser": {
+   "color": "#be185d",
+   "icon": "Account",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "AWSGroup": {
+   "color": "#db2777",
+   "icon": "AccountGroup",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "AWSRole": {
+   "color": "#e11d48",
+   "icon": "BadgeAccountHorizontalOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "AWSPrincipal": {
+   "color": "#f43f5e",
+   "icon": "ShieldKeyOutline",
+   "caption": [
+    "arn"
+   ],
+   "family": "identity"
+  },
+  "AWSManagedPolicy": {
+   "color": "#fb7185",
+   "icon": "FileDocumentOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "AWSInlinePolicy": {
+   "color": "#fda4af",
+   "icon": "FileDocumentOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "AWSPolicyStatement": {
+   "color": "#9f1239",
+   "icon": "FormatListBulleted",
+   "caption": [
+    "effect",
+    "action"
+   ],
+   "family": "identity"
+  },
+  "AccountAccessKey": {
+   "color": "#881337",
+   "icon": "Key",
+   "caption": [
+    "accesskeyid"
+   ],
+   "family": "identity"
+  },
+  "AWSInstanceProfile": {
+   "color": "#9a3412",
+   "icon": "CardAccountDetailsOutline",
+   "caption": [
+    "instance_profile_name"
+   ],
+   "family": "compute"
+  },
+  "AWSEC2KeyPair": {
+   "color": "#fb923c",
+   "icon": "Key",
+   "caption": [
+    "keyname"
+   ],
+   "family": "compute"
+  },
+  "AWSTag": {
+   "color": "#78716c",
+   "icon": "TagOutline",
+   "caption": [
+    "key",
+    "value"
+   ],
+   "family": null
+  },
+  "GitHubOrganization": {
+   "color": "#0f172a",
+   "icon": "Github",
+   "caption": [
+    "username"
+   ],
+   "family": "github"
+  },
+  "GitHubUser": {
+   "color": "#334155",
+   "icon": "AccountOutline",
+   "caption": [
+    "username",
+    "fullname"
+   ],
+   "family": "github"
+  },
+  "GitHubTeam": {
+   "color": "#475569",
+   "icon": "AccountMultiple",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "GitHubRepository": {
+   "color": "#64748b",
+   "icon": "SourceRepository",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "GitHubBranch": {
+   "color": "#94a3b8",
+   "icon": "SourceBranch",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "ProgrammingLanguage": {
+   "color": "#cbd5e1",
+   "icon": "CodeTags",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "OktaOrganization": {
+   "color": "#1e3a8a",
+   "icon": "OfficeBuilding",
+   "caption": [
+    "name"
+   ],
+   "family": "okta"
+  },
+  "OktaUser": {
+   "color": "#1d4ed8",
+   "icon": "AccountOutline",
+   "caption": [
+    "first_name",
+    "last_name"
+   ],
+   "family": "okta"
+  },
+  "OktaGroup": {
+   "color": "#3b82f6",
+   "icon": "AccountGroupOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "okta"
+  },
+  "OktaApplication": {
+   "color": "#93c5fd",
+   "icon": "ApplicationOutline",
+   "caption": [
+    "label"
+   ],
+   "family": "okta"
+  },
+  "GCPOrganization": {
+   "color": "#064e3b",
+   "icon": "GoogleCloud",
+   "caption": [
+    "displayname"
+   ],
+   "family": "gcp"
+  },
+  "GCPProject": {
+   "color": "#047857",
+   "icon": "FolderOutline",
+   "caption": [
+    "displayname"
+   ],
+   "family": "gcp"
+  },
+  "GCPInstance": {
+   "color": "#10b981",
+   "icon": "ServerNetwork",
+   "caption": [
+    "instancename"
+   ],
+   "family": "gcp"
+  },
+  "GCPBucket": {
+   "color": "#6ee7b7",
+   "icon": "PailOutline",
+   "caption": [
+    "bucket_id"
+   ],
+   "family": "gcp"
+  },
+  "Risk": {
+   "color": "#d97706",
+   "icon": "Alert",
+   "family": "findings",
    "caption": [
     "name",
     "id"
    ]
   },
-  "AWSEC2Instance": {
-   "color": "#f7ba75",
-   "icon": "Server",
-   "caption": [
-    "name",
-    "instanceid"
-   ]
-  },
-  "AWSLambda": {
-   "color": "#e8a33d",
-   "icon": "Lambda",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSLoadBalancerV2": {
-   "color": "#d9822b",
-   "icon": "ScaleBalance",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSS3Bucket": {
-   "color": "#389704",
-   "icon": "BucketOutline",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSRDSInstance": {
-   "color": "#2e7d32",
-   "icon": "Database",
-   "caption": [
-    "db_instance_identifier"
-   ]
-  },
-  "AWSKMSKey": {
-   "color": "#8bc34a",
-   "icon": "KeyVariant",
-   "caption": [
-    "description",
-    "key_id"
-   ]
-  },
-  "AWSVpc": {
-   "color": "#caabde",
-   "icon": "Lan",
-   "caption": [
-    "vpcid"
-   ]
-  },
-  "AWSEC2Subnet": {
-   "color": "#b39ddb",
-   "icon": "IpNetworkOutline",
-   "caption": [
-    "name",
-    "subnetid"
-   ]
-  },
-  "AWSEC2SecurityGroup": {
-   "color": "#9575cd",
+  "Inspector": {
+   "color": "#b45309",
    "icon": "ShieldOutline",
+   "family": "findings",
    "caption": [
     "name",
-    "groupid"
+    "id"
    ]
   },
-  "AWSIpPermissionInbound": {
-   "color": "#7e57c2",
-   "icon": "Wall",
+  "AWSInspectorFinding": {
+   "color": "#f59e0b",
+   "icon": "ShieldOutline",
+   "family": "findings",
    "caption": [
-    "protocol",
-    "fromport"
+    "name",
+    "title",
+    "id"
    ]
   },
-  "AWSIpRange": {
-   "color": "#5e35b1",
-   "icon": "IpOutline",
-   "caption": [
-    "range"
-   ]
-  },
-  "AWSUser": {
-   "color": "#3b78bc",
-   "icon": "Account",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSGroup": {
-   "color": "#5c9bd6",
-   "icon": "AccountGroup",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSRole": {
-   "color": "#c62828",
-   "icon": "BadgeAccountHorizontalOutline",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSPrincipal": {
-   "color": "#e57373",
+  "GuardDuty": {
+   "color": "#92400e",
    "icon": "ShieldKeyOutline",
+   "family": "findings",
    "caption": [
-    "arn"
+    "name",
+    "id"
    ]
   },
-  "AWSManagedPolicy": {
-   "color": "#835543",
-   "icon": "FileDocumentOutline",
+  "GuardDutyFinding": {
+   "color": "#b45309",
+   "icon": "ShieldKeyOutline",
+   "family": "findings",
    "caption": [
+    "name",
+    "id"
+   ]
+  },
+  "AWSGuardDutyFinding": {
+   "color": "#fbbf24",
+   "icon": "ShieldKeyOutline",
+   "family": "findings",
+   "caption": [
+    "name",
+    "title",
+    "id"
+   ]
+  },
+  "CVE": {
+   "color": "#ea580c",
+   "icon": "AlertCircleOutline",
+   "family": "findings",
+   "caption": [
+    "id",
     "name"
-   ]
-  },
-  "AWSInlinePolicy": {
-   "color": "#a1705a",
-   "icon": "FileDocumentOutline",
-   "caption": [
-    "name"
-   ]
-  },
-  "AWSPolicyStatement": {
-   "color": "#bcaaa4",
-   "icon": "FormatListBulleted",
-   "caption": [
-    "effect",
-    "action"
-   ]
-  },
-  "AccountAccessKey": {
-   "color": "#ffb300",
-   "icon": "Key",
-   "caption": [
-    "accesskeyid"
-   ]
-  },
-  "AWSInstanceProfile": {
-   "color": "#ef9a9a",
-   "icon": "CardAccountDetailsOutline",
-   "caption": [
-    "instance_profile_name"
-   ]
-  },
-  "AWSEC2KeyPair": {
-   "color": "#ffca28",
-   "icon": "Key",
-   "caption": [
-    "keyname"
-   ]
-  },
-  "AWSTag": {
-   "color": "#bdbdbd",
-   "icon": "TagOutline",
-   "caption": [
-    "key",
-    "value"
-   ]
-  },
-  "GitHubOrganization": {
-   "color": "#24292f",
-   "icon": "Github",
-   "caption": [
-    "username"
-   ]
-  },
-  "GitHubUser": {
-   "color": "#57606a",
-   "icon": "AccountOutline",
-   "caption": [
-    "username",
-    "fullname"
-   ]
-  },
-  "GitHubTeam": {
-   "color": "#6e7781",
-   "icon": "AccountMultiple",
-   "caption": [
-    "name"
-   ]
-  },
-  "GitHubRepository": {
-   "color": "#4a4a4a",
-   "icon": "SourceRepository",
-   "caption": [
-    "name"
-   ]
-  },
-  "GitHubBranch": {
-   "color": "#8c959f",
-   "icon": "SourceBranch",
-   "caption": [
-    "name"
-   ]
-  },
-  "ProgrammingLanguage": {
-   "color": "#afb8c1",
-   "icon": "CodeTags",
-   "caption": [
-    "name"
-   ]
-  },
-  "OktaOrganization": {
-   "color": "#00297a",
-   "icon": "OfficeBuilding",
-   "caption": [
-    "name"
-   ]
-  },
-  "OktaUser": {
-   "color": "#1662dd",
-   "icon": "AccountOutline",
-   "caption": [
-    "first_name",
-    "last_name"
-   ]
-  },
-  "OktaGroup": {
-   "color": "#4f8ff7",
-   "icon": "AccountGroupOutline",
-   "caption": [
-    "name"
-   ]
-  },
-  "OktaApplication": {
-   "color": "#4fb8c9",
-   "icon": "ApplicationOutline",
-   "caption": [
-    "label"
-   ]
-  },
-  "GCPOrganization": {
-   "color": "#0d652d",
-   "icon": "GoogleCloud",
-   "caption": [
-    "displayname"
-   ]
-  },
-  "GCPProject": {
-   "color": "#34a853",
-   "icon": "FolderOutline",
-   "caption": [
-    "displayname"
-   ]
-  },
-  "GCPInstance": {
-   "color": "#4285f4",
-   "icon": "ServerNetwork",
-   "caption": [
-    "instancename"
-   ]
-  },
-  "GCPBucket": {
-   "color": "#fbbc04",
-   "icon": "PailOutline",
-   "caption": [
-    "bucket_id"
    ]
   }
  },
@@ -371,7 +522,7 @@
  "edges": {
   "default_color": "#7a7a7a",
   "colors": {},
-  "note": "Linkurious draws every edge type in the same grey by default; colour edge types from the Design panel."
+  "note": "Neutral relationships stay grey. Trust, policy, and open-IP rules are drawn coral while their color is still this default; a Design-panel color wins."
  },
  "search_fields": [
   "name",

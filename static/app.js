@@ -31,20 +31,40 @@ const S = {
   // Ceilings come from the server. The working set is gx.local.json on the server.
   budget: { serverNodes: 2000, serverEdges: 5000, nodes: 2000, edges: 5000, expand_limit: 50, cypher_limit: 500, expand_max: 50, cypher_max: 500, lru: false, resources: null, suggestion: null, reason: '' },
   db: { nodes: 0, edges: 0 }, seq: 1, canvasRefused: false,
-  ready: false,
+  ready: false, status: null,
+  focus: { on: false, nodes: null, edges: null },
 };
 const DEFAULT_SIZE = 26;
 let cy, R;
 
 // ---------- styles -------------------------------------------------------------------
+const STYLE_REV = 2;
+const CORAL = '#e07a5f';
+const CORAL_EDGE = /TRUST|POLICY|IP_RULE|ALLOWED_BY|ASSUMED_ROLE|ASSUME_ROLE|STS_ASSUMEROLE/i;
+function familyOf(name) {
+  const n = String(name || '');
+  const listed = S.cfg?.categories?.[n];
+  if (listed && Object.prototype.hasOwnProperty.call(listed, 'family')) return listed.family || null;
+  if (/tag$/i.test(n)) return null;
+  if (/GuardDuty|Inspector|CVE|Finding|^Risk$/i.test(n)) return 'findings';
+  if (/^GitHub|^ProgrammingLanguage/i.test(n)) return 'github';
+  if (/^Okta/i.test(n)) return 'okta';
+  if (/^GCP/i.test(n)) return 'gcp';
+  if (/S3|RDS|KMS|Bucket/i.test(n)) return 'storage';
+  if (/Vpc|Subnet|SecurityGroup|IpPermission|IpRange|Network/i.test(n)) return 'network';
+  if (/User|Group|Role|Principal|Policy|AccessKey/i.test(n)) return 'identity';
+  if (/Account|EC2|Lambda|LoadBalancer|InstanceProfile|KeyPair|Compute/i.test(n)) return 'compute';
+  return null;
+}
 function initStyles(reset = false) {
-  const saved = !reset && JSON.parse(localStorage.getItem('gx:styles') || 'null');
+  const savedRaw = !reset && JSON.parse(localStorage.getItem('gx:styles') || 'null');
+  const saved = savedRaw && savedRaw.rev === STYLE_REV ? savedRaw : null;
   S.cat = {}; S.edge = {};
   const pal = S.cfg.fallback_palette; let k = 0;
   const cats = new Set([...Object.keys(S.cfg.categories), ...Object.keys(S.schema?.categories || {})]);
   for (const c of cats) {
     const d = S.cfg.categories[c];
-    S.cat[c] = { color: d?.color || pal[k++ % pal.length], icon: d?.icon || null, size: 100, sizeRule: null, valueColors: {}, caption: d?.caption || null };
+    S.cat[c] = { color: d?.color || pal[k++ % pal.length], icon: d?.icon || null, size: 100, sizeRule: null, valueColors: {}, caption: d?.caption || null, family: d && Object.prototype.hasOwnProperty.call(d, 'family') ? (d.family || null) : familyOf(c) };
   }
   for (const t of Object.keys(S.schema?.types || {})) S.edge[t] = { color: S.cfg.edges.colors[t] || S.cfg.edges.default_color, width: 1, widthRule: null, caption: ['type'] };
   if (saved) { Object.assign(S.cat, saved.cat || {}); Object.assign(S.edge, saved.edge || {}); S.edgeCaptionsAlways = !!saved.edgeCaptionsAlways; }
@@ -54,7 +74,15 @@ function catStyle(c) {
   return S.cat[c];
 }
 function edgeStyle(t) { if (!S.edge[t]) S.edge[t] = { color: S.cfg.edges.default_color, width: 1, widthRule: null, caption: ['type'] }; return S.edge[t]; }
-function persistStyles() { localStorage.setItem('gx:styles', JSON.stringify({ cat: S.cat, edge: S.edge, edgeCaptionsAlways: S.edgeCaptionsAlways })); }
+function persistStyles() { localStorage.setItem('gx:styles', JSON.stringify({ rev: STYLE_REV, cat: S.cat, edge: S.edge, edgeCaptionsAlways: S.edgeCaptionsAlways })); }
+function edgeColor(d) {
+  if (d.virtual) return '#9e9e9e';
+  const stored = edgeStyle(d.type).color;
+  const def = String(S.cfg.edges.default_color || '#7a7a7a').toLowerCase();
+  if (stored && stored.toLowerCase() !== def && stored.toLowerCase() !== '#7a7a7a') return stored;
+  if (CORAL_EDGE.test(d.type || '')) return CORAL;
+  return stored || S.cfg.edges.default_color;
+}
 function nodeCaption(d) {
   if (d.group || d.hubgroup) return d.caption;
   const st = catStyle(d.category); const props = d.props || {};
@@ -119,10 +147,10 @@ function cyStyle() {
     { selector: '.grp-hidden, .egrp-hidden', style: { display: 'none' } },
   ];
 }
-const THEME_LIGHT = { nodeBorder: '#ffffff', text: '#333333', textHalo: 'rgba(248,248,248,0.92)', halo: '#ffffff', labelBox: '#ffffff', select: '#f12a27', badge: '#454466', groupBadge: '#616161',
-  groupFill: 'rgba(224,224,224,0.55)', groupStroke: '#bdbdbd', filteredNode: '#dedede', filteredEdge: '#e9e9e9', edgeText: '#5c5c5c', pulse: 'rgba(241,42,39,0.28)' };
-const THEME_DARK = { nodeBorder: '#2b2e35', text: '#e6e6e6', textHalo: 'rgba(29,31,36,0.92)', halo: '#3a3e48', labelBox: '#2b2e35', select: '#ff5a52', badge: '#8a89c0', groupBadge: '#8d8d8d',
-  groupFill: 'rgba(60,63,72,0.6)', groupStroke: '#5b5f6a', filteredNode: '#4a4d55', filteredEdge: '#3a3d45', edgeText: '#b8b8b8', pulse: 'rgba(255,90,82,0.3)' };
+const THEME_LIGHT = { nodeBorder: '#f3ead7', text: '#333333', textHalo: 'rgba(248,248,248,0.92)', halo: '#ffffff', labelBox: '#ffffff', select: '#148f8a', coral: CORAL, badge: '#454466', groupBadge: '#616161',
+  groupFill: 'rgba(224,224,224,0.55)', groupStroke: '#bdbdbd', filteredNode: '#dedede', filteredEdge: '#e9e9e9', edgeText: '#5c5c5c', pulse: 'rgba(20,143,138,0.28)' };
+const THEME_DARK = { nodeBorder: '#f3ead7', text: '#e6e6e6', textHalo: 'rgba(29,31,36,0.92)', halo: '#3a3e48', labelBox: '#2b2e35', select: '#2dd4bf', coral: CORAL, badge: '#8a89c0', groupBadge: '#8d8d8d',
+  groupFill: 'rgba(60,63,72,0.6)', groupStroke: '#5b5f6a', filteredNode: '#4a4d55', filteredEdge: '#3a3d45', edgeText: '#b8b8b8', pulse: 'rgba(45,212,191,0.3)' };
 function theme() { return document.body.classList.contains('dark') ? THEME_DARK : THEME_LIGHT; }
 function nodeIcon(d) {
   const ic = d.group && !d.hubgroup ? 'SelectGroup' : catStyle(d.category).icon; if (!ic) return null;
@@ -133,8 +161,8 @@ function syncSizes(nodes = cy.nodes()) {
 }
 const VISUALS = {
   theme, defaultSize: () => DEFAULT_SIZE, nodeColor, nodeSize, nodeCaption, nodeIcon,
-  edgeColor: d => d.virtual ? '#9e9e9e' : edgeStyle(d.type).color, edgeWidth, edgeCaption: d => d.virtual ? '' : edgeCaption(d),
-  edgeCaptionsAlways: () => S.edgeCaptionsAlways, hiddenCount: n => hiddenCount(n), highlightActive: () => cy.$(':selected').length > 0,
+  edgeColor, edgeWidth, edgeCaption: d => d.virtual ? '' : edgeCaption(d),
+  edgeCaptionsAlways: () => S.edgeCaptionsAlways, hiddenCount: n => hiddenCount(n), highlightActive: () => cy.elements('.hl').length > 0,
   groupCaption: d => d.caption || '',
 };
 function restyle() { refreshRanges(); syncSizes(); R.redraw(); drawMinimap(); persistStyles(); }
@@ -257,8 +285,8 @@ function addGraph(g, around = null, opts = {}) {
 }
 function afterGraphChange() {
   $('#landing').classList.toggle('hidden', cy.nodes().length > 0);
-  applyEdgeGrouping(); applyFilters(); if (Object.values(S.cat).some(c => c.sizeRule?.prop)) { refreshRanges(); syncSizes(); } R.indexParallel(); updateHighlight(); R.redraw(); drawMinimap();
-  if (S.rightPanel) renderRightPanel(); updateBudgetChip(); markDirty();
+  applyEdgeGrouping(); applyFilters(); if (Object.values(S.cat).some(c => c.sizeRule?.prop)) { refreshRanges(); syncSizes(); } R.indexParallel(); applyFocusClasses(); updateHighlight(); R.redraw(); drawMinimap();
+  if (S.rightPanel) renderRightPanel(); updateBudgetChip(); renderLegend(); markDirty();
 }
 
 // ---------- undo / redo / snapshots ----------------------------------------------------
@@ -291,7 +319,7 @@ function paintOverlay() {
   octx.clearRect(0, 0, innerWidth, innerHeight);
   if (S.lasso && S.lasso.pts.length > 1) {
     octx.save(); octx.beginPath(); S.lasso.pts.forEach((p, i) => i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)); octx.closePath();
-    octx.fillStyle = 'rgba(35,101,241,.08)'; octx.fill(); octx.setLineDash([5, 4]); octx.strokeStyle = '#2365f1'; octx.lineWidth = 1.5; octx.stroke(); octx.restore();
+    octx.fillStyle = 'rgba(20,143,138,.1)'; octx.fill(); octx.setLineDash([5, 4]); octx.strokeStyle = '#148f8a'; octx.lineWidth = 1.5; octx.stroke(); octx.restore();
   }
 }
 
@@ -306,7 +334,7 @@ function drawMinimap() {
   ctx.strokeStyle = 'rgba(120,120,120,.35)'; ctx.lineWidth = 0.5; ctx.beginPath();
   cy.edges(':visible').forEach(e => { const a = e.source().position(), b = e.target().position(); ctx.moveTo(a.x * s + ox, a.y * s + oy); ctx.lineTo(b.x * s + ox, b.y * s + oy); }); ctx.stroke();
   nodes.forEach(n => { const p = n.position(); ctx.fillStyle = nodeColor(n.data()); ctx.beginPath(); ctx.arc(p.x * s + ox, p.y * s + oy, 2, 0, 7); ctx.fill(); });
-  ctx.strokeStyle = '#2365f1'; ctx.lineWidth = 1.5; ctx.strokeRect(ext.x1 * s + ox, ext.y1 * s + oy, (ext.x2 - ext.x1) * s, (ext.y2 - ext.y1) * s);
+  ctx.strokeStyle = '#148f8a'; ctx.lineWidth = 1.5; ctx.strokeRect(ext.x1 * s + ox, ext.y1 * s + oy, (ext.x2 - ext.x1) * s, (ext.y2 - ext.y1) * s);
 }
 
 // ---------- selection + highlight ---------------------------------------------------
@@ -320,6 +348,38 @@ function updateHighlight() {
   }
   $('#open-selpanel').classList.toggle('hidden', !sel.length || S.selPanelOpen);
   renderLeftPanel();
+}
+function applyFocusClasses() {
+  if (!cy) return;
+  cy.batch(() => {
+    cy.elements('.dim, .path').removeClass('dim path');
+    if (!S.focus.on || !S.focus.nodes) return;
+    const nodes = S.focus.nodes, edges = S.focus.edges || new Set();
+    cy.nodes().forEach(n => { if (!nodes.has(n.id())) n.addClass('dim'); });
+    cy.edges().forEach(e => { if (edges.has(e.id())) e.addClass('path'); else e.addClass('dim'); });
+  });
+}
+function setFocus(on) {
+  if (on && !(S.focus.nodes && S.focus.nodes.size)) { toast('Run a query to focus its result'); on = false; }
+  S.focus.on = !!on;
+  $('#focus-toggle')?.classList.toggle('on', S.focus.on);
+  applyFocusClasses();
+  if (R) R.redraw();
+  if (S.rightPanel === 'queries') renderRightPanel();
+}
+function renderLegend() {
+  const el = $('#legend'); if (!el || !cy) return;
+  const byId = Object.fromEntries((S.cfg.families || []).map(f => [f.id, f]));
+  const present = new Map();
+  realNodes().forEach(n => {
+    const cat = n.data('category');
+    const id = S.cat[cat]?.family || familyOf(cat);
+    if (!id || present.has(id)) return;
+    present.set(id, byId[id] || { id, label: id, color: S.cat[cat]?.color || '#9e9e9e' });
+  });
+  if (!present.size) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = [...present.values()].map(f => `<div class="leg-row"><span class="leg-sw" style="background:${esc(f.color)}"></span>${esc(f.label)}</div>`).join('');
 }
 function selectOnly(eles) { cy.$(':selected').unselect(); eles.select(); }
 
@@ -405,12 +465,16 @@ function runForceLarge(eles, opts, done) {
   nodes.forEach(n => { const p = n._private.position; g.addNode(n.id(), { x: p.x / 10, y: p.y / 10, size: (n._private.data._s || 26) / 20 + 0.6, fixed: !!(n._private.data.pinned || n.locked() || (opts.onlyNew && !opts.onlyNew.has(n))) }); });
   eles.edges().forEach(e => { const a = e._private.data.source, b = e._private.data.target; if (a !== b && g.hasNode(a) && g.hasNode(b) && !g.hasEdge(a, b)) g.addEdge(a, b); });
   const settings = { ...inferSettings(g), barnesHutOptimize: nodes.length > 2000, barnesHutTheta: 0.9, adjustSizes: nodes.length <= 2000, scalingRatio: nodes.length <= 2000 ? 3 : 12, gravity: nodes.length <= 2000 ? 1.5 : 0.6, slowDown: 3, strongGravityMode: false, linLogMode: false };
-  const L = new FA2Layout(g, { settings }); L.start(); R.fastMode = true;
+  const L = new FA2Layout(g, { settings }); L.start(); R.fastMode = true; setLayoutRunning(true);
   const t0 = performance.now(), budget = opts.budgetMs ?? Math.min(20000, (nodes.length < 2000 ? 1200 : 2000) + nodes.length * 0.15); let frame = 0, live = true;
   const sync = () => { nodes.forEach(n => { const a = g.getNodeAttributes(n.id()); n._private.position.x = a.x * 10; n._private.position.y = a.y * 10; }); R.positionsChanged(); };
   const tick = () => { if (!live) return; if (++frame % 4 === 0) sync(); if (performance.now() - t0 < budget) requestAnimationFrame(tick); else stop(); };
-  const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; R.fastMode = false; sync(); cy.emit('position'); done && done(); };
+  const stop = () => { if (!live) return; live = false; L.kill(); fa2Run = null; R.fastMode = false; setLayoutRunning(false); sync(); cy.emit('position'); done && done(); };
   fa2Run = { stop }; requestAnimationFrame(tick);
+}
+function setLayoutRunning(on) {
+  document.body.classList.toggle('is-laying-out', !!on);
+  $('#layout-chip')?.classList.toggle('hidden', !on);
 }
 function runLayout(opts = {}) {
   const name = opts.name || S.layout.name; const eles = cy.elements(':visible');
@@ -440,7 +504,8 @@ function runLayout(opts = {}) {
       nodeRepulsion: 22000, idealEdgeLength: 95, edgeElasticity: 0.45, nodeSeparation: 90, nestingFactor: 0.6, gravity: 0.3, numIter: S.layout.fast ? 1200 : 2500, packComponents: true, nodeDimensionsIncludeLabels: false,
       fixedNodeConstraint: pinned.length ? pinned.map(n => ({ nodeId: n.id(), position: { ...n.position() } })) : undefined, fit: !!opts.fit });
   }
-  L.one('layoutstop', () => { lockedTmp.unlock(); if (opts.fit) R.animate({ fit: cy.elements(':visible'), padding: 80 }); drawOverlay(); drawMinimap(); markDirty(); });
+  setLayoutRunning(true);
+  L.one('layoutstop', () => { setLayoutRunning(false); lockedTmp.unlock(); if (opts.fit) R.animate({ fit: cy.elements(':visible'), padding: 80 }); drawOverlay(); drawMinimap(); markDirty(); });
   L.run();
 }
 
@@ -566,6 +631,38 @@ function catChip(c, isEdge = false) {
   const col = S.cat[c]?.color || '#9e9e9e';
   return `<span class="cat ${lighten(col) ? 'light' : ''}" style="background:${col}">${esc(c)}</span>`;
 }
+function markText(s, q) {
+  s = String(s ?? ''); const ql = String(q || '').trim().toLowerCase();
+  if (!ql) return esc(s);
+  const i = s.toLowerCase().indexOf(ql);
+  if (i < 0) return esc(s);
+  return esc(s.slice(0, i)) + '<mark>' + esc(s.slice(i, i + ql.length)) + '</mark>' + esc(s.slice(i + ql.length));
+}
+function accountOf(props) {
+  const p = props || {};
+  const direct = p.accountid || p.account_id || p.accountId;
+  if (direct) return String(direct);
+  const m = /:(\d{8,}):/.exec(String(p.arn || ''));
+  return m ? m[1] : '';
+}
+function searchSubline(props, q) {
+  const acct = accountOf(props);
+  const arn = props && props.arn ? String(props.arn) : '';
+  if (!acct && !arn) return propSnippet(props, q);
+  return [acct ? markText(acct, q) : '', arn ? markText(arn, q) : ''].filter(Boolean).join(' · ');
+}
+function searchRowsHtml(items, q) {
+  if (!items.length) return '<div class="sr-empty">No result</div>';
+  if (items[0].kind !== 'node') {
+    return items.map((it, i) => `<div class="sr" data-i="${i}"><div class="sr-main"><div class="sr-title">${markText(it.edge.type, q)}${it.edge.sourceNode ? ' · ' + esc(nodeCaption(it.edge.sourceNode)) + ' → ' + esc(nodeCaption(it.edge.targetNode)) : ''}</div><div class="sr-props">${propSnippet(it.edge.props, q)}</div></div>${catChip(it.edge.type, true)}</div>`).join('');
+  }
+  const groups = new Map();
+  items.forEach((it, i) => { const c = it.node.category || 'Other'; if (!groups.has(c)) groups.set(c, []); groups.get(c).push(i); });
+  return [...groups].map(([c, idxs]) => `<div class="sr-group">${catChip(c)}<span class="sr-count">${idxs.length}</span></div>` + idxs.map(i => {
+    const it = items[i];
+    return `<div class="sr" data-i="${i}"><div class="sr-main"><div class="sr-title">${markText(nodeCaption(it.node), q)}</div><div class="sr-props">${searchSubline(it.node.props, q)}</div></div>${catChip(it.node.category)}</div>`;
+  }).join('')).join('');
+}
 async function runSearch() {
   const q = $('#search-input').value.trim(); const seq = ++searchSeq; const box = $('#search-results');
   $('#search').classList.toggle('has-text', !!q);
@@ -583,10 +680,7 @@ async function runSearch() {
     } catch (e) { box.innerHTML = `<div class="sr-empty err">${esc(e.message)}</div>`; return; }
   }
   searchRes = items;
-  box.innerHTML = items.length ? items.map((it, i) => it.kind === 'node'
-    ? `<div class="sr" data-i="${i}"><div class="sr-main"><div class="sr-title">${esc(nodeCaption(it.node))}</div><div class="sr-props">${propSnippet(it.node.props, q)}</div></div>${catChip(it.node.category)}</div>`
-    : `<div class="sr" data-i="${i}"><div class="sr-main"><div class="sr-title">${esc(it.edge.type)}${it.edge.sourceNode ? ' · ' + esc(nodeCaption(it.edge.sourceNode)) + ' → ' + esc(nodeCaption(it.edge.targetNode)) : ''}</div><div class="sr-props">${propSnippet(it.edge.props, q)}</div></div>${catChip(it.edge.type, true)}</div>`).join('')
-    : '<div class="sr-empty">No result</div>';
+  box.innerHTML = searchRowsHtml(items, q);
 }
 function pickSearch(i) {
   const it = searchRes[i]; if (!it) return; closeSearch();
@@ -632,7 +726,7 @@ function renderLeftPanel() {
       main = `<div class="lp-head"><div class="lp-title" title="${esc(nodeCaption(d))}">${esc(nodeCaption(d))}</div><div class="lp-id" title="${esc(d.id)}">#${esc(shortId(d.id))}</div></div>
         <div class="lp-cats">${d.labels.map(l => l === d.category ? catChip(l) : `<span class="cat light" style="background:#e6e6e6">${esc(l)}</span>`).join('')}
           <span class="swatch" style="background:${nodeColor(d)}" data-lp="design"></span><span class="pct">${st.size}%</span></div>
-        ${propList(d.props)}`;
+        ${inspectorActions()}${groupedProps(el)}`;
     } else {
       const s = cy.getElementById(d.source), t = cy.getElementById(d.target);
       main = `<div class="lp-head"><div class="lp-title">${esc(d.type)}${d.meta ? ` (${d.count})` : ''}</div><div class="lp-id" title="${esc(d.id)}">${d.meta ? 'group' : '#' + esc(shortId(d.id))}</div></div>
@@ -648,15 +742,65 @@ function renderLeftPanel() {
   const inp = $('.searchbox input', lp);
   if (inp) { inp.value = TBL.q; inp.oninput = () => { TBL.q = inp.value; filterPropList(); }; filterPropList(); }
 }
+function propRow(k, shown) {
+  const v = String(shown ?? ''); const long = v.length > 180;
+  return `<div class="prop" data-k="${esc(k)}"><div class="k">${esc(k)}</div><div class="v">${esc(long ? v.slice(0, 180) : v)}${long ? `… <a href="#" data-more="${esc(k)}">Show more</a>` : ''}</div></div>`;
+}
 function propList(props) {
   const keys = Object.keys(props || {}).sort();
   return `<div class="searchbox"><input placeholder="Search in the properties">${ico('Magnify')}</div>
-    <div class="props">${keys.map(k => { const v = fmt(props[k]); const long = v.length > 180;
-      return `<div class="prop" data-k="${esc(k)}"><div class="k">${esc(k)}</div><div class="v">${esc(long ? v.slice(0, 180) : v)}${long ? `… <a href="#" data-more="${esc(k)}">Show more</a>` : ''}</div></div>`; }).join('') || '<div class="empty">No properties</div>'}</div>`;
+    <div class="props">${keys.map(k => propRow(k, fmt(props[k]))).join('') || '<div class="empty">No properties</div>'}</div>`;
+}
+function fmtTime(v) {
+  const n = Number(v);
+  if (!isFinite(n) || n === 0) return fmt(v);
+  const ms = n > 1e12 ? n : n > 1e9 ? n * 1000 : null;
+  if (ms == null) return fmt(v);
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? fmt(v) : d.toLocaleString();
+}
+function inspectorActions() {
+  return `<div class="lp-actions"><button class="btn outline small" data-lp="copy-id">Copy id</button><button class="btn outline small" data-lp="neo4j">Open in Neo4j</button></div>`;
+}
+const ID_KEYS = /^(id|name|arn|title|displayname|username|fullname|email|login|instanceid|keyname|accountid|account_id|caption|label)$/i;
+const EXPOSE_KEYS = /exposed|public|anonymous|internet|admin|privilege|mfa|2fa|foreign|permission|policy|trust|open|cidr|range/i;
+const TIME_KEYS = /firstseen|lastupdated|created|updated|_at$|date|time/i;
+const META_KEYS = /_module_|_ont_/;
+function groupedProps(el) {
+  const props = el.data('props') || {};
+  const keys = Object.keys(props);
+  const used = new Set();
+  const take = re => keys.filter(k => !used.has(k) && re.test(k)).sort().map(k => { used.add(k); return k; });
+  const id = take(ID_KEYS), exp = take(EXPOSE_KEYS), time = take(TIME_KEYS), meta = take(META_KEYS);
+  const other = keys.filter(k => !used.has(k)).sort();
+  const rel = {};
+  el.connectedEdges().forEach(e => { const d = e.data(); if (d.meta || d.virtual) return; const t = d.type || 'RELATED'; rel[t] = (rel[t] || 0) + 1; });
+  const section = (title, rows) => rows ? `<div class="prop-sec"><div class="section-t">${title}</div>${rows}</div>` : '';
+  const rowsOf = (ks, asTime) => ks.map(k => propRow(k, asTime ? fmtTime(props[k]) : fmt(props[k]))).join('');
+  const relRows = Object.entries(rel).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t, n]) => propRow(t, String(n))).join('');
+  const metaRows = meta.map(k => propRow(k, fmt(props[k]))).join('');
+  return `<div class="searchbox"><input placeholder="Search in the properties">${ico('Magnify')}</div>
+    <div class="props">${section('Identity', rowsOf(id))}${section('Exposure', rowsOf(exp))}${section('Relationships', relRows)}${section('Timestamps', rowsOf(time, true))}${section('Properties', rowsOf(other))}${metaRows ? `<details class="prop-sec"><summary class="section-t">Module fields</summary>${metaRows}</details>` : ''}${!keys.length && !relRows ? '<div class="empty">No properties</div>' : ''}</div>`;
+}
+function neo4jBrowserUrl(cypher) {
+  const uri = S.status?.uri || '';
+  const m = /^(?:bolt|neo4j)(\+s|\+ssc)?:\/\/([^/:]+)(?::(\d+))?/i.exec(uri);
+  if (!m) return null;
+  const secure = m[1] === '+s' || m[1] === '+ssc';
+  return `${secure ? 'https' : 'http'}://${m[2]}:${secure ? 7473 : 7474}/browser/?cmd=edit&arg=${encodeURIComponent(cypher)}`;
+}
+function copyText(text, ok = 'Copied') {
+  const done = () => toast(ok);
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(() => toast('Could not copy'));
+  else toast('Could not copy');
 }
 function filterPropList() {
   const q = TBL.q.toLowerCase();
   $$('#leftpanel .prop[data-k]').forEach(p => { const m = !q || p.textContent.toLowerCase().includes(q); p.classList.toggle('hidden', !m); p.classList.toggle('hit', !!q && m); });
+  $$('#leftpanel .prop-sec').forEach(sec => {
+    const props = $$('.prop[data-k]', sec);
+    sec.classList.toggle('hidden', !!q && props.length > 0 && props.every(p => p.classList.contains('hidden')));
+  });
   $$('#leftpanel table.sel tbody tr').forEach(tr => { tr.classList.toggle('hidden', !!q && !tr.textContent.toLowerCase().includes(q)); });
 }
 function edgeGroupAgg(d) {
@@ -716,7 +860,8 @@ function renderRightPanel() {
   if (!S.rightPanel) { rp.classList.add('hidden'); return; }
   rp.classList.remove('hidden');
   const scroll = $('.rp-body', rp)?.scrollTop || 0;
-  const fn = { filters: panelFilters, design: panelDesign, layout: panelLayout, nodegroup: panelNodeGroup, edgegroup: panelEdgeGroup, queries: panelQueries, timeline: panelTimeline }[S.rightPanel];
+  const fn = { filters: panelFilters, design: panelDesign, layout: panelLayout, nodegroup: panelNodeGroup, edgegroup: panelEdgeGroup, queries: panelQueries }[S.rightPanel];
+  if (!fn) { S.rightPanel = null; rp.classList.add('hidden'); document.body.classList.remove('rp-open'); return; }
   rp.innerHTML = fn(); paintIcons(rp);
   const b = $('.rp-body', rp); if (b) b.scrollTop = scroll;
 }
@@ -832,7 +977,8 @@ function panelEdgeGroup() {
 function panelQueries() {
   const saved = JSON.parse(localStorage.getItem('gx:queries') || '[]');
   const list = (arr, local) => arr.map((q, i) => `<div class="q-item" data-qrun="${local ? 'l' : 'b'}|${i}"><div class="q-name">${esc(q.name)}</div><div class="q-tags">${esc((q.tags || []).join(' · '))}${local ? ' · saved locally' : ''}</div></div>`).join('');
-  return rpFrame('QUERIES', 'CodeBraces', `<div class="section-d" style="margin-top:6px">Read-only Cypher. Click a query to add its result to the visualization.</div>${list(S.queries, false)}${saved.length ? '<div class="section-t">My queries</div>' + list(saved, true) : ''}`, `<span></span><button class="btn primary" data-act="code-query">Code a query</button>`);
+  const focusRow = `<div class="row"><span class="name lc">Focus the last query</span>${sw(!!S.focus.on, 'data-focus="1"')}</div>`;
+  return rpFrame('QUERIES', 'CodeBraces', `<div class="section-d" style="margin-top:6px">Read-only Cypher. Click a query to add its result to the visualization. Focus dims everything outside that result.</div>${focusRow}${list(S.queries, false)}${saved.length ? '<div class="section-t">My queries</div>' + list(saved, true) : ''}`, `<span></span><button class="btn primary" data-act="code-query">Code a query</button>`);
 }
 function panelTimeline() {
   return rpFrame('TIMELINE', 'ClockOutline', `<div class="empty">The timeline is not part of this Explore-phase prototype. Cartography stores <code>firstseen</code> / <code>lastupdated</code> as epoch seconds, so a timeline is feasible later; use the Filters panel number bounds on those properties for now.</div>`);
@@ -1005,6 +1151,14 @@ async function runQueryToGraph(cypher, errEl = null) {
     }
     const added = addGraph(r, null, { toastTruncation: false });
     await fetchEdgesAmongVisible();
+    if (!(S.canvasRefused || !added.nodes().length)) {
+      S.focus.nodes = new Set((r.nodes || []).map(n => n.id));
+      S.focus.edges = new Set((r.edges || []).map(e => e.id));
+      S.focus.on = S.focus.nodes.size > 0;
+      $('#focus-toggle')?.classList.toggle('on', S.focus.on);
+      applyFocusClasses();
+      if (R) R.redraw();
+    }
     if (S.canvasRefused || !added.nodes().length) {
       S.undo.pop(); updateUndoBtns(); pushed = false;
       return false;
@@ -1147,10 +1301,21 @@ let dirtyT;
 function markDirty() { if (S.viz.saved && S.viz.autosave) { clearTimeout(dirtyT); dirtyT = setTimeout(() => saveViz(), 700); } }
 function updateSaveChip() {
   const c = $('#save-chip'), t = $('#viz-title');
-  t.classList.toggle('hidden', !S.viz.saved); t.textContent = S.viz.title || '';
+  const title = S.viz.title || 'Untitled';
+  t.classList.remove('hidden'); t.textContent = title; t.title = title;
   if (!S.viz.saved) { c.className = 'chip warn'; c.innerHTML = ico('AlertCircleOutline') + 'Not saved'; }
   else if (S.viz.autosave) { c.className = 'chip ok'; c.innerHTML = ico('CheckCircle') + 'Auto save ON'; }
   else { c.className = 'chip warn'; c.innerHTML = ico('AlertCircleOutline') + 'Auto save OFF'; }
+  renderLanding();
+}
+function renderLanding() {
+  const qEl = $('#land-queries');
+  if (qEl) qEl.innerHTML = S.queries.length ? `<div class="land-h">Security queries</div>` + S.queries.map((q, i) => `<button class="land-q" data-act="land-query" data-i="${i}"><b>${esc(q.name)}</b><small>${esc((q.tags || []).join(' · '))}</small></button>`).join('') : '';
+  const vEl = $('#land-views');
+  if (vEl) {
+    const list = vizList().slice(0, 6);
+    vEl.innerHTML = list.length ? `<div class="land-h">Recent views</div>` + list.map(v => `<button class="land-q" data-act="land-view" data-id="${esc(v.id)}"><b>${esc(v.title)}</b><small>${v.nodes} nodes</small></button>`).join('') : '';
+  }
 }
 
 // ---------- popovers (design) ----------------------------------------------------------
@@ -1196,7 +1361,7 @@ function openHelp() {
   const k = (a, b) => `<tr><td>${a.split('+').map(x => `<span class="kbd">${x}</span>`).join(' + ')}</td><td>${b}</td></tr>`;
   modal('Help', `<div style="display:flex;gap:24px"><div style="flex:1"><div class="section-t">Keyboard shortcuts</div><table class="kv">
     ${k('←/↑/→/↓', 'Move camera')}${k('+', 'Zoom in')}${k('-', 'Zoom out')}${k('Ctrl+click', 'Add/remove from selection')}${k('Ctrl+A', 'Select all nodes')}${k('Ctrl+Backspace', 'Remove selection from visualization')}
-    ${k('Ctrl+drag', 'Lasso')}${k('Ctrl+Shift+drag', 'Edge lasso')}${k('Shift+click', 'Select direct neighbors')}${k('Ctrl+C', 'Copy selected nodes')}${k('Ctrl+V', 'Paste copied nodes')}${k('Ctrl+Z', 'Undo')}${k('Ctrl+Y', 'Redo')}${k('Double-click', 'Expand node / toggle group')}${k('Esc', 'Clear selection')}</table></div>
+    ${k('Ctrl+drag', 'Lasso')}${k('Ctrl+Shift+drag', 'Edge lasso')}${k('Shift+click', 'Select direct neighbors')}${k('Ctrl+C', 'Copy selected nodes')}${k('Ctrl+V', 'Paste copied nodes')}${k('Ctrl+Z', 'Undo')}${k('Ctrl+Y', 'Redo')}${k('/', 'Focus search')}${k('F', 'Fit the graph')}${k('E', 'Expand the selection')}${k('P', 'Pin or unpin the selection')}${k('?', 'Open this help')}${k('Ctrl+K', 'Command palette')}${k('Double-click', 'Expand node / toggle group')}${k('Esc', 'Clear selection')}</table></div>
     <div style="flex:1"><div class="section-t">Connection</div><table class="kv" data-conn="1"><tr><td>Loading…</td></tr></table><div class="section-d" style="margin-top:10px">Unofficial Explore-phase prototype inspired by a commercial graph-investigation UI. Not affiliated with or endorsed by its vendor. Read-only access to Neo4j.</div></div></div>`, '', { width: 900 });
   api('/api/status').then(s => { const t = $('[data-conn]'); if (t) t.innerHTML = Object.entries(s).map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(String(b))}</td></tr>`).join(''); }).catch(e => { const t = $('[data-conn]'); if (t) t.innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; });
 }
@@ -1222,6 +1387,9 @@ const ACTIONS = {
   'more-menu': el => { const r = el.getBoundingClientRect(); showMenu(backgroundMenuItems(), r.left, r.bottom + 6); },
   'undo': undo, 'redo': redo, 'code-query': () => openCodeQuery(), 'explore-queries': () => openPanel('queries'), 'data-model': openDataModel, 'help': openHelp,
   'focus-search': () => $('#search-input').focus(), 'advanced-search': openAdvancedSearch, 'budget': openBudgetSettings,
+  'focus-toggle': () => setFocus(!S.focus.on),
+  'land-query': el => { const q = S.queries[+el.dataset.i]; if (q) runQueryToGraph(q.cypher); },
+  'land-view': el => loadViz(el.dataset.id),
   'zoom-in': () => zoomBy(1.35), 'zoom-out': () => zoomBy(1 / 1.35),
   'locate': () => { const s = cy.$(':selected'); R.animate({ fit: s.length ? s.union(s.connectedNodes()) : cy.elements(':visible'), padding: 90 }); },
   'minimap': () => { S.minimap = !S.minimap; $('#minimap').classList.toggle('hidden', !S.minimap); $('#btn-minimap').classList.toggle('on', S.minimap); drawMinimap(); },
@@ -1246,7 +1414,7 @@ $('#save-chip').onclick = () => S.viz.saved ? (S.viz.autosave = !S.viz.autosave,
 
 // right panel delegation
 $('#rightpanel').addEventListener('click', e => {
-  const t = e.target.closest('[data-rp],[data-ftab],[data-open],[data-ftog],[data-fsel],[data-unf],[data-f],[data-dtab],[data-dsub],[data-icon-pick],[data-color],[data-size],[data-vcolor],[data-ecolor],[data-ewidth],[data-capdel],[data-ecapall],[data-d],[data-pref],[data-lay],[data-lfast],[data-lroot],[data-lrun],[data-gdel],[data-gtog],[data-gnew],[data-egtog],[data-qrun]');
+  const t = e.target.closest('[data-rp],[data-ftab],[data-open],[data-ftog],[data-fsel],[data-unf],[data-f],[data-dtab],[data-dsub],[data-icon-pick],[data-color],[data-size],[data-vcolor],[data-ecolor],[data-ewidth],[data-capdel],[data-ecapall],[data-d],[data-pref],[data-lay],[data-lfast],[data-lroot],[data-lrun],[data-gdel],[data-gtog],[data-gnew],[data-egtog],[data-qrun],[data-focus]');
   if (!t) return; const d = t.dataset;
   if (d.rp) return openPanel(S.rightPanel);
   if (d.ftab) { RP.filterTab = d.ftab; return renderRightPanel(); }
@@ -1285,6 +1453,7 @@ $('#rightpanel').addEventListener('click', e => {
   if (d.gnew) return openRuleDialog();
   if (d.egtog) { S.edgeGroups.has(d.egtog) ? S.edgeGroups.delete(d.egtog) : S.edgeGroups.add(d.egtog); afterGraphChange(); return; }
   if (d.qrun) { const [k, i] = d.qrun.split('|'); const q = k === 'b' ? S.queries[+i] : JSON.parse(localStorage.getItem('gx:queries') || '[]')[+i]; return runQueryToGraph(q.cypher); }
+  if (d.focus != null) return setFocus(!S.focus.on);
 });
 $('#rightpanel').addEventListener('change', e => {
   const d = e.target.dataset;
@@ -1299,6 +1468,14 @@ $('#leftpanel').addEventListener('click', e => {
   const t = e.target.closest('[data-lp],[data-goto],[data-more],[data-jump],[data-sort],[data-page],tr[data-row]'); if (!t) return; e.preventDefault(); const d = t.dataset;
   const sel = cy.$(':selected');
   if (d.lp === 'close') { S.selPanelOpen = false; return updateHighlight(); }
+  if (d.lp === 'copy-id') { const id = sel[0]?.id(); if (id) copyText(id, 'Copied id'); return; }
+  if (d.lp === 'neo4j') {
+    const el = sel[0]; if (!el) return;
+    const q = el.isNode() ? `MATCH (n) WHERE elementId(n) = ${JSON.stringify(el.id())} RETURN n` : `MATCH ()-[r]-() WHERE elementId(r) = ${JSON.stringify(el.id())} RETURN r`;
+    const url = neo4jBrowserUrl(q);
+    if (url) window.open(url, '_blank', 'noopener'); else copyText(q, 'Copied the Cypher query');
+    return;
+  }
   if (d.lp === 'locate') return ACTIONS.locate();
   if (d.lp === 'expand') { const r = t.getBoundingClientRect(); const ns = sel.nodes().filter(n => !n.data('group')); if (!ns.length) return; showMenu([{ label: 'Expand', icon: 'ArrowExpandAll', sub: () => expandSubmenu(ns) }], r.right + 4, r.top); return; }
   if (d.lp === 'remove') return removeEles(sel);
@@ -1320,7 +1497,7 @@ sInput.addEventListener('input', () => { $('#search-dd').classList.remove('hidde
 sInput.addEventListener('keydown', e => {
   const rows = $$('#search-results .sr'); let i = rows.findIndex(r => r.classList.contains('active'));
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); rows[i]?.classList.remove('active'); i = Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1))); rows[i]?.classList.add('active'); rows[i]?.scrollIntoView({ block: 'nearest' }); }
-  if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchTimer); runSearch().then(() => pickSearch(Math.max(0, i))); }
+  if (e.key === 'Enter') { e.preventDefault(); const active = $('#search-results .sr.active'); const idx = active ? +active.dataset.i : 0; clearTimeout(searchTimer); runSearch().then(() => pickSearch(Number.isFinite(idx) ? idx : 0)); }
   if (e.key === 'Escape') { closeSearch(); sInput.blur(); }
 });
 $('#search-results').addEventListener('click', e => { const r = e.target.closest('.sr'); if (r) pickSearch(+r.dataset.i); });
@@ -1328,13 +1505,102 @@ $('#search-clear').onclick = () => { sInput.value = ''; runSearch(); sInput.focu
 $$('.sd-head [data-kind]').forEach(a => a.onclick = () => { S.searchKind = a.dataset.kind; $$('.sd-head [data-kind]').forEach(x => x.classList.toggle('on', x === a)); runSearch(); });
 $$('.sd-head [data-scope]').forEach(a => a.onclick = () => { S.searchScope = a.dataset.scope; $$('.sd-head [data-scope]').forEach(x => x.classList.toggle('on', x === a)); runSearch(); });
 
+function expandShortcut() {
+  const nodes = cy.$('node:selected').filter(n => !n.data('group') && !n.data('hubgroup'));
+  if (!nodes.length) return toast('Select a node to expand');
+  if (nodes.length === 1) expandDefault(nodes[0]); else expand(nodes);
+}
+function pinShortcut() {
+  const nodes = cy.$('node:selected').filter(n => !n.data('group') && !n.data('hubgroup'));
+  if (!nodes.length) return toast('Select a node to pin');
+  const pinned = nodes.every(n => n.data('pinned'));
+  nodes.forEach(n => n.data('pinned', !pinned));
+  R.redraw(); markDirty();
+  toast(pinned ? 'Unpinned' : 'Pinned');
+}
+let cmdkSeq = 0, cmdkTimer = null;
+function commandList() {
+  return [
+    { label: 'Search', hint: '/', run: () => ACTIONS['focus-search']() },
+    { label: 'Fit', hint: 'F', run: () => R.animate({ fit: cy.elements(':visible'), padding: 80 }) },
+    { label: 'Expand selection', hint: 'E', run: expandShortcut },
+    { label: 'Pin selection', hint: 'P', run: pinShortcut },
+    { label: 'Help', hint: '?', run: openHelp },
+    { label: 'Queries', run: () => openPanel('queries') },
+    { label: 'Cypher', run: () => openCodeQuery() },
+    { label: 'Data model', run: openDataModel },
+    { label: 'Toggle focus', run: () => setFocus(!S.focus.on) },
+    { label: 'Toggle theme', run: toggleTheme },
+    ...S.queries.map(q => ({ label: q.name, hint: 'Query', run: () => runQueryToGraph(q.cypher) })),
+  ];
+}
+function togglePalette(forceOpen) {
+  const el = $('#cmdk'); if (!el) return;
+  const open = forceOpen == null ? el.classList.contains('hidden') : !!forceOpen;
+  el.classList.toggle('hidden', !open);
+  if (open) { $('#cmdk-input').value = ''; renderPalette(''); setTimeout(() => $('#cmdk-input').focus(), 0); }
+}
+async function renderPalette(q) {
+  const seq = ++cmdkSeq; const ql = q.trim().toLowerCase();
+  const cmds = commandList().filter(c => !ql || c.label.toLowerCase().includes(ql));
+  const box = $('#cmdk-list');
+  box._cmds = cmds; box._nodes = [];
+  let html = cmds.length ? `<div class="cmdk-h">Commands</div>` + cmds.map((c, i) => `<div class="cmdk-item" data-k="c${i}"><span>${esc(c.label)}</span><span class="hint">${esc(c.hint || '')}</span></div>`).join('') : '';
+  box.innerHTML = html || '<div class="sr-empty">Type to search commands and nodes.</div>';
+  if (ql.length >= 2 && S.ready) {
+    try {
+      const r = await api(`/api/search?type=node&limit=15&q=${encodeURIComponent(q.trim())}`);
+      if (seq !== cmdkSeq) return;
+      const items = r.nodes || []; box._nodes = items;
+      if (items.length) {
+        const groups = new Map();
+        items.forEach((n, i) => { const c = n.category || 'Node'; if (!groups.has(c)) groups.set(c, []); groups.get(c).push(i); });
+        let nh = `<div class="cmdk-h">Nodes</div>`;
+        for (const [c, idxs] of groups) {
+          nh += `<div class="sr-group">${esc(c)}</div>`;
+          for (const i of idxs) {
+            const n = items[i]; const sub = searchSubline(n.props, q.trim());
+            nh += `<div class="cmdk-item" data-k="n${i}"><span class="sr-main"><span class="sr-title">${markText(nodeCaption(n), q.trim())}</span>${sub ? `<span class="sr-props">${sub}</span>` : ''}</span></div>`;
+          }
+        }
+        box.insertAdjacentHTML('beforeend', nh);
+      }
+    } catch (e) { /* commands stay usable */ }
+  }
+  box.querySelector('.cmdk-item')?.classList.add('active');
+}
+function runPaletteItem(item) {
+  const box = $('#cmdk-list'); const k = item.dataset.k || '';
+  const cmd = k.startsWith('c') ? box._cmds?.[+k.slice(1)] : null;
+  const node = k.startsWith('n') ? box._nodes?.[+k.slice(1)] : null;
+  togglePalette(false);
+  if (!S.ready) return toast('Initializing…');
+  if (cmd) cmd.run();
+  else if (node) { searchRes = [{ kind: 'node', node }]; pickSearch(0); }
+}
+$('#cmdk').addEventListener('mousedown', e => { if (e.target.id === 'cmdk') togglePalette(false); });
+$('#cmdk-list').addEventListener('click', e => { const item = e.target.closest('.cmdk-item'); if (item) runPaletteItem(item); });
+$('#cmdk-input').addEventListener('input', () => { clearTimeout(cmdkTimer); cmdkTimer = setTimeout(() => renderPalette($('#cmdk-input').value), 160); });
+$('#cmdk-input').addEventListener('keydown', e => {
+  const rows = $$('#cmdk-list .cmdk-item'); let i = rows.findIndex(r => r.classList.contains('active'));
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); rows[i]?.classList.remove('active'); i = Math.max(0, Math.min(rows.length - 1, (i < 0 ? -1 : i) + (e.key === 'ArrowDown' ? 1 : -1))); rows[i]?.classList.add('active'); rows[i]?.scrollIntoView({ block: 'nearest' }); }
+  if (e.key === 'Enter' && rows.length) { e.preventDefault(); runPaletteItem(rows[Math.max(0, i)] || rows[0]); }
+});
+
 // keyboard
 document.addEventListener('keydown', e => {
-  if (e.target.closest('input,textarea,select')) return;
   const mod = e.ctrlKey || e.metaKey; const k = e.key;
+  if (mod && k.toLowerCase() === 'k') { e.preventDefault(); togglePalette(); return; }
+  if (k === 'Escape' && !$('#cmdk').classList.contains('hidden')) { togglePalette(false); return; }
+  if (e.target.closest('input,textarea,select')) return;
   if (!S.ready) { if (k === 'Escape') { closeMenus(); $$('.modal-bg').forEach(m => m.remove()); } return; }
   if (k === 'Escape') { closeMenus(); $$('.modal-bg').forEach(m => m.remove()); cy.$(':selected').unselect(); S.lassoMode = null; return; }
   if ($('.modal-bg')) return;
+  if (!mod && k === '/') { e.preventDefault(); $('#search-input').focus(); return; }
+  if (!mod && (k === 'f' || k === 'F')) { e.preventDefault(); R.animate({ fit: cy.elements(':visible'), padding: 80 }); return; }
+  if (!mod && (k === 'e' || k === 'E')) { e.preventDefault(); expandShortcut(); return; }
+  if (!mod && (k === 'p' || k === 'P')) { e.preventDefault(); pinShortcut(); return; }
+  if (k === '?') { e.preventDefault(); openHelp(); return; }
   const pan = { ArrowLeft: [60, 0], ArrowRight: [-60, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[k];
   if (pan && !mod) { e.preventDefault(); cy.panBy({ x: pan[0], y: pan[1] }); return; }
   if (!mod && (k === '+' || k === '=')) return ACTIONS['zoom-in']();
@@ -1494,9 +1760,12 @@ async function boot() {
   sizeOverlay();
   S.cfg = await api('/api/styles');
   try { S.queries = await api('/api/queries'); } catch { S.queries = []; }
+  renderLanding();
   try {
     const st = await api('/api/status');
+    S.status = st;
     $('#conn').textContent = `${st.server} · ${st.database} · ${st.nodes.toLocaleString()} nodes · ${st.edges.toLocaleString()} edges · read-only`;
+    $('#conn').title = $('#conn').textContent;
     $('#search-input').title = $('#conn').textContent;
     const landNodes = $('#land-nodes');
     if (landNodes) {
@@ -1507,9 +1776,12 @@ async function boot() {
     await applyServerBudget(st);
   }
   catch (e) {
-    $('#conn').innerHTML = `<span class="err">Cannot reach Neo4j: ${esc(e.message)}</span>`;
+    $('#conn').textContent = `Cannot reach Neo4j: ${e.message}`;
+    $('#conn').title = e.message || '';
+    const err = $('#land-error');
+    if (err) { err.textContent = e.message || 'Neo4j is not reachable.'; err.classList.remove('hidden'); }
     const landMeta = $('#land-meta');
-    if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = 'Neo4j is not reachable.'; }
+    if (landMeta) { landMeta.classList.add('is-msg'); landMeta.textContent = `Neo4j is not reachable. ${e.message}`; }
   }
   const stopWait = armLandWait();
   try {
@@ -1519,6 +1791,8 @@ async function boot() {
   window.cy = cy;
   R = GXRender.createRenderer(cy, $('#cy'), VISUALS); window.R = R; R.wheelSensitivity = 0.8;
   let hlT; cy.on('select unselect', () => { clearTimeout(hlT); hlT = setTimeout(updateHighlight, 10); });
+  cy.on('mouseover', 'node', e => { if (cy.$(':selected').length) return; cy.elements('.hl').removeClass('hl'); e.target.closedNeighborhood().addClass('hl'); });
+  cy.on('mouseout', 'node', () => { if (cy.$(':selected').length) return; cy.elements('.hl').removeClass('hl'); });
   cy.on('viewport', () => { drawOverlay(); clearTimeout(cy._mm); cy._mm = setTimeout(drawMinimap, 80); });
   cy.on('tap', 'node', e => { if (e.originalEvent?.shiftKey) setTimeout(() => { const base = cy.$('node:selected').union(e.target); base.union(base.neighborhood().nodes()).select(); }, 0); });
   cy.on('dbltap', 'node', e => { const n = e.target; if (n.data('group')) toggleGroup(n.id()); else expandDefault(n); });
