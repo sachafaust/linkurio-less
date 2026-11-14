@@ -68,9 +68,15 @@ NEO4J_PASSWORD=...
 NEO4J_DATABASE=neo4j
 ```
 
+The `neo4j` driver is not part of system Python. Install it once into `.venv` (the same environment `run_local.py` creates):
+
 ```bash
-python3 server.py    # http://127.0.0.1:8744
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python3 server.py    # http://127.0.0.1:8744
 ```
+
+`python3 server.py` uses that `.venv` when the driver is already installed there.
 
 `HOST`, `PORT`, and `QUIET` change the listener. `GX_ENV` points at a different env file. `SEARCH_FULLTEXT_INDEX` names a full-text index. Without one, search scans at most 200,000 nodes. `python3 tools/create_fulltext_index.py --yes` creates `gx_search`.
 

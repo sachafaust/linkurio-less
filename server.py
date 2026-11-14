@@ -57,6 +57,38 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
 
+
+def _use_project_venv():
+    """Run server.py with the project venv when this Python has no neo4j driver."""
+    if __name__ != "__main__":
+        return
+    try:
+        import neo4j  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    root = Path(__file__).resolve().parent
+    folder = "Scripts" if os.name == "nt" else "bin"
+    name = "python.exe" if os.name == "nt" else "python3"
+    venv_py = root / ".venv" / folder / name
+    if venv_py.is_file() and Path(sys.executable).resolve() != venv_py.resolve() and not os.environ.get("GX_BOOTSTRAPPED"):
+        os.environ["GX_BOOTSTRAPPED"] = "1"
+        os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+    pip = ".venv\\Scripts\\pip" if os.name == "nt" else ".venv/bin/pip"
+    py = ".venv\\Scripts\\python" if os.name == "nt" else ".venv/bin/python3"
+    print(
+        "The neo4j driver is not installed for this Python.\n"
+        "From this folder:\n"
+        "  python3 -m venv .venv\n"
+        f"  {pip} install -r requirements.txt\n"
+        f"  {py} server.py",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+_use_project_venv()
+
 import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
 from neo4j.graph import Node, Path as NPath, Relationship
