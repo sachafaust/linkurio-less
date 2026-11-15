@@ -409,25 +409,60 @@ def tenant_graph_payload():
 
 _TENANT_ALPHA = {"id": "alpha-1", "name": "alpha", "type": "VIRTUAL_MACHINE", "properties": {"region": "us2"}}
 _TENANT_BETA = {"id": "beta-2", "name": "beta", "type": "BUCKET", "properties": {"name": "beta"}}
+_TENANT_GAMMA = {"id": "gamma-3", "name": "gamma", "type": "FIREWALL", "properties": {"name": "gamma"}}
+_TENANT_BOOM = {"id": "boom-1", "name": "boom", "type": "BUCKET", "properties": {"name": "boom"}}
+_TENANT_FW = {"id": "fw-1", "name": "open-sg", "type": "FIREWALL", "properties": {"name": "open-sg"}}
+_TENANT_ENTITIES = [_TENANT_ALPHA, _TENANT_BETA, _TENANT_GAMMA, _TENANT_BOOM, _TENANT_FW]
+_TENANT_REJECT = {"errors": [{"message": "invalid type for variable: 'query'"}], "data": None}
 
 
 def tenant_answer(document, variables):
-    """Reject a $query variable the way the tenant does. Inline documents return entities."""
-    del variables
+    """Reject a $query variable the way the tenant does. Inline documents return entities.
+
+    Neighbors of alpha-1 are two pages. The saved Wiz documents and a property
+    filter each return their own entity. boom-1 fails expand. A name search for
+    explode fails the same way the tenant rejects a query variable.
+    """
+    variables = variables or {}
+    after = variables.get("after")
     if "__schema" in document:
         return 200, tenant_graph_payload()
     if "$query" in document:
-        return 200, {"errors": [{"message": "invalid type for variable: 'query'"}], "data": None}
+        return 200, _TENANT_REJECT
     if "graphSearch" not in document:
         return 200, {"data": {"__typename": "Query"}}
     if "entities" not in document:
         return 200, {"data": {"graphSearch": {"totalCount": 3, "maxCountReached": False}}}
+    if "explode" in document and "relationships" not in document:
+        return 200, _TENANT_REJECT
+    if "relationships" in document and "boom-1" in document:
+        return 200, _TENANT_REJECT
     if "relationships" in document and "alpha-1" in document:
+        if after == "n2":
+            return 200, graph_page([_TENANT_GAMMA], False, None, 2)
+        return 200, graph_page([_TENANT_BETA], True, "n2", 2)
+    if "accessibleFrom.internet" in document:
+        if after == "saved-2":
+            return 200, graph_page([_TENANT_GAMMA], False, None, 2)
+        return 200, graph_page([_TENANT_ALPHA], True, "saved-2", 2)
+    if "0.0.0.0/0" in document:
+        return 200, graph_page([_TENANT_FW], False, None, 1)
+    if "relationships" not in document:
+        matched = [entity for entity in _TENANT_ENTITIES if entity["id"] in document]
+        if matched:
+            return 200, graph_page(matched, False, None, len(matched))
+    if "BUCKET" in document and "relationships" not in document:
         return 200, graph_page([_TENANT_BETA], False, None, 1)
-    if "BUCKET" in document:
+    if "VIRTUAL_MACHINE" in document and "relationships" not in document:
+        return 200, graph_page([_TENANT_ALPHA], False, None, 1)
+    if "boom" in document:
+        return 200, graph_page([_TENANT_BOOM], False, None, 1)
+    if "beta" in document:
         return 200, graph_page([_TENANT_BETA], False, None, 1)
     if "alpha" in document:
         return 200, graph_page([_TENANT_ALPHA], False, None, 1)
+    if "gamma" in document:
+        return 200, graph_page([_TENANT_GAMMA], False, None, 1)
     return 200, graph_page([], False, None, 0)
 
 
@@ -499,27 +534,41 @@ def test_tenant_inline_search_and_expand():
     except GraphQLCallError as exc:
         expanded = {}
         check("expand does not send $query", False, safe(exc))
-    expand_doc = (seen[-1].get("query") if seen else "") or ""
-    expand_vars = (seen[-1].get("variables") if seen else {}) or {}
+    first_page = seen[-2] if len(seen) >= 2 else {}
+    second_page = seen[-1] if seen else {}
+    expand_doc = first_page.get("query") or ""
+    expand_vars = first_page.get("variables") or {}
     check("expand walks relationships and prints the type the schema declares",
-          [node["id"] for node in expanded.get("nodes") or []] == ["beta-2"]
+          [node["id"] for node in expanded.get("nodes") or []] == ["beta-2", "gamma-3"]
           and expanded.get("edges") and expanded["edges"][0]["type"] == "related"
           and expanded["edges"][0]["id"] == "alpha-1:related:beta-2"
+          and expanded["edges"][1]["id"] == "alpha-1:related:gamma-3"
           and "relationships" in expand_doc and "with:" in expand_doc
           and 'EQUALS: ["alpha-1"]' in expand_doc
           and "type: [{ type: CONTAINS }]" in expand_doc
           and "EXACT" not in expand_doc and "$query" not in expand_doc
           and '"CONTAINS"' not in expand_doc
-          and expand_vars.get("quick") is True,
+          and expand_vars.get("quick") is True
+          and "after" not in expand_vars
+          and (second_page.get("variables") or {}).get("after") == "n2",
           safe(expand_doc)[:900])
+    one = src.expand(["alpha-1"], [], limit=1)
+    nxt = src.expand(["alpha-1"], ["alpha-1", "beta-2"], limit=1)
+    check("expand returns one neighbor page and then the next",
+          [node["id"] for node in one.get("nodes") or []] == ["beta-2"] and one.get("more") is True
+          and [node["id"] for node in nxt.get("nodes") or []] == ["gamma-3"],
+          safe({"first": one.get("nodes"), "second": nxt.get("nodes"), "more": one.get("more")}))
 
     try:
         summary = src.neighbor_summary(["alpha-1"], [])
     except GraphQLCallError as exc:
         summary = {}
         check("neighbor summary does not send $query", False, safe(exc))
-    check("neighbor summary returns the connected entity",
-          summary.get("degree") == 1 and summary.get("categories", {}).get("BUCKET") == 1
+    hidden = src.neighbor_summary(["alpha-1"], ["beta-2"])
+    check("neighbor summary scales the partial page",
+          summary.get("degree") == 2 and summary.get("approximate") is True
+          and summary.get("categories", {}).get("BUCKET") == 2
+          and hidden.get("degree") == 2 and hidden.get("total") == 0
           and "$query" not in ((seen[-1].get("query") if seen else "") or ""),
           safe(summary))
 
@@ -535,6 +584,34 @@ def test_tenant_inline_search_and_expand():
           and "properties" in detail_doc and 'EQUALS: ["alpha-1"]' in detail_doc
           and "relationships" not in detail_doc and "$query" not in detail_doc,
           safe(detail_doc)[:800])
+    both = src.nodes(["alpha-1", "beta-2"])
+    check("opening several nodes keeps each id",
+          [node["id"] for node in both.get("nodes") or []] == ["alpha-1", "beta-2"],
+          safe(both.get("nodes")))
+    named = src.search("", prop="name", value="beta")
+    named_doc = (seen[-1].get("query") if seen else "") or ""
+    check("a property filter uses the operator and returns the entity",
+          [node["id"] for node in named.get("nodes") or []] == ["beta-2"]
+          and 'EQUALS: ["beta"]' in named_doc and "$query" not in named_doc,
+          safe(named_doc)[:500])
+    check("an edge search is empty on a graph search source",
+          src.search("alpha", kind="edge") == {"edges": []})
+    skipped = src.search("alpha", offset=20)
+    check("an offset past the page returns no entities",
+          skipped.get("nodes") == [] and skipped.get("total") == 1, safe(skipped))
+    between = src.edges_between(["alpha-1", "beta-2", "gamma-3"])
+    check("edges between visible nodes use the first neighbor page",
+          [edge["id"] for edge in between.get("edges") or []] == ["alpha-1:related:beta-2"],
+          safe(between.get("edges")))
+    wiz = json.loads((ROOT / "data" / "wiz-queries.json").read_text())
+    saved = src.run_document(wiz[0]["graphql"], dict(wiz[0]["variables"]), limit=500)
+    firewall = src.run_document(wiz[1]["graphql"], dict(wiz[1]["variables"]), limit=50)
+    check("the saved Wiz searches page their entities",
+          [node["id"] for node in saved.get("nodes") or []] == ["alpha-1", "gamma-3"]
+          and saved.get("edges") == []
+          and [node["id"] for node in firewall.get("nodes") or []] == ["fw-1"],
+          safe({"saved": [node["id"] for node in saved.get("nodes") or []],
+                "firewall": [node["id"] for node in firewall.get("nodes") or []]}))
 
     only_contains = json.loads(json.dumps(tenant_graph_payload()))
     for item in only_contains["data"]["__schema"]["types"]:
@@ -655,32 +732,125 @@ def test_tenant_page_flow():
         check("search returns the tenant entity",
               code == 200 and nodes and nodes[0]["id"] == "alpha-1" and "invalid type" not in raw,
               safe(raw[:400]))
+        code, raw, skipped = http_json("GET", base + "/api/search?type=node&limit=5&q=alpha&offset=20")
+        check("an offset past the page returns no entities",
+              code == 200 and skipped.get("nodes") == [] and skipped.get("total") == 1
+              and TOKEN not in raw,
+              safe(skipped))
         code, raw, buckets = http_json("GET", base + "/api/search?type=node&limit=5&category=BUCKET")
         bucket_nodes = buckets.get("nodes") or []
         check("an entity type search returns the bucket",
               code == 200 and bucket_nodes and bucket_nodes[0]["id"] == "beta-2" and "invalid type" not in raw,
               safe(raw[:400]))
+        code, raw, schema = http_json("GET", base + "/api/schema")
+        check("schema publishes entity types and keeps every schema type",
+              code == 200 and schema.get("entities") == ["BUCKET", "VIRTUAL_MACHINE"]
+              and schema.get("filters") == ["id", "name"]
+              and "Query" in (schema.get("categories") or {})
+              and "GraphEntityQueryInput" in (schema.get("categories") or {})
+              and TOKEN not in raw,
+              safe(sorted((schema.get("categories") or {}))))
+        code, raw, library = http_json("GET", base + "/api/queries")
+        lib_names = [item.get("name") for item in library] if isinstance(library, list) else []
+        check("the query library is the two Wiz searches",
+              code == 200 and lib_names == [
+                  "Internet-exposed EC2 instances", "Security groups open to 0.0.0.0/0"]
+              and all("graphql" in item and "cypher" not in item for item in library)
+              and "MATCH" not in raw and TOKEN not in raw,
+              safe(lib_names))
+        first = library[0] if isinstance(library, list) and library else {}
+        second = library[1] if isinstance(library, list) and len(library) > 1 else {}
+        code, raw, placed = http_json("POST", base + "/api/graphql", {
+            "document": first.get("graphql") or "", "variables": first.get("variables") or {},
+        })
+        check("a saved query pages entities through the API",
+              code == 200 and [node.get("id") for node in placed.get("nodes") or []] == ["alpha-1", "gamma-3"]
+              and placed.get("edges") == [] and TOKEN not in raw,
+              safe(placed.get("nodes")))
+        code, raw, opened = http_json("POST", base + "/api/graphql", {
+            "document": second.get("graphql") or "", "variables": second.get("variables") or {},
+        })
+        check("the security-group query returns its entity",
+              code == 200 and [node.get("id") for node in opened.get("nodes") or []] == ["fw-1"]
+              and TOKEN not in raw,
+              safe(opened.get("nodes")))
+        code, raw, named = http_json("GET", base + "/api/search?type=node&limit=5&prop=name&value=beta")
+        check("a property filter returns the matching entity",
+              code == 200 and [node.get("id") for node in named.get("nodes") or []] == ["beta-2"]
+              and "invalid type" not in raw,
+              safe(raw[:300]))
+        code, raw, missing_type = http_json("GET", base + "/api/search?type=node&limit=5&category=APICallComponent")
+        check("an unknown entity type is rejected",
+              code == 400 and "APICallComponent" in (missing_type.get("error") or "") and TOKEN not in raw,
+              safe(missing_type))
+        code, raw, missing_prop = http_json("GET", base + "/api/search?type=node&limit=5&prop=region&value=us2")
+        check("an unknown property is rejected",
+              code == 400 and "region" in (missing_prop.get("error") or "") and TOKEN not in raw,
+              safe(missing_prop))
+        code, raw, edges = http_json("GET", base + "/api/search?type=edge&limit=5&q=alpha")
+        check("an edge search returns no relationships",
+              code == 200 and edges.get("edges") == [] and TOKEN not in raw, safe(edges))
+        code, raw, denied = http_json("POST", base + "/api/cypher", {"query": "MATCH (n) RETURN n"})
+        check("Cypher is refused on the GraphQL source",
+              code == 400 and "no Cypher" in (denied.get("error") or "") and TOKEN not in raw, safe(denied))
+        code, raw, mutated = http_json("POST", base + "/api/graphql", {"document": "mutation { updateSecretInstance { id } }", "variables": {}})
+        check("a mutation is refused before it is sent",
+              code == 400 and "not sent" in (mutated.get("error") or "") and TOKEN not in raw, safe(mutated))
         code, raw, summary = http_json("POST", base + "/api/neighbors", {"ids": ["alpha-1"], "visible": []})
+        code2, raw2, hidden = http_json("POST", base + "/api/neighbors", {"ids": ["alpha-1"], "visible": ["beta-2"]})
         check("neighbors answers instead of failing the request",
-              code == 200 and (summary.get("categories") or {}).get("BUCKET") == 1
-              and "invalid type" not in raw,
+              code == 200 and summary.get("degree") == 2
+              and (summary.get("categories") or {}).get("BUCKET") == 2
+              and code2 == 200 and hidden.get("total") == 0 and hidden.get("degree") == 2
+              and "invalid type" not in raw and TOKEN not in raw,
               safe(raw[:400]))
-        code, raw, expanded = http_json("POST", base + "/api/expand", {"ids": ["alpha-1"], "visible": [], "limit": 5})
-        expanded_ids = [node.get("id") for node in expanded.get("nodes") or []]
-        check("expand returns the neighbor",
-              code == 200 and expanded_ids == ["beta-2"]
+        code, raw, expanded = http_json("POST", base + "/api/expand", {"ids": ["alpha-1"], "visible": [], "limit": 1})
+        code2, raw2, nxt = http_json("POST", base + "/api/expand", {
+            "ids": ["alpha-1"], "visible": ["alpha-1", "beta-2"], "limit": 1,
+        })
+        check("expand returns one page and then the next",
+              code == 200 and [node.get("id") for node in expanded.get("nodes") or []] == ["beta-2"]
+              and expanded.get("more") is True
               and expanded.get("edges") and expanded["edges"][0]["id"] == "alpha-1:related:beta-2"
-              and "invalid type" not in raw,
+              and code2 == 200 and [node.get("id") for node in nxt.get("nodes") or []] == ["gamma-3"]
+              and "invalid type" not in raw and TOKEN not in raw,
               safe(raw[:400]))
-        code, raw, details = http_json("POST", base + "/api/nodes", {"ids": ["alpha-1"]})
+        code, raw, details = http_json("POST", base + "/api/nodes", {"ids": ["alpha-1", "beta-2"]})
+        detail_ids = [node.get("id") for node in details.get("nodes") or []]
         props = ((details.get("nodes") or [{}])[0]).get("props") or {}
-        check("opening a node returns its properties",
-              code == 200 and props.get("region") == "us2", safe(raw[:300]))
-        logged = "\n".join(doc for doc in mock.documents)
-        check("the tenant mock never saw a $query variable",
-              "$query" not in logged and "invalid type for variable" not in logged
-              and "relationships" in logged and "alpha-1" in logged,
-              safe(logged[-600:]))
+        check("opening nodes returns each id and its properties",
+              code == 200 and detail_ids == ["alpha-1", "beta-2"] and props.get("region") == "us2"
+              and details["nodes"][0].get("partial") is False and TOKEN not in raw,
+              safe(raw[:300]))
+        code, raw, linked = http_json("POST", base + "/api/edges-between", {"ids": ["alpha-1", "beta-2", "gamma-3"]})
+        check("edges between nodes return the related link",
+              code == 200 and [edge.get("id") for edge in linked.get("edges") or []] == ["alpha-1:related:beta-2"]
+              and TOKEN not in raw,
+              safe(linked.get("edges")))
+        code, raw, diag = http_json("GET", base + "/api/diagnostics?source=query")
+        logged_queries = "\n".join(
+            item.get("message") or "" for item in (diag.get("entries") or []) if isinstance(item, dict))
+        check("diagnostics keeps the inlined document and not the token",
+              code == 200 and "graphSearch" in logged_queries and "quick" in logged_queries
+              and "alpha" in logged_queries and "fragment TypeRef" not in logged_queries
+              and TOKEN not in raw,
+              safe(logged_queries[-500:]))
+        code, raw, exploded = http_json("GET", base + "/api/search?type=node&limit=5&q=explode")
+        check("a rejected name search is the tenant error",
+              code == 502 and exploded.get("error") == "invalid type for variable: 'query'"
+              and "$query" not in raw and TOKEN not in raw,
+              safe(exploded))
+        code, raw, rejected = http_json("POST", base + "/api/graphql", {
+            "document": "query Bad($query: String) { graphSearch(query: $query) { totalCount } }",
+            "variables": {"query": {"select": True}},
+        })
+        generated = [doc for doc in mock.documents if "$query" not in doc]
+        check("a $query variable is the tenant error and the app does not send one",
+              code == 502 and rejected.get("error") == "invalid type for variable: 'query'"
+              and sum("$query" in doc for doc in mock.documents) == 1
+              and any("relationships" in doc and "alpha-1" in doc for doc in generated)
+              and TOKEN not in raw,
+              safe({"error": rejected.get("error"), "query_docs": sum("$query" in doc for doc in mock.documents)}))
         _drive_tenant_page(base)
     finally:
         if proc.poll() is None:
@@ -706,8 +876,41 @@ def test_tenant_page_flow():
                 pass
 
 
+def _select_node(page, node_id):
+    page.evaluate(
+        """(id) => {
+            const node = window.cy.getElementById(id);
+            window.cy.$(':selected').unselect();
+            node.select();
+        }""",
+        node_id)
+    page.wait_for_function(
+        """(id) => {
+            const node = window.cy.getElementById(id);
+            return node.nonempty() && node.selected();
+        }""",
+        arg=node_id, timeout=5000)
+
+
+def _expand_selected(page, node_id):
+    """Open the selection panel and choose All neighbors."""
+    _select_node(page, node_id)
+    closed = page.evaluate("() => document.querySelector('#leftpanel').classList.contains('hidden')")
+    if closed:
+        page.wait_for_function(
+            "() => !document.querySelector('#open-selpanel').classList.contains('hidden')")
+        page.click("#open-selpanel")
+    page.click("#leftpanel [data-lp=expand]")
+    page.hover("#menus .mi")
+    page.wait_for_function(
+        """() => [...document.querySelectorAll('#menus .mi')]
+            .some(el => el.textContent.includes('All neighbors'))""",
+        timeout=10000)
+    page.locator("#menus .mi", has_text="All neighbors").click()
+
+
 def _drive_tenant_page(base):
-    """Headed page: empty advanced search, an entity type, then Expand."""
+    """Headed page: search, saved queries, expand, filters, diagnostics, and a failed expand."""
     chrome = _chrome_executable()
     try:
         from playwright.sync_api import sync_playwright
@@ -719,6 +922,7 @@ def _drive_tenant_page(base):
         return
     traffic = []
     errors = []
+    where = "boot"
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False, executable_path=chrome)
@@ -734,6 +938,35 @@ def _drive_tenant_page(base):
             page.wait_for_function(
                 "() => (document.querySelector('#land-kicker') || {}).textContent.includes('Wiz')",
                 timeout=20000)
+            landing = page.evaluate(
+                """() => ({
+                    nodes: document.querySelector('#land-nodes').textContent,
+                    edges: document.querySelector('#land-edges').textContent,
+                    cypherHidden: [...document.querySelectorAll('[data-act=code-query]')]
+                        .every(el => el.classList.contains('hidden')),
+                    queries: !!document.querySelector('[data-act=explore-queries]'),
+                    sources: [...document.querySelectorAll('#source-pick option')].map(o => o.value),
+                    picked: document.querySelector('#source-pick').value,
+                })""")
+            check("the Wiz landing counts nodes and hides Cypher",
+                  landing["nodes"] == "3" and landing["edges"] == "—"
+                  and landing["cypherHidden"] and landing["queries"]
+                  and landing["sources"] == ["neo4j", "wiz"] and landing["picked"] == "wiz",
+                  safe(landing))
+            page.click("[data-act=data-model]")
+            page.wait_for_function(
+                """() => {
+                    const foot = document.querySelector('[data-dm-foot]');
+                    const info = document.querySelector('[data-dminfo]');
+                    return foot && info && foot.textContent.includes('node categories')
+                        && info.innerText.includes('graphSearch');
+                }""",
+                timeout=20000)
+            model_text = page.locator("[data-dm-foot]").inner_text()
+            page.click(".modal [data-close]")
+            check("the data model opens from the live schema",
+                  "node categories" in model_text and "relationship totals stay on the source" in model_text,
+                  model_text[:300])
             page.focus("#search-input")
             page.click("[data-act=advanced-search]")
             page.wait_for_selector("[data-ares]")
@@ -754,54 +987,171 @@ def _drive_tenant_page(base):
             props = page.evaluate(
                 """() => [...document.querySelectorAll('[data-aprop] option')].map(o => o.value)""")
             advanced_text = page.locator(".modal").inner_text()
+            page.evaluate(
+                """() => {
+                    const cat = document.querySelector('[data-acat]');
+                    cat.value = '';
+                    cat.dispatchEvent(new Event('change', { bubbles: true }));
+                    const prop = document.querySelector('[data-aprop]');
+                    prop.value = 'name';
+                    prop.dispatchEvent(new Event('change', { bubbles: true }));
+                    const val = document.querySelector('[data-aval]');
+                    val.value = 'beta';
+                    val.dispatchEvent(new Event('input', { bubbles: true }));
+                }""")
+            page.wait_for_function(
+                """() => [...performance.getEntriesByType('resource')]
+                    .some(entry => entry.name.includes('prop=name') && entry.name.includes('value=beta'))""",
+                timeout=10000)
+            property_hits = [
+                (url, status) for url, status in traffic
+                if "/api/search" in url and "prop=name" in url and "value=beta" in url]
             page.click(".modal [data-close]")
-            page.fill("#search-input", "alpha")
-            page.wait_for_selector("#search-results .sr")
-            page.click("#search-results .sr")
+            check("advanced search waits for a name or an entity type",
+                  "Type a name, or choose an entity type." in empty
+                  and "invalid type" not in empty
+                  and not searches_before
+                  and options == ["", "BUCKET", "VIRTUAL_MACHINE"],
+                  safe({"empty": empty, "options": options, "searches": len(searches_before)}))
+            check("choosing an entity type lists the filters and the bucket",
+                  "beta" in advanced_text and "invalid type" not in advanced_text
+                  and "name" in props and "id" in props
+                  and property_hits and all(status == 200 for _url, status in property_hits),
+                  safe({"props": props, "property": property_hits, "text": advanced_text[:300]}))
+            page.click("[data-act=explore-queries]")
             page.wait_for_function(
                 """() => {
-                    const button = document.querySelector('#open-selpanel');
-                    return button && !button.classList.contains('hidden')
-                        && window.cy.getElementById('alpha-1').nonempty();
-                }""",
-                timeout=10000)
-            page.click("#open-selpanel")
-            page.click("#leftpanel [data-lp=expand]")
-            page.hover("#menus .mi")
+                    const panel = document.querySelector('#rightpanel');
+                    const text = panel ? panel.innerText : '';
+                    return text.includes('Wiz graph search')
+                        && text.includes('Internet-exposed EC2 instances')
+                        && text.includes('Security groups open to 0.0.0.0/0')
+                        && !text.includes('MATCH')
+                        && !panel.querySelector('[data-act=code-query]');
+                }""")
+            page.click('#rightpanel [data-qrun="b|1"]')
+            page.wait_for_function("() => window.cy.getElementById('fw-1').nonempty()", timeout=15000)
+            page.click('#rightpanel [data-qrun="b|0"]')
             page.wait_for_function(
-                """() => [...document.querySelectorAll('#menus .mi')]
-                    .some(el => el.textContent.includes('All neighbors'))""",
-                timeout=10000)
-            page.locator("#menus .mi", has_text="All neighbors").click()
+                """() => window.cy.getElementById('alpha-1').nonempty()
+                    && window.cy.getElementById('gamma-3').nonempty()""",
+                timeout=15000)
+            check("saved queries place their entities on the canvas",
+                  page.evaluate(
+                      """() => ['fw-1', 'alpha-1', 'gamma-3']
+                          .every(id => window.cy.getElementById(id).nonempty())"""),
+                  "")
+            _expand_selected(page, "alpha-1")
             page.wait_for_function(
                 "() => window.cy.getElementById('beta-2').nonempty()",
                 timeout=15000)
             toast = page.locator("#toast").inner_text()
+            neighbor_codes = [status for url, status in traffic if "/api/neighbors" in url]
+            expand_codes = [status for url, status in traffic if "/api/expand" in url]
+            between = [url for url, _status in traffic if "/api/edges-between" in url]
+            where = "filters"
+            check("Expand adds the neighbor and does not fan out edge lookups",
+                  neighbor_codes and expand_codes
+                  and all(code == 200 for code in neighbor_codes)
+                  and all(code == 200 for code in expand_codes)
+                  and not between
+                  and "invalid type" not in toast and "Expand failed" not in toast,
+                  safe({"neighbors": neighbor_codes, "expand": expand_codes, "between": between, "toast": toast}))
+            page.click("[data-panel=filters]")
+            page.wait_for_function(
+                "() => document.querySelector('#rightpanel').textContent.includes('VIRTUAL_MACHINE')")
+            where = "filter toggle"
+            page.click('#rightpanel [data-ftog="cat|VIRTUAL_MACHINE"]')
+            page.wait_for_function("() => window.cy.getElementById('alpha-1').hasClass('filtered')")
+            page.click('#rightpanel [data-ftog="cat|VIRTUAL_MACHINE"]')
+            page.wait_for_function("() => !window.cy.getElementById('alpha-1').hasClass('filtered')")
+            where = "edge filters"
+            page.click("#rightpanel [data-ftab=edges]")
+            page.wait_for_function(
+                """() => {
+                    const text = document.querySelector('#rightpanel').textContent || '';
+                    return text.includes('related')
+                        && window.cy.edges().some(edge => edge.data('type') === 'related');
+                }""")
+            check("filters hide a category and list the related edge", True)
+            where = "diagnostics"
+            page.click("[data-act=main-menu]")
+            page.locator("#menus .mi", has_text="Diagnostics").click()
+            page.wait_for_function(
+                """() => {
+                    const box = document.querySelector('[data-dlog]');
+                    return box && box.value.includes('graphSearch') && box.value.includes('alpha');
+                }""",
+                timeout=10000)
+            log_text = page.locator("[data-dlog]").input_value()
+            page.click("[data-dexpand]")
+            page.wait_for_function("() => document.querySelector('.modal.diag').classList.contains('is-full')")
+            page.click("[data-dexpand]")
+            page.wait_for_function("() => !document.querySelector('.modal.diag').classList.contains('is-full')")
+            page.click(".modal.diag [data-close]")
+            check("Diagnostics shows the sent query and the window expands",
+                  "graphSearch" in log_text and "alpha" in log_text
+                  and "fragment TypeRef" not in log_text and TOKEN not in log_text,
+                  safe(log_text[-400:]))
+            where = "explode"
+            page.fill("#search-input", "explode")
+            page.wait_for_function(
+                """() => (document.querySelector('#search-results') || {}).innerText
+                    .includes('invalid type for variable')""",
+                timeout=10000)
+            check("a search error stays in the result list", True)
+            where = "boom"
+            page.fill("#search-input", "boom")
+            page.wait_for_selector("#search-results .sr")
+            page.click("#search-results .sr")
+            page.wait_for_function("() => window.cy.getElementById('boom-1').nonempty()", timeout=10000)
+            where = "boom expand"
+            expand_before = page.evaluate(
+                """() => performance.getEntriesByType('resource')
+                    .filter(entry => entry.name.includes('/api/expand')).length""")
+            _expand_selected(page, "boom-1")
+            page.wait_for_function(
+                """(n) => {
+                    const more = performance.getEntriesByType('resource')
+                        .filter(entry => entry.name.includes('/api/expand')).length > n;
+                    const toast = (document.querySelector('#toast') || {}).textContent || '';
+                    return more && toast.includes('Expand failed');
+                }""",
+                arg=expand_before, timeout=10000)
+            failed_neighbors = [status for url, status in traffic if "/api/neighbors" in url]
+            failed_expand = [status for url, status in traffic if "/api/expand" in url]
+            still_there = page.evaluate("() => window.cy.getElementById('alpha-1').nonempty()")
+            check("a failed Expand reports the error and leaves the canvas",
+                  502 in failed_neighbors and 502 in failed_expand and still_there and not errors,
+                  safe({"neighbors": failed_neighbors, "expand": failed_expand, "errors": errors}))
+            where = "source switch"
+            page.evaluate("() => { window.confirm = () => false; }")
+            page.evaluate(
+                """() => {
+                    const sel = document.querySelector('#source-pick');
+                    sel.value = 'neo4j';
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                }""")
+            page.wait_for_function(
+                """() => document.querySelector('#source-pick').value === 'wiz'
+                    && window.cy.getElementById('alpha-1').nonempty()""")
+            check("cancelling a source switch keeps the Wiz canvas", True)
+            where = "remove"
+            _select_node(page, "beta-2")
+            closed = page.evaluate("() => document.querySelector('#leftpanel').classList.contains('hidden')")
+            if closed:
+                page.wait_for_function(
+                    "() => !document.querySelector('#open-selpanel').classList.contains('hidden')")
+                page.click("#open-selpanel")
+            page.click("#leftpanel [data-lp=remove]")
+            page.wait_for_function("() => window.cy.getElementById('beta-2').empty()")
+            page.click("#btn-undo")
+            page.wait_for_function("() => window.cy.getElementById('beta-2').nonempty()")
+            check("removing a node can be undone", True)
             browser.close()
     except Exception as exc:  # noqa: BLE001
-        check("the page searches and expands without the variable error", False, safe(exc))
+        check("the headed page finishes the GraphQL flow", False, where + ": " + safe(exc))
         return
-    neighbor_codes = [status for url, status in traffic if "/api/neighbors" in url]
-    expand_codes = [status for url, status in traffic if "/api/expand" in url]
-    between = [url for url, _status in traffic if "/api/edges-between" in url]
-    check("advanced search waits for a name or an entity type",
-          "Type a name, or choose an entity type." in empty
-          and "invalid type" not in empty
-          and not searches_before
-          and options == ["", "BUCKET", "VIRTUAL_MACHINE"],
-          safe({"empty": empty, "options": options, "searches": len(searches_before)}))
-    check("choosing an entity type lists the filters and the bucket",
-          "beta" in advanced_text and "invalid type" not in advanced_text
-          and "name" in props and "id" in props,
-          safe({"props": props, "text": advanced_text[:300]}))
-    check("Expand adds the neighbor and does not fan out edge lookups",
-          neighbor_codes and expand_codes
-          and all(code == 200 for code in neighbor_codes)
-          and all(code == 200 for code in expand_codes)
-          and not between and not errors
-          and "invalid type" not in toast and "Expand failed" not in toast,
-          safe({"neighbors": neighbor_codes, "expand": expand_codes, "between": between,
-                "toast": toast, "errors": errors}))
     print("  HEADED ok")
 
 
