@@ -12,7 +12,7 @@ If the working tree is on another branch with uncommitted work, use a second wor
 
 ## Run
 
-Use this checkout's `.venv/bin/python` when it exists. Otherwise use `/Users/shey/code/linkurio-less/.venv/bin/python`. The Homebrew interpreter does not have the Neo4j driver.
+Use this checkout's `.venv/bin/python` when it exists. Otherwise run `python3 run_local.py` once to create `.venv`. The Homebrew interpreter does not have the Neo4j driver.
 
 `data/cartography_styles.json` is read once at process start. Static files are read on each request. A style change needs a restart. A JS or CSS change does not.
 
@@ -20,7 +20,9 @@ The README default port is 8744. If it is taken, pick another port. Do not kill 
 
 ## Data and secrets
 
-`.env`, `gx.local.json`, `gx.schema.json`, `tests/screenshots/`, and `tests/results.json` stay uncommitted. A worktree has no `.env`; point `GX_ENV` at one. Do not print the Neo4j password. The schema cache key is the bolt address plus the database name, with any userinfo stripped.
+`.env`, `gx.local.json`, `gx.queries.json`, `.cache/`, `tests/screenshots/`, and `tests/results.json` stay uncommitted. A worktree has no `.env`. Point `GX_ENV` at one. Do not print the Neo4j password, a Wiz client secret, or a token. The schema cache stores a hash of its key, never the Neo4j host or the Wiz endpoint.
+
+`tests/test_privacy.py` must pass before a push. It scans the tracked files for hosts, tenant names, personal paths, and keys.
 
 Do not run `run_local.py --reset`. It deletes the Neo4j volume. On Docker, `--test` reloads the fixture snapshot and wipes the database first. When `.env` points at your own Neo4j, `--test` refuses unless `--load-data`, and that flag wipes a local database. Prefer `tests/run_ui_tests.py` with the venv and `GX_ENV`. It starts its own server on a free port and does not wipe Neo4j.
 
@@ -28,4 +30,4 @@ The UI suite targets the fixture snapshot (`data/cartography-fixtures.json.gz`):
 
 ## Data model
 
-The data model for a Neo4j connection is cached in `gx.schema.json`. Refresh it from the main menu, the command palette, or the data model window.
+`schema_cache.py` saves the data model for each connection in `.cache/`, one file per connection, named by a hash. A Neo4j key holds the URI without userinfo, the database, the user, and the server version. A Wiz key holds the endpoint, adapter, project, and a hash of the client id or token. Refresh it from the main menu, the command palette, the landing card, or the data model window. All of them call `/api/cache/refresh`. The explorer no longer writes `gx.schema.json`. An old copy stays gitignored.

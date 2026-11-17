@@ -328,7 +328,10 @@
       const col = sel ? T.select : filtered ? T.filteredEdge : path ? (T.coral || '#e07a5f') : V.edgeColor(d);
       const w = Math.max(0.6 / z, V.edgeWidth(d) * 1.8 * (sel || path ? 1.3 : 1));
       g.save(); if (dim) g.globalAlpha = 0.18;
+      const dash = V.edgeDash && V.edgeDash(d);
+      if (dash) g.setLineDash([6 / z, 4 / z]);
       g.strokeStyle = col; g.lineWidth = w; strokeGeom(g, G);
+      if (dash) g.setLineDash([]);
       if (!G.loop) {
         const al = Math.max(5 / z, 5 + w * 2.2), aw = al * 0.5;
         g.fillStyle = col; g.beginPath(); g.moveTo(G.x2, G.y2); g.lineTo(G.x2 - G.ux * al - G.uy * aw, G.y2 - G.uy * al + G.ux * aw); g.lineTo(G.x2 - G.ux * al + G.uy * aw, G.y2 - G.uy * al - G.ux * aw); g.closePath(); g.fill();

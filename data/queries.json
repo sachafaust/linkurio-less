@@ -1,5 +1,6 @@
 [
  {
+  "id": "internet-exposed-ec2",
   "name": "Internet-exposed EC2 instances",
   "tags": [
    "aws",
@@ -8,6 +9,7 @@
   "cypher": "MATCH (a:AWSAccount)-[r:RESOURCE]->(i:EC2Instance) WHERE i.exposed_internet = true RETURN a, r, i"
  },
  {
+  "id": "open-security-groups",
   "name": "Security groups open to 0.0.0.0/0",
   "tags": [
    "aws",
@@ -16,6 +18,7 @@
   "cypher": "MATCH p=(rng:IpRange {range:'0.0.0.0/0'})-[:MEMBER_OF_IP_RULE]->(rule:IpPermissionInbound)-[:MEMBER_OF_EC2_SECURITY_GROUP]->(sg:EC2SecurityGroup) RETURN p LIMIT 100"
  },
  {
+  "id": "public-s3-buckets",
   "name": "Publicly readable S3 buckets",
   "tags": [
    "aws",
@@ -24,6 +27,7 @@
   "cypher": "MATCH (a:AWSAccount)-[r:RESOURCE]->(b:S3Bucket) WHERE b.anonymous_access = true RETURN a, r, b"
  },
  {
+  "id": "admin-principals",
   "name": "Principals with AdministratorAccess",
   "tags": [
    "aws",
@@ -32,6 +36,7 @@
   "cypher": "MATCH p=(x:AWSPrincipal)-[:POLICY]->(pol:AWSPolicy {name:'AdministratorAccess'}) RETURN p"
  },
  {
+  "id": "foreign-trusted-roles",
   "name": "Roles trusted by foreign accounts",
   "tags": [
    "aws",
@@ -40,6 +45,7 @@
   "cypher": "MATCH p=(r:AWSRole)-[:TRUSTS_AWS_PRINCIPAL]->(x:AWSPrincipal)<-[:RESOURCE]-(a:AWSAccount {foreign:true}) RETURN p"
  },
  {
+  "id": "github-repos-assuming-aws-roles",
   "name": "GitHub repos that can assume AWS roles",
   "tags": [
    "github",
@@ -48,6 +54,7 @@
   "cypher": "MATCH p=(r:GitHubRepository)-[:ASSUMED_ROLE_WITH_WEB_IDENTITY]->(role:AWSRole) RETURN p"
  },
  {
+  "id": "github-users-without-2fa",
   "name": "GitHub users without 2FA",
   "tags": [
    "github"
@@ -55,6 +62,7 @@
   "cypher": "MATCH p=(u:GitHubUser)-[]->(o:GitHubOrganization) WHERE u.has_2fa_enabled = false RETURN p"
  },
  {
+  "id": "okta-groups-to-aws-roles",
   "name": "Okta groups mapped to AWS roles",
   "tags": [
    "okta",
@@ -63,6 +71,7 @@
   "cypher": "MATCH p=(u:OktaUser)-[:MEMBER_OF_OKTA_GROUP]->(g:OktaGroup)-[:ALLOWED_BY]->(r:AWSRole) RETURN p LIMIT 150"
  },
  {
+  "id": "outside-collaborators-with-write",
   "name": "Outside collaborators with write access",
   "tags": [
    "github"

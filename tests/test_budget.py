@@ -341,6 +341,7 @@ def test_api():
         "HOST": "127.0.0.1", "PORT": str(port), "QUIET": "1",
         "MAX_NODES": "6", "MAX_EDGES": "4", "EXPAND_LIMIT": "3", "CYPHER_ROW_LIMIT": "5",
         "GX_CONFIG": str(cfg_path),
+        "GX_CACHE_DIR": str(Path(cfg_dir.name) / "cache"),
     }
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "server.py")], env=env,

@@ -8,13 +8,34 @@ __pycache__/
 gx.local.json
 gx.local.json.tmp
 
-# Data model for one Neo4j connection. Built the first time, refreshed from the page.
+# Old data-model file from an earlier version. The explorer no longer writes it.
+# Saved data models now live in .cache/ (schema_cache.py). An old copy can still sit on a disk.
 gx.schema.json
 gx.schema.json.tmp
 
-# Neo4j credentials. Copy .env.example to .env.
-.env
+# Saved queries that the page adds or edits. One list per connection. No credentials.
+gx.queries.json
+gx.queries.json.*.tmp
+gx.queries.json.tmp
+gx.queries.json.lock
 
-# UI-suite output. The pictures in docs/screenshots/ are the curated set.
+# Neo4j and GraphQL credentials. Copy .env.example to .env.
+# Data connection in the page writes this file. It is never committed.
+.env
+.env.tmp
+
+# Saved data models (schema cache). GX_CACHE_DIR moves it.
+.cache/
+
+# UI-suite output. A run can point at any database, so its results and captures are
+# never tracked. docs/screenshots/ is the curated set, and only a person copies into it.
 tests/screenshots/
 tests/results.json
+# Earlier runs wrote here. It stays ignored so a leftover folder never reaches a commit.
+tests/out/
+
+# Review scratch files: a diff or a patch can hold any change before it is reviewed.
+*.patch
+*.diff
+*.orig
+*.rej

@@ -1,8 +1,14 @@
-"""Read-only Neo4j graph explorer backend (stdlib HTTP server + official neo4j driver).
+"""Read-only graph explorer backend (stdlib HTTP server + official neo4j driver).
 
 Serves ./static and a small JSON API. Every Cypher statement runs in a READ
 transaction (session default_access_mode=READ + execute_read), and user-written
 Cypher is also screened for write clauses before it is sent.
+
+Neo4j is one data source. A GraphQL endpoint configured below is a second
+source, shown on its own and never copied into Neo4j. The handlers call the
+same methods on whichever source is active: status, schema, search, nodes,
+neighbor_summary, expand, edges_between, and cypher. The bearer token stays
+in the environment or in the gitignored .env file.
 
 Config (environment variables; a gitignored .env fills any of the four that are unset):
     NEO4J_URI       bolt://localhost:7687   (host only: put the user and password in the variables below)
@@ -10,6 +16,9 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     NEO4J_PASSWORD  (required; empty is allowed when Neo4j has no password)
     NEO4J_DATABASE  neo4j
     GX_ENV          path to a different .env file
+    --fresh         this process starts with no Neo4j and no GraphQL connection.
+                    The page lists no Neo4j source until one is saved. The saved
+                    .env is left as it is for the next normal start.
     HOST / PORT     127.0.0.1 / 8744
     SEARCH_FULLTEXT_INDEX  name of a Neo4j full-text index for search (auto-detects "gx_search",
                     made by tools/create_fulltext_index.py)
@@ -26,14 +35,57 @@ Config (environment variables; a gitignored .env fills any of the four that are 
     HUB_SAMPLE      neighbors read per node for summaries / degree ranking (20000)
     EDGE_WALK_MAX   edge fill will not walk a node with more relationships than this (2000)
     SEARCH_SCAN_CAP nodes scanned per search without a full-text index (200000)
-    CACHE_TTL / SCHEMA_TTL  seconds to keep neighbor summaries (60) and the schema (600)
-                    in memory. The schema is also saved in gitignored gx.schema.json, beside
-                    the working set, and reused for the same Neo4j URI and database until
-                    the page asks to refresh it.
+    CACHE_TTL / SCHEMA_TTL  seconds to keep neighbor summaries (60) and a data model that is
+                    also on disk (600) in memory. SCHEMA_TTL never rebuilds a saved data
+                    model: it only drops the copy in memory, and the next read takes the file.
+    GX_CACHE_DIR    folder for the schema cache (.cache in this folder, ignored by version
+                    control). One JSON file per data model, named by a hash of the
+                    connection. The key holds the Neo4j URI, database, user, and server
+                    version, or the GraphQL endpoint, adapter, project, and a hash of the
+                    client id or token. No secret is stored.
+    GX_CACHE_MAX_AGE  seconds before a saved data model is rebuilt (86400). The old copy is
+                    served at once and a background thread swaps in the new one.
+    GX_CACHE_GAP    seconds between two background schema rebuilds on a GraphQL source (20),
+                    so a Wiz tenant does not answer HTTP 429.
+
+GraphQL (optional second source; omit it to use Neo4j only):
+    GRAPHQL_ENDPOINT    https://api.<region>.app.wiz.io/graphql (or .wiz.us)
+    GRAPHQL_TOKEN       bearer token. Data connection can save it in the gitignored
+                        .env. It is never written to gx.local.json, logs, or the page.
+    GRAPHQL_CLIENT_ID       Wiz client id. Used only to request an access token.
+    GRAPHQL_CLIENT_SECRET   Wiz client secret. Saved in .env. Never sent on the query.
+    GRAPHQL_AUTH_URL        Wiz token URL. A wiz.io or wiz.us host fills this in.
+    GRAPHQL_ADAPTER     wiz (default on a wiz.io or wiz.us host) or generic
+    GRAPHQL_LABEL / GRAPHQL_ID / GRAPHQL_TOKEN_ENV / GRAPHQL_PROJECT_ID
+    A graphql list in gx.local.json can name the endpoint and the token's
+    variable. A token value in that file is removed. GRAPHQL_MAX_INFLIGHT
+    caps concurrent requests (4). GRAPHQL_SCHEMA_TIMEOUT is the read timeout
+    in seconds for full introspection (90, at most 600). Every other request waits 30 s.
+    GET /api/schema on a Wiz tenant reads only the graphSearch shape, with a
+    few __type queries. GET /api/schema?full=1 reads full introspection for
+    the data-model window.
+    GET /api/cache lists the saved data models for the active source: when each was
+    built, its age, how long the build took, its size, and whether a rebuild runs.
+    POST /api/cache/refresh {"what": "schema" | "model" | "all" | a name} starts a
+    background rebuild and returns at once. POST /api/cache/clear drops the files
+    for the active source. GET /api/schema?refresh=1 rebuilds in the request and
+    rewrites the file.
+    GET /api/queries returns the library for the active source. Neo4j gets
+    data/queries.json. A Wiz source gets data/wiz-queries.json. A generic
+    endpoint gets none. POST /api/graphql runs one of those documents.
+    GX_QUERIES      path of the saved-query store. It defaults to gx.queries.json
+                    in the folder of gx.local.json (or GX_CONFIG). The page adds,
+                    edits, and removes queries there, one list per connection.
+                    POST/PUT/DELETE /api/queries, plus /api/queries/validate,
+                    /restore-builtins, /import, and /export. See query_store.py.
+    A Wiz status reads the node total from one graphSearch totalCount and
+    leaves the relationship total unknown.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import math
 import mimetypes
 import os
 import re
@@ -42,13 +94,80 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
+
+
+def _use_project_venv():
+    """Run server.py with the project venv when this Python has no neo4j driver."""
+    if __name__ != "__main__":
+        return
+    try:
+        import neo4j  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    root = Path(__file__).resolve().parent
+    folder = "Scripts" if os.name == "nt" else "bin"
+    name = "python.exe" if os.name == "nt" else "python3"
+    venv_py = root / ".venv" / folder / name
+    if venv_py.is_file() and Path(sys.executable).resolve() != venv_py.resolve() and not os.environ.get("GX_BOOTSTRAPPED"):
+        os.environ["GX_BOOTSTRAPPED"] = "1"
+        os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+    pip = ".venv\\Scripts\\pip" if os.name == "nt" else ".venv/bin/pip"
+    py = ".venv\\Scripts\\python" if os.name == "nt" else ".venv/bin/python3"
+    print(
+        "The neo4j driver is not installed for this Python.\n"
+        "From this folder:\n"
+        "  python3 -m venv .venv\n"
+        f"  {pip} install -r requirements.txt\n"
+        f"  {py} server.py",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+_use_project_venv()
 
 import neo4j
 from neo4j import GraphDatabase, READ_ACCESS
 from neo4j.graph import Node, Path as NPath, Relationship
 
-from neo4j_env import Neo4jConfigError, neo4j_settings
+import diagnostics
+import query_store
+import schema_cache
+from schema_cache import Slot, cache_key
+from graphql_source import (
+    GraphQLCallError,
+    GraphQLClient,
+    GraphQLConfigError,
+    GraphQLSource,
+    QueryRejected,
+    QueryTimeout,
+    _client_id,
+    RateLimited,
+    ENV_KEYS,
+    TokenExpired,
+    _ENV_RE,
+    assert_query_only,
+    assert_well_formed,
+    _ID_RE,
+    _clean_endpoint,
+    load_graphql_env,
+    resolve_graphql_sources,
+    sources_from_config,
+    wiz_auth_url,
+    wiz_offerings_public,
+    without_secrets,
+)
+from neo4j_env import (
+    CREDENTIAL_KEYS,
+    Neo4jConfigError,
+    dotenv_path,
+    load_credential_env,
+    neo4j_settings,
+    redact_uri,
+    update_dotenv,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -409,8 +528,12 @@ def _normalize_config(data):
     gpu = data.get("gpu") if data.get("gpu") in ("hardware", "software", "unknown") else "unknown"
     source = data.get("source") if data.get("source") in ("auto", "user") else "user"
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
-    return {**clamped, "lru": bool(data.get("lru")), "reason": reason[:500],
-            "source": source, "gpu": gpu, "renderer": str(data.get("renderer") or "")[:120]}
+    result = {**clamped, "lru": bool(data.get("lru")), "reason": reason[:500],
+              "source": source, "gpu": gpu, "renderer": str(data.get("renderer") or "")[:120]}
+    graphql = sources_from_config(data)
+    if graphql:
+        result["graphql"] = graphql
+    return result
 
 
 def _config_from_suggestion(sug, source, gpu, renderer):
@@ -438,6 +561,14 @@ def _ensure_config_locked():
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             raw = None
+        if isinstance(raw, dict):
+            cleaned, removed = without_secrets(raw)
+            if removed:
+                try:
+                    _write_config(path, cleaned)
+                except OSError as e:
+                    print(f"WARNING: could not remove a GraphQL token from {path.name}: {e}")
+                raw = cleaned
         norm = _normalize_config(raw) if isinstance(raw, dict) else None
         if norm:
             _WORKING = norm
@@ -491,6 +622,8 @@ def _store_config_locked(body, source):
         "lru": body["lru"] if "lru" in body else current.get("lru"),
         "reason": reason, "source": source, "gpu": gpu, "renderer": renderer,
     }
+    if current.get("graphql"):
+        merged["graphql"] = current["graphql"]
     norm = _normalize_config(merged)
     if norm is None:
         raise ValueError("nodes and edges must be at least 1")
@@ -693,79 +826,41 @@ def graph_count_totals(data):
     return {"nodes": node_total, "edges": rel_total, "labels": labels, "types": types}
 
 
-# The data model for one Neo4j connection. The first read pays for the label and
-# relationship sample; later launches of this process reuse the file until the
-# page asks to refresh. The file sits next to the working set so a test that
-# points GX_CONFIG at a temp directory does not read this machine's cache.
-_SCHEMA_DISK_LOCK = threading.Lock()
-
-
-def schema_cache_path():
-    return config_path().with_name("gx.schema.json")
-
-
-def connection_cache_key(uri, database):
-    """Identity of a Neo4j connection with any userinfo removed."""
-    parts = urlsplit((uri or "").strip())
-    host = parts.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = host + (f":{parts.port}" if parts.port else "")
-    clean = urlunsplit((parts.scheme, netloc, parts.path or "", "", ""))
-    return f"{clean}|{(database or '').strip()}"
-
-
-def _schema_body_ok(body):
-    return (isinstance(body, dict) and isinstance(body.get("labels"), dict)
-            and isinstance(body.get("types"), dict) and isinstance(body.get("categories"), dict)
-            and isinstance(body.get("links"), list))
-
-
-def _read_schema_file(path):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("entries"), dict):
-        return None
-    return data
-
-
-def load_cached_schema(uri, database, path=None):
-    data = _read_schema_file(path or schema_cache_path())
-    if not data:
-        return None
-    entry = data["entries"].get(connection_cache_key(uri, database))
-    if not isinstance(entry, dict) or not isinstance(entry.get("saved_at"), str):
-        return None
-    body = entry.get("schema")
-    if not _schema_body_ok(body):
-        return None
-    return {"schema": body, "saved_at": entry["saved_at"]}
-
-
-def store_cached_schema(uri, database, schema, saved_at, path=None):
-    path = path or schema_cache_path()
-    key = connection_cache_key(uri, database)
-    body = {k: schema[k] for k in ("labels", "types", "categories", "links")}
-    with _SCHEMA_DISK_LOCK:
-        data = _read_schema_file(path) or {"version": 1, "entries": {}}
-        data["version"] = 1
-        data["entries"][key] = {"saved_at": saved_at, "schema": body}
-        _write_config(path, data)
-
-
 class Graph:
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, cache=None):
         settings = settings or neo4j_settings()
         self.uri = settings.uri
         self.db = settings.database
+        self.user = settings.user
+        self.id = "neo4j"
+        self.label = "Neo4j"
+        self.kind = "neo4j"
         self.driver = GraphDatabase.driver(self.uri, auth=(settings.user, settings.password))
+        # Kept so the schema cache can refuse a data model that holds it. It is never written.
+        self._password = settings.password or ""
         self._fulltext = os.environ.get("SEARCH_FULLTEXT_INDEX") or None
         self._ft_checked = bool(self._fulltext)
         self.cache = TTLCache(ttl=float(os.environ.get("CACHE_TTL", 60)))
-        self.schema_cache = TTLCache(ttl=float(os.environ.get("SCHEMA_TTL", 600)), size=4)
         self._counts_warned = False
+        # The server agent names the Neo4j version in the cache key. It is read once.
+        self._agent = None
+        self._names_checked = False
+        self.disk_cache = cache if cache is not None else schema_cache.default_cache()
+        self.schema_slot = Slot(
+            self.disk_cache, "neo4j-schema", self._schema_key, self._compute_schema,
+            secrets=lambda: [*_secret_values(), self._password], label="Neo4j data model",
+            mem_ttl=float(os.environ.get("SCHEMA_TTL", 600)))
+
+    def explain(self, query: str, timeout: float = 10):
+        """Plan one statement with EXPLAIN in a READ transaction. It reads no data.
+
+        It uses one explicit transaction, not execute_read, so a lost
+        connection fails at once and is not retried for 30 s.
+        """
+        with self.driver.session(database=self.db, default_access_mode=READ_ACCESS) as s:
+            with s.begin_transaction(timeout=timeout) as tx:
+                tx.run("EXPLAIN " + query).consume()
+                tx.rollback()
 
     def read(self, query: str, timeout: float = 30, **params):
         """Run one statement in a READ transaction and return the records."""
@@ -823,29 +918,63 @@ class Graph:
                 "nodes": n, "edges": r, "read_only": True, "fulltext_index": self.fulltext,
                 "budget": budget_payload(consume_created=consume_config_created)}
 
+    def _schema_key(self):
+        """The Neo4j a saved data model belongs to. The password is not part of it."""
+        if self._agent is None:
+            self._agent = str(self.driver.get_server_info().agent or "")
+        return cache_key("neo4j-schema", uri=redact_uri(self.uri), database=self.db,
+                         user=self.user, server=self._agent)
+
+    def _check_names(self, model):
+        """Rebuild in the background when the count store names a label or type the saved model lacks.
+
+        The count store answers at once, so this costs one quick read per process.
+        """
+        if self._names_checked:
+            return
+        self._names_checked = True
+        try:
+            counts = self.store_counts()
+        except Exception:  # noqa: BLE001
+            return
+        if not counts:
+            return
+        labels = set(counts["labels"])
+        types = {name for name, count in counts["types"].items() if count}
+        if labels != set(model.get("labels") or {}) or types != set(model.get("types") or {}):
+            diagnostics.record("explorer", "Neo4j has new labels or relationship types. Rebuilding the data model.")
+            self.schema_slot.revalidate()
+
+    def cache_slots(self):
+        return {"schema": self.schema_slot}
+
+    def primary_cache(self):
+        return "schema"
+
+    def model_cache(self):
+        return "schema"
+
+    def clear_cache(self):
+        self.schema_slot.clear()
+        self._names_checked = False
+        return ["schema"]
+
     def schema(self, refresh=False):
         """Categories, relationship types, and the links between them.
 
-        A restart reuses gx.schema.json for this URI and database. refresh
-        reads Neo4j again and replaces that entry.
+        A saved copy for this connection is served at once. An old copy is
+        rebuilt in a background thread. refresh reads Neo4j again in this call
+        and rewrites the file.
         """
         if not refresh:
-            hit = self.schema_cache.get("schema")
-            if hit:
-                return hit
-            disk = load_cached_schema(self.uri, self.db)
-            if disk:
-                body = dict(disk["schema"])
-                body["cache"] = {"saved_at": disk["saved_at"], "source": "disk"}
-                return self.schema_cache.put("schema", body)
-        computed = self._compute_schema()
-        saved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        store_cached_schema(self.uri, self.db, computed, saved_at)
-        body = dict(computed)
-        body["cache"] = {"saved_at": saved_at, "source": "fresh"}
-        return self.schema_cache.put("schema", body)
+            held = self.schema_slot.peek()
+            if held is not None:
+                self._check_names(held)
+                return held
+        return self.schema_slot.get(refresh=refresh)
 
     def _compute_schema(self):
+        """Read the data model from Neo4j. A large database takes about a minute."""
         counts = self.store_counts()
         if counts:
             label_counts, type_counts = counts["labels"], counts["types"]
@@ -1119,14 +1248,857 @@ class Graph:
 
 
 GRAPH: Graph | None = None
+SOURCES: dict = {}
+ACTIVE = "neo4j"
+_CONN_LOCK = threading.Lock()
+_TOKEN_ENV_BLOCKED = set(CREDENTIAL_KEYS) | (set(ENV_KEYS) - {"GRAPHQL_TOKEN"})
+
+
+class UnconfiguredNeo4j:
+    """Stand-in so the page can open before Neo4j has a password.
+
+    An empty password is a real password. Only a missing one uses this object.
+    """
+
+    id = "neo4j"
+    label = "Neo4j"
+    kind = "neo4j"
+    message = (
+        "Neo4j has no password yet. Use Add Neo4j, or add a GraphQL connection. "
+        "An empty password is allowed when Neo4j has none."
+    )
+
+    def status(self, consume_config_created=False):
+        return {
+            "connected": False, "read_only": True,
+            "uri": redact_uri(os.environ.get("NEO4J_URI") or ""),
+            "database": os.environ.get("NEO4J_DATABASE") or "",
+            "server": "", "nodes": None, "edges": None, "error": self.message,
+            "budget": budget_payload(consume_created=consume_config_created),
+        }
+
+    def _refuse(self, *args, **kwargs):
+        raise ValueError(self.message)
+
+    schema = search = nodes = neighbor_summary = expand = edges_between = cypher = _refuse
+
+# Both sources implement these. The handlers call them and do not branch on
+# the kind, except the source list itself.
+SOURCE_METHODS = (
+    "status", "schema", "search", "nodes", "neighbor_summary",
+    "expand", "edges_between", "cypher",
+)
+
+
+def bind_sources(graph, config):
+    """Configured sources only. Neo4j without a password is not a source.
+
+    The page can still open. Add Neo4j or Add GraphQL creates the first source.
+    When Neo4j is configured it stays active across a GraphQL save. When it is
+    not, the GraphQL source that was just saved becomes the active one.
+    """
+    global GRAPH, SOURCES, ACTIVE
+    GRAPH = graph
+    sources = {}
+    if graph is not None and not isinstance(graph, UnconfiguredNeo4j):
+        sources["neo4j"] = graph
+    for spec in resolve_graphql_sources(config):
+        sources[spec["id"]] = GraphQLSource(spec, cache=schema_cache.default_cache())
+        print(f"GraphQL source {spec['label']} ({spec['adapter']}) at {urlparse(spec['endpoint']).netloc}.")
+    SOURCES = sources
+    if ACTIVE not in sources:
+        if "neo4j" in sources:
+            ACTIVE = "neo4j"
+        elif sources:
+            ACTIVE = next(iter(sources))
+        else:
+            ACTIVE = ""
+
+
+def current():
+    if SOURCES:
+        return SOURCES.get(ACTIVE) or SOURCES.get("neo4j") or next(iter(SOURCES.values()))
+    return GRAPH
+
+
+def source_catalog():
+    rows = []
+    for sid, src in SOURCES.items():
+        row = {
+            "id": getattr(src, "id", sid),
+            "label": getattr(src, "label", sid),
+            "kind": getattr(src, "kind", "neo4j"),
+        }
+        adapter = getattr(src, "adapter_name", None)
+        if adapter:
+            row["adapter"] = adapter
+        rows.append(row)
+    return rows
+
+
+def _secret_values():
+    names = {"GRAPHQL_TOKEN", "GRAPHQL_CLIENT_SECRET", "NEO4J_PASSWORD"}
+    extra = os.environ.get("GRAPHQL_TOKEN_ENV")
+    if extra:
+        names.add(extra)
+    for src in SOURCES.values():
+        env_name = getattr(src, "token_env", None)
+        if env_name:
+            names.add(env_name)
+    for name in names:
+        diagnostics.note_token_env(name)
+    # An empty password is not a secret string. Scrubbing "" would blank the page.
+    # The client id is not in this list: the connection form shows it.
+    values = [value for name in names if (value := os.environ.get(name))]
+    for value in values:
+        diagnostics.note_secret(value)
+    return values
+
+
+def _scrub_public(value, secrets=()):
+    if isinstance(value, str):
+        for item in secrets or ():
+            diagnostics.note_secret(item)
+        return diagnostics.redact(value, secrets)
+    if isinstance(value, dict):
+        return {key: _scrub_public(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_public(item, secrets) for item in value]
+    return value
+
+
+def public_status(consume=False):
+    """Status for the active source, plus the list of sources. No token."""
+    src = current()
+    if isinstance(src, UnconfiguredNeo4j) or src is None:
+        message = getattr(src, "message", None) or "No data connection. Use Add Neo4j or Add GraphQL."
+        status = {
+            "connected": False, "read_only": True,
+            "uri": "", "database": "", "server": "",
+            "nodes": None, "edges": None, "error": message,
+            "budget": budget_payload(consume_created=consume),
+            "source": {"id": "", "label": "No connection", "kind": "none"},
+            "sources": source_catalog(),
+        }
+        return _scrub_public(status, _secret_values())
+    kind = getattr(src, "kind", "neo4j")
+    try:
+        if kind == "neo4j":
+            status = src.status(consume_config_created=consume)
+        else:
+            status = src.status()
+            status["budget"] = budget_payload(consume_created=consume)
+    except Exception as exc:  # noqa: BLE001
+        status = {
+            "connected": False, "read_only": True, "nodes": None, "edges": None,
+            "server": "", "database": getattr(src, "label", ""),
+            "error": str(exc)[:300],
+            "budget": budget_payload(consume_created=consume),
+        }
+    status["source"] = {
+        "id": getattr(src, "id", ACTIVE),
+        "label": getattr(src, "label", ACTIVE),
+        "kind": kind,
+    }
+    adapter = getattr(src, "adapter_name", None)
+    if adapter:
+        status["source"]["adapter"] = adapter
+    status["sources"] = source_catalog()
+    return _scrub_public(status, _secret_values())
+
+
+def select_source(source_id):
+    """Switch the view. The other source is left untouched."""
+    global ACTIVE
+    source_id = str(source_id or "")
+    if source_id not in SOURCES:
+        raise ValueError("Unknown data source")
+    ACTIVE = source_id
+    return public_status(consume=False)
+
+
+def _cache_items(src):
+    slots = src.cache_slots() if callable(getattr(src, "cache_slots", None)) else {}
+    return [{"what": name, **slot.info()} for name, slot in slots.items()]
+
+
+def cache_view(src=None):
+    """The saved data models for the active source. It shows the folder name, never a secret."""
+    src = current() if src is None else src
+    cache = getattr(src, "disk_cache", None) or schema_cache.default_cache()
+    folder = getattr(cache, "folder", None)
+    usable = src is not None and not isinstance(src, UnconfiguredNeo4j)
+    view = {
+        "source": ({"id": getattr(src, "id", ""), "label": getattr(src, "label", ""),
+                    "kind": getattr(src, "kind", "none")} if usable else {"id": "", "label": "", "kind": "none"}),
+        "enabled": bool(getattr(cache, "enabled", False)),
+        "folder": folder.name if folder is not None else "",
+        "max_age": getattr(cache, "max_age", None),
+        "items": _cache_items(src) if usable else [],
+        # primary is the entry GET /api/schema reads. model is the one the data-model window reads.
+        "primary": src.primary_cache() if usable and callable(getattr(src, "primary_cache", None)) else "",
+        "model": src.model_cache() if usable and callable(getattr(src, "model_cache", None)) else "",
+    }
+    return _scrub_public(view, _secret_values())
+
+
+def _cacheable(src):
+    if src is None or isinstance(src, UnconfiguredNeo4j) or not callable(getattr(src, "cache_slots", None)):
+        raise ValueError("No data connection. Use Add Neo4j or Add GraphQL.")
+    return src.cache_slots()
+
+
+def refresh_cache(src, what):
+    """Start background rebuilds and return at once.
+
+    schema is the model GET /api/schema reads. model is the one the data-model
+    window reads. all is every saved model of the source.
+    """
+    slots = _cacheable(src)
+    what = str(what or "schema")
+    if what == "all":
+        names = list(slots)
+    elif what == "schema":
+        names = [src.primary_cache()]
+    elif what == "model":
+        names = [src.model_cache()]
+    elif what in slots:
+        names = [what]
+    else:
+        raise ValueError(f"Refresh what? Use schema, model, all, or one of: {', '.join(slots)}.")
+    states = {name: slots[name].refresh_background() for name in names}
+    diagnostics.record("explorer", f"Schema cache refresh started: {', '.join(names)}.")
+    return {"started": names, "states": states, "cache": cache_view(src)}
+
+
+def clear_cache(src):
+    _cacheable(src)
+    dropped = src.clear_cache()
+    diagnostics.record("explorer", f"Schema cache cleared for {getattr(src, 'label', '')}.")
+    return {"cleared": dropped, "cache": cache_view(src)}
+
+
+def schema_response(src, refresh=False, full=False):
+    """The data model plus how its saved copy stands. The cached object is not changed."""
+    if full and getattr(src, "kind", "") == "graphql":
+        model = src.schema(refresh=refresh, full=True)
+        which = src.model_cache()
+    else:
+        model = src.schema(refresh=refresh)
+        which = src.primary_cache() if callable(getattr(src, "primary_cache", None)) else None
+    slots = src.cache_slots() if callable(getattr(src, "cache_slots", None)) else {}
+    out = dict(model)
+    if which in slots:
+        out["cache"] = _scrub_public({"what": which, **slots[which].info()}, _secret_values())
+    return out
+
+
+def _builtin_file(src):
+    """The built-in library file for a source, or None when it has none."""
+    if src is None or isinstance(src, UnconfiguredNeo4j):
+        return None
+    kind = getattr(src, "kind", "")
+    if kind == "neo4j":
+        return "queries.json"
+    if kind == "graphql" and getattr(src, "adapter_name", "") == "wiz":
+        return "wiz-queries.json"
+    return None
+
+
+def _builtin_slug(text):
+    """A short id word from a name: lower case letters and digits joined by hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:60].strip("-")
+
+
+def builtin_queries(src):
+    """The read-only built-ins with stable ids: builtin:<file stem>:<slug>.
+
+    The slug comes from the entry's "id" field, or else from its name. It does
+    not come from the entry's place in the file, so a new entry or a removed
+    one does not move the ids that hidden_builtins holds. Two entries with the
+    same slug get -2, -3, and so on, in file order.
+    """
+    name = _builtin_file(src)
+    if not name:
+        return []
+    stem = name.rsplit(".", 1)[0]
+    kind = "cypher" if getattr(src, "kind", "") == "neo4j" else "graphql"
+    out = []
+    used = set()
+    for index, item in enumerate(json.loads((ROOT / "data" / name).read_text())):
+        slug = _builtin_slug(item.get("id")) or _builtin_slug(item.get("name")) or f"query-{index + 1}"
+        base, n = slug, 1
+        while slug in used:
+            n += 1
+            slug = f"{base}-{n}"
+        used.add(slug)
+        entry = {"id": f"builtin:{stem}:{slug}", "name": item.get("name") or f"Query {index + 1}",
+                 "description": item.get("description") or "", "tags": list(item.get("tags") or []),
+                 "kind": kind, "builtin": True, "editable": False}
+        if kind == "cypher":
+            entry["cypher"] = item.get("cypher") or ""
+        else:
+            entry["graphql"] = item.get("graphql") or ""
+            entry["variables"] = dict(item.get("variables") or {})
+        out.append(entry)
+    return out
+
+
+def query_source(src):
+    """The saved-query identity of a connection, or None when it cannot keep queries.
+
+    Neo4j is keyed by URI and database. A GraphQL source is keyed by endpoint,
+    adapter, and project. The label shows the host without any user or password.
+    A GraphQL adapter that cannot run documents has no saved queries.
+    """
+    if src is None or isinstance(src, UnconfiguredNeo4j):
+        return None
+    kind = getattr(src, "kind", "")
+    if kind == "neo4j":
+        uri = redact_uri(str(getattr(src, "uri", "") or ""))
+        db = str(getattr(src, "db", "") or "neo4j")
+        # The key is a hash of the connection. The label names no host, because the
+        # file is readable and a host can be internal.
+        return {"key": query_store.source_key("neo4j", uri, db), "kind": "cypher",
+                "label": f"Neo4j / {db}"}
+    if kind == "graphql" and getattr(src, "adapter_name", "") == "wiz":
+        endpoint = str(getattr(src, "endpoint", "") or "")
+        adapter = str(getattr(src, "adapter_name", "") or "")
+        project = str(getattr(src, "project_id", "") or "*")
+        label = str(getattr(src, "label", "") or "Wiz")
+        return {"key": query_store.source_key("graphql", endpoint, adapter, project), "kind": "graphql",
+                "label": f"{label} project {project}"}
+    return None
+
+
+def queries_path():
+    """gx.queries.json beside gx.local.json, or GX_QUERIES."""
+    raw = (os.environ.get("GX_QUERIES") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return config_path().parent / "gx.queries.json"
+
+
+def validate_query_body(kind, text):
+    """The run-time read-only check, used at save time with the same message.
+
+    A GraphQL document must also be well formed: braces, brackets, and
+    definitions. Cypher syntax needs the database, so check_syntax does it.
+    """
+    if kind == "cypher":
+        check_read_only(text)
+    elif kind == "graphql":
+        assert_query_only(text)
+        assert_well_formed(text)
+    else:
+        raise ValueError("Unknown query kind")
+
+
+def check_syntax(src, kind, text):
+    """Parse the query on its source without running it. Return a short note for the page.
+
+    Cypher goes to Neo4j as EXPLAIN in a read transaction, which plans the
+    statement and reads no data. A syntax error raises with the Neo4j
+    message. When Neo4j cannot be reached, the note says the syntax was not
+    checked. GraphQL fields and types are checked only by the tenant, so the
+    note says to use Preview.
+    """
+    if kind == "graphql":
+        return "The document is well formed and has no mutation. Preview runs it on the tenant."
+    explain = getattr(src, "explain", None)
+    if not callable(explain):
+        return "No write clauses found. Preview runs it to check the syntax."
+    try:
+        explain(text)
+    except neo4j.exceptions.Neo4jError as exc:
+        code = str(getattr(exc, "code", "") or "")
+        if ".Statement." in code or "Syntax" in code or "Semantic" in code:
+            message = getattr(exc, "message", None) or str(exc)
+            raise ValueError(f"Neo4j cannot parse the query: {message}") from exc
+        return "No write clauses found. Neo4j did not check the syntax, so use Preview."
+    except Exception:  # noqa: BLE001
+        return "No write clauses found. Neo4j is not reachable, so the syntax is not checked."
+    return "No write clauses found, and Neo4j parsed the query."
+
+
+def query_library(src=None):
+    """Saved queries for the source that is open.
+
+    Built-ins that the user has not hidden come first, then the user's own
+    queries for this connection. A generic GraphQL endpoint and a run with no
+    connection have none.
+    """
+    src = current() if src is None else src
+    store = query_source(src)
+    builtins = builtin_queries(src)
+    if store is None:
+        return builtins
+    return query_store.list_queries(queries_path(), store, builtins)
+
+
+class RouteNotFound(Exception):
+    """A saved-query path or method that the API does not have. The handler answers 404."""
+
+
+def _store_for(src):
+    store = query_source(src)
+    if store is None:
+        if src is None or isinstance(src, UnconfiguredNeo4j):
+            raise ValueError("Add a data connection before saving a query.")
+        raise ValueError("This connection cannot run saved queries, so it cannot save one.")
+    return store
+
+
+def query_action(src, method, action, body=None):
+    """One saved-query request. Every reply that changes the list carries the new list."""
+    store = _store_for(src)
+    path = queries_path()
+    builtins = builtin_queries(src)
+
+    def listed(extra):
+        return {**extra, "queries": query_store.list_queries(path, store, builtins)}
+
+    if method == "POST" and action == "":
+        return listed({"query": query_store.create(path, store, body, validate_query_body, builtins)})
+    if method == "POST" and action == "validate":
+        clean = query_store.check_body(store, body, validate_query_body)
+        note = check_syntax(src, clean["kind"], clean[clean["kind"]])
+        return {"ok": True, "kind": clean["kind"], "note": note}
+    if method == "POST" and action == "restore-builtins":
+        ids = body.get("ids") if isinstance(body, dict) else None
+        return listed(query_store.restore_builtins(path, store, builtins, ids))
+    if method == "POST" and action == "import":
+        return listed(query_store.import_queries(path, store, body, validate_query_body))
+    if method == "GET" and action == "export":
+        return query_store.export_queries(path, store)
+    if method == "PUT" and query_store.is_query_id(action):
+        return listed(query_store.update(path, store, action, body, validate_query_body, builtins))
+    if method == "DELETE" and query_store.is_query_id(action):
+        return listed(query_store.delete(path, store, action, builtins))
+    raise RouteNotFound("not found")
+
+
+def _plain(value, label):
+    text = "" if value is None else str(value)
+    if "\n" in text or "\r" in text:
+        raise ValueError(f"{label} cannot contain a line break")
+    return text
+
+
+def _public_auth_url():
+    raw = (os.environ.get("GRAPHQL_AUTH_URL") or "").strip()
+    if raw and _clean_endpoint(raw) is None:
+        return ""
+    return raw
+
+
+def connection_view():
+    """Settings the page can show. The password and the token stay out."""
+    load_credential_env()
+    load_graphql_env()
+    token_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
+    if not _ENV_RE.fullmatch(token_env):
+        token_env = "GRAPHQL_TOKEN"
+    endpoint = (os.environ.get("GRAPHQL_ENDPOINT") or "").strip()
+    if endpoint and _clean_endpoint(endpoint) is None:
+        endpoint = ""
+    view = {
+        "file": dotenv_path().name,
+        "neo4j": {
+            "uri": redact_uri((os.environ.get("NEO4J_URI") or "bolt://localhost:7687").strip()),
+            "user": (os.environ.get("NEO4J_USER") or "neo4j").strip() or "neo4j",
+            "database": (os.environ.get("NEO4J_DATABASE") or "neo4j").strip() or "neo4j",
+            "password_set": "NEO4J_PASSWORD" in os.environ,
+        },
+        "graphql": {
+            "endpoint": endpoint,
+            "label": os.environ.get("GRAPHQL_LABEL") or "",
+            "adapter": os.environ.get("GRAPHQL_ADAPTER") or "",
+            "id": os.environ.get("GRAPHQL_ID") or "",
+            "token_env": token_env,
+            "project_id": os.environ.get("GRAPHQL_PROJECT_ID") or "",
+            "client_id": _client_id(os.environ.get("GRAPHQL_CLIENT_ID")),
+            "auth_url": _public_auth_url(),
+            "secret_set": bool(os.environ.get("GRAPHQL_CLIENT_SECRET")),
+            "token_set": bool(os.environ.get(token_env)),
+        },
+        # The Wiz domains and token hosts. The page reads this table, not a copy.
+        "wiz_offerings": wiz_offerings_public(),
+    }
+    return _scrub_public(view, _secret_values())
+
+
+def _close_driver(graph):
+    driver = getattr(graph, "driver", None)
+    if driver is None:
+        return
+    try:
+        driver.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _fresh_process():
+    return os.environ.get("GX_FRESH") == "1"
+
+
+def _drop_saved_connection():
+    """Forget connection variables for this process. The .env file stays."""
+    token_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
+    for key in (*CREDENTIAL_KEYS, *ENV_KEYS):
+        os.environ.pop(key, None)
+    if token_env and _ENV_RE.fullmatch(token_env):
+        os.environ.pop(token_env, None)
+    os.environ["GX_FRESH"] = "1"
+
+
+def _unconfigured():
+    graph = UnconfiguredNeo4j()
+    if _fresh_process():
+        graph.message = (
+            "This run started with no data connection. Use Add Neo4j or Add GraphQL. "
+            "The saved connection stays in .env for the next start."
+        )
+    return graph
+
+
+def _reconnect():
+    """Rebuild Neo4j and GraphQL from the environment after Data connection saves."""
+    global GRAPH
+    old = GRAPH
+    try:
+        settings = neo4j_settings()
+    except Neo4jConfigError as e:
+        if not e.missing_password:
+            raise ValueError(str(e)) from e
+        graph = _unconfigured()
+    else:
+        graph = Graph(settings)
+    cfg = ensure_config()
+    bind_sources(graph, cfg)
+    if old is not None and old is not graph:
+        _close_driver(old)
+
+
+def save_connection(body):
+    """Write Neo4j and GraphQL into the gitignored env file and use them now.
+
+    A blank password or token keeps the saved value. A password of "" is stored
+    when Neo4j has none. Secrets are not written to gx.local.json.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("connection settings must be an object")
+    with _CONN_LOCK:
+        load_credential_env()
+        load_graphql_env()
+        neo = body.get("neo4j") if isinstance(body.get("neo4j"), dict) else {}
+        graphql = body.get("graphql") if isinstance(body.get("graphql"), dict) else {}
+        clear = bool(graphql.get("clear"))
+        endpoint_raw = _plain(graphql.get("endpoint") or "", "endpoint").strip()
+        saving_graphql = bool(endpoint_raw) and not clear
+        password_in_body = "password" in neo
+        password_already = "NEO4J_PASSWORD" in os.environ
+        if not password_in_body and not password_already and not saving_graphql and not clear:
+            raise ValueError(
+                "Save a Neo4j password, or a GraphQL endpoint. "
+                "An empty password is allowed when Neo4j has none.")
+        updates = {}
+        remove = []
+        skip_neo = (not password_in_body) and (not password_already) and (saving_graphql or clear)
+        if not skip_neo and (password_in_body or password_already or neo.get("uri") or neo.get("user") or neo.get("database")):
+            uri = _plain(neo.get("uri") or os.environ.get("NEO4J_URI") or "bolt://localhost:7687", "URI").strip()
+            user = _plain(neo.get("user") or os.environ.get("NEO4J_USER") or "neo4j", "user").strip() or "neo4j"
+            if "database" in neo:
+                database = _plain(neo.get("database"), "database").strip() or "neo4j"
+            else:
+                database = _plain(os.environ.get("NEO4J_DATABASE") or "neo4j", "database").strip() or "neo4j"
+            if "://" not in uri:
+                raise ValueError("NEO4J_URI must be a bolt or neo4j URL, such as bolt://127.0.0.1:7687")
+            parts = urlsplit(uri)
+            if parts.username is not None or parts.password is not None:
+                raise ValueError(
+                    "NEO4J_URI includes a user or a password. Keep the URI as the host, "
+                    "and set the user and password in their own fields.")
+            updates["NEO4J_URI"] = uri
+            updates["NEO4J_USER"] = user
+            updates["NEO4J_DATABASE"] = database
+            if password_in_body:
+                updates["NEO4J_PASSWORD"] = _plain(neo.get("password"), "password")
+        if clear:
+            remove.extend([
+                "GRAPHQL_ENDPOINT", "GRAPHQL_TOKEN", "GRAPHQL_CLIENT_ID", "GRAPHQL_CLIENT_SECRET",
+                "GRAPHQL_AUTH_URL", "GRAPHQL_ADAPTER", "GRAPHQL_LABEL", "GRAPHQL_ID",
+                "GRAPHQL_TOKEN_ENV", "GRAPHQL_PROJECT_ID",
+            ])
+            custom = (os.environ.get("GRAPHQL_TOKEN_ENV") or "").strip()
+            if custom and _ENV_RE.fullmatch(custom) and custom not in remove:
+                remove.append(custom)
+        elif saving_graphql:
+            cleaned = _clean_endpoint(endpoint_raw)
+            if not cleaned:
+                raise ValueError(
+                    "The GraphQL endpoint must be an http or https URL without a user, a password, or a token.")
+            updates["GRAPHQL_ENDPOINT"] = cleaned
+            if "label" in graphql:
+                label = _plain(graphql.get("label") or "", "label").strip()
+                if label:
+                    updates["GRAPHQL_LABEL"] = label[:80]
+                else:
+                    remove.append("GRAPHQL_LABEL")
+            if "adapter" in graphql:
+                adapter = _plain(graphql.get("adapter") or "", "adapter").strip().lower()
+                if adapter in ("wiz", "generic"):
+                    updates["GRAPHQL_ADAPTER"] = adapter
+                elif adapter == "":
+                    remove.append("GRAPHQL_ADAPTER")
+                else:
+                    raise ValueError("The GraphQL adapter is wiz or generic.")
+            if "id" in graphql:
+                ident = _plain(graphql.get("id") or "", "id").strip()
+                if ident == "neo4j":
+                    raise ValueError("A GraphQL source cannot use the id neo4j.")
+                if ident and not _ID_RE.fullmatch(ident):
+                    raise ValueError("The GraphQL id must start with a letter and use letters, numbers, _ or -.")
+                if ident:
+                    updates["GRAPHQL_ID"] = ident
+                else:
+                    remove.append("GRAPHQL_ID")
+            if "project_id" in graphql:
+                project = _plain(graphql.get("project_id") or "", "project").strip()
+                if project:
+                    updates["GRAPHQL_PROJECT_ID"] = project[:200]
+                else:
+                    remove.append("GRAPHQL_PROJECT_ID")
+            if "client_id" in graphql:
+                client_id = _client_id(_plain(graphql.get("client_id") or "", "client id"))
+                if client_id:
+                    updates["GRAPHQL_CLIENT_ID"] = client_id
+                else:
+                    remove.append("GRAPHQL_CLIENT_ID")
+            if "client_secret" in graphql and str(graphql.get("client_secret") or "") != "":
+                updates["GRAPHQL_CLIENT_SECRET"] = _plain(graphql.get("client_secret"), "client secret")
+            if "auth_url" in graphql:
+                auth_raw = _plain(graphql.get("auth_url") or "", "auth URL").strip()
+                if auth_raw:
+                    auth = _clean_endpoint(auth_raw)
+                    if not auth:
+                        raise ValueError(
+                            "The auth URL must be an http or https URL without a user, a password, or a token.")
+                    updates["GRAPHQL_AUTH_URL"] = auth
+                else:
+                    remove.append("GRAPHQL_AUTH_URL")
+            previous_env = (os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN").strip() or "GRAPHQL_TOKEN"
+            token_env = _plain(graphql.get("token_env") or previous_env, "token variable").strip() or "GRAPHQL_TOKEN"
+            if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:
+                raise ValueError("The token variable name is not usable.")
+            if graphql.get("token_env"):
+                updates["GRAPHQL_TOKEN_ENV"] = token_env
+            if "token" in graphql and str(graphql.get("token") or "") != "":
+                updates[token_env] = _plain(graphql.get("token"), "token")
+            elif token_env != previous_env and os.environ.get(previous_env) and token_env not in os.environ:
+                updates[token_env] = os.environ[previous_env]
+        remove = [key for key in remove if key not in updates]
+        try:
+            update_dotenv(updates, remove=remove)
+        except Neo4jConfigError as e:
+            raise ValueError(str(e)) from e
+        for key in remove:
+            os.environ.pop(key, None)
+        for key, value in updates.items():
+            os.environ[key] = "" if value is None else str(value)
+        _reconnect()
+        print("Data connection saved.")
+        diagnostics.record("explorer", "Data connection saved.")
+        return {"connection": connection_view(), "status": public_status(consume=False)}
+
+
+def _test_message(exc, extra):
+    secrets = [value for value in (_secret_values() + list(extra)) if value]
+    return _scrub_public(str(exc), secrets)[:300] or "The connection failed."
+
+
+def test_connection(body):
+    """Probe the form values. Nothing is written to .env."""
+    if not isinstance(body, dict):
+        raise ValueError("connection settings must be an object")
+    kind = str(body.get("kind") or "")
+    if kind == "neo4j":
+        return _test_neo4j(body.get("neo4j") if isinstance(body.get("neo4j"), dict) else {})
+    if kind == "graphql":
+        return _test_graphql(body.get("graphql") if isinstance(body.get("graphql"), dict) else {})
+    raise ValueError("Choose Neo4j or GraphQL to test.")
+
+
+def _test_neo4j(neo):
+    load_credential_env()
+    uri = _plain(neo.get("uri") or os.environ.get("NEO4J_URI") or "bolt://localhost:7687", "URI").strip()
+    user = _plain(neo.get("user") or os.environ.get("NEO4J_USER") or "neo4j", "user").strip() or "neo4j"
+    database = _plain(neo.get("database") or os.environ.get("NEO4J_DATABASE") or "neo4j", "database").strip() or "neo4j"
+    if "password" in neo:
+        password = _plain(neo.get("password"), "password")
+    elif "NEO4J_PASSWORD" in os.environ:
+        password = os.environ.get("NEO4J_PASSWORD")
+        if password is None:
+            password = ""
+    else:
+        raise ValueError("Enter a password, or choose No password.")
+    if "://" not in uri:
+        raise ValueError("NEO4J_URI must be a bolt or neo4j URL, such as bolt://127.0.0.1:7687")
+    parts = urlsplit(uri)
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(
+            "NEO4J_URI includes a user or a password. Keep the URI as the host, "
+            "and set the user and password in their own fields.")
+    driver = GraphDatabase.driver(uri, auth=(user, password), connection_timeout=5)
+    try:
+        def work(tx):
+            return tx.run("RETURN 1 AS ok").single()
+        with driver.session(database=database, default_access_mode=READ_ACCESS) as session:
+            session.execute_read(neo4j.unit_of_work(timeout=8)(work))
+    except Exception as exc:  # noqa: BLE001
+        message = _test_message(exc, [password])
+        diagnostics.record("explorer", f"Neo4j connection test failed: {message}")
+        return {"ok": False, "message": message}
+    finally:
+        try:
+            driver.close()
+        except Exception:  # noqa: BLE001
+            pass
+    diagnostics.record("explorer", "Neo4j connection test succeeded.")
+    return {"ok": True, "message": "Neo4j answered."}
+
+
+def _test_graphql(graphql):
+    load_graphql_env()
+    endpoint_raw = _plain(graphql.get("endpoint") or os.environ.get("GRAPHQL_ENDPOINT") or "", "endpoint").strip()
+    endpoint = _clean_endpoint(endpoint_raw)
+    if not endpoint:
+        raise ValueError(
+            "The GraphQL endpoint must be an http or https URL without a user, a password, or a token.")
+    token_env = _plain(graphql.get("token_env") or os.environ.get("GRAPHQL_TOKEN_ENV") or "GRAPHQL_TOKEN", "token variable").strip() or "GRAPHQL_TOKEN"
+    if not _ENV_RE.fullmatch(token_env) or token_env in _TOKEN_ENV_BLOCKED:
+        raise ValueError("The token variable name is not usable.")
+    token = None
+    if "token" in graphql and str(graphql.get("token") or "") != "":
+        token = _plain(graphql.get("token"), "token")
+    elif os.environ.get(token_env):
+        token = os.environ.get(token_env)
+    client_id = _client_id(_plain(graphql.get("client_id") if "client_id" in graphql else os.environ.get("GRAPHQL_CLIENT_ID"), "client id"))
+    if "client_secret" in graphql and str(graphql.get("client_secret") or "") != "":
+        secret = _plain(graphql.get("client_secret"), "client secret")
+    elif os.environ.get("GRAPHQL_CLIENT_SECRET"):
+        secret = os.environ.get("GRAPHQL_CLIENT_SECRET")
+    else:
+        secret = ""
+    auth_raw = _plain(graphql.get("auth_url") if "auth_url" in graphql else (os.environ.get("GRAPHQL_AUTH_URL") or ""), "auth URL").strip()
+    if auth_raw:
+        auth = _clean_endpoint(auth_raw)
+        if not auth:
+            raise ValueError("The auth URL must be an http or https URL without a user, a password, or a token.")
+    else:
+        auth = wiz_auth_url(endpoint)
+    if not token and not (client_id and secret and auth):
+        raise ValueError("Add a bearer token, or a Wiz client id and client secret.")
+    client = GraphQLClient(
+        endpoint, token_env, token=token, client_id=client_id or None,
+        client_secret=secret, auth_url=auth, timeout=8, max_retries=0, result_ttl=0,
+    )
+    try:
+        client.execute("{ __typename }")
+    except TokenExpired:
+        message = "token expired"
+        ok = False
+    except Exception as exc:  # noqa: BLE001
+        message = _test_message(exc, [token, secret])
+        ok = False
+    else:
+        message = "GraphQL answered."
+        ok = True
+    diagnostics.record("explorer", f"GraphQL connection test: {message}")
+    return {"ok": ok, "message": message}
+
+
+def _log_cypher(statement, result=None, error=None):
+    """One Cypher statement in the query log. The password is not part of the statement."""
+    text = str(statement or "").strip()
+    if error is not None:
+        outcome = f"-> {error}"
+    elif isinstance(result, dict):
+        outcome = f"-> {len(result.get('nodes') or [])} nodes, {len(result.get('edges') or [])} edges"
+        note = (result.get("truncation") or {}).get("message")
+        if note:
+            outcome = f"{outcome}, {note}"
+    else:
+        outcome = "-> done"
+    diagnostics.record("query", f"Cypher\n{text}\n{outcome}")
+
+
+# The largest request body the explorer reads. Saved-query routes use the store limit.
+BODY_LIMIT = 16 * 1024 * 1024
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+class BadRequest(Exception):
+    """A request that the handler refuses before it reads the body. code is the HTTP status."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def _finite_json(value):
+    """A copy of value with each NaN or infinite number set to None."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_json(item) for item in value]
+    return value
+
+
+def _host_name(host):
+    """The host part of a Host header, lower case, with no port."""
+    text = str(host or "").strip().lower()
+    if text.startswith("["):
+        return text[:text.find("]") + 1] if "]" in text else text
+    return text.rsplit(":", 1)[0] if text.count(":") == 1 else text
+
+
+def _allowed_host(host, bound):
+    """True for a Host header that names this machine, an IP address, or the listening address.
+
+    DNS rebinding needs a host name, so an IP address is safe to allow. That
+    keeps HOST=0.0.0.0 usable from another machine by its address.
+    GX_ALLOWED_HOSTS adds more names, separated by commas.
+    """
+    name = _host_name(host)
+    if not name:
+        return True
+    try:
+        ipaddress.ip_address(name.strip("[]"))
+        return True
+    except ValueError:
+        pass
+    listen = str((bound or ("",))[0] or "").lower()
+    extra = {item.strip().lower() for item in (os.environ.get("GX_ALLOWED_HOSTS") or "").split(",") if item.strip()}
+    return name in _LOCAL_HOSTS or name == listen or name in extra
+
+
+def _same_origin(origin, host):
+    """True when the Origin header is http://<Host header>."""
+    parts = urlsplit(origin)
+    return parts.scheme in ("http", "https") and bool(parts.netloc) and parts.netloc.lower() == str(host or "").strip().lower()
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "GraphExplorer/0.1"
 
     def log_message(self, fmt, *args):
+        line = _scrub_public(fmt % args, _secret_values())
+        diagnostics.record("server", line)
         if os.environ.get("QUIET") != "1":
-            sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+            sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), line))
 
     def _send(self, code, body: bytes, ctype="application/json"):
         self.send_response(code)
@@ -1137,29 +2109,120 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj).encode())
+        try:
+            body = json.dumps(obj, allow_nan=False).encode()
+        except ValueError:
+            # NaN and Infinity are not JSON, and the page cannot parse them. They go as null.
+            body = json.dumps(_finite_json(obj), allow_nan=False).encode()
+        self._send(code, body)
 
-    def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
+    def _body(self, limit=None):
+        raw = (self.headers.get("Content-Length") or "").strip()
+        if not raw:
+            n = 0
+        elif raw.isdigit():
+            n = int(raw)
+        else:
+            raise BadRequest(400, "The Content-Length header must be a whole number of bytes.")
+        if limit is None:
+            limit = BODY_LIMIT
+        if n > limit:
+            raise BadRequest(413, f"The request is larger than {limit // (1024 * 1024)} MB.")
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _refuse_cross_site(self):
+        """Refuse a write that a page on another site, or a rebound host name, could send.
+
+        A browser sends text/plain and form posts with no CORS preflight, so a
+        write must say application/json. Origin, when the browser sends it,
+        must be this server. Host must name this machine, or the address the
+        server listens on, so DNS rebinding cannot read or write through it.
+        Returns True when the request was refused and an answer was sent.
+        """
+        if not _allowed_host(self.headers.get("Host"), self.server.server_address):
+            self._json({"error": "This explorer answers requests for localhost or an IP address only. "
+                                 "GX_ALLOWED_HOSTS adds a host name."}, 403)
+            return True
+        if self.command == "GET":
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and not _same_origin(origin, self.headers.get("Host")):
+            self._json({"error": "A request from another site is refused."}, 403)
+            return True
+        length = (self.headers.get("Content-Length") or "").strip()
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if length not in ("", "0") and ctype != "application/json":
+            self._json({"error": "Send the request body as application/json."}, 415)
+            return True
+        return False
+
+    def _query_route(self, path):
+        """The action after /api/queries, or None when the path is not a saved-query route."""
+        if path == "/api/queries":
+            return ""
+        if path.startswith("/api/queries/"):
+            return unquote(path[len("/api/queries/"):])
+        return None
+
+    def _api_error(self, exc):
+        secrets = _secret_values()
+        if isinstance(exc, BadRequest):
+            return self._json({"error": str(exc)}, exc.code)
+        if isinstance(exc, query_store.QueryNotFound):
+            return self._json({"error": str(exc)}, 404)
+        if isinstance(exc, json.JSONDecodeError):
+            return self._json({"error": "The request body is not valid JSON."}, 400)
+        if isinstance(exc, TokenExpired):
+            return self._json({"error": "token expired"}, 401)
+        if isinstance(exc, RateLimited):
+            return self._json({"error": "The GraphQL API asked us to slow down (HTTP 429)."}, 429)
+        if isinstance(exc, QueryRejected):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 400)
+        if isinstance(exc, PermissionError):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 403)
+        if isinstance(exc, (ValueError, GraphQLConfigError)):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 400)
+        if isinstance(exc, neo4j.exceptions.Neo4jError):
+            return self._json({"error": _scrub_public(f"{exc.code}: {exc.message}", secrets)}, 400)
+        if isinstance(exc, QueryTimeout):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 504)
+        if isinstance(exc, GraphQLCallError):
+            return self._json({"error": _scrub_public(str(exc), secrets)}, 502)
+        return self._json({"error": _scrub_public(str(exc), secrets)}, 500)
+
     def do_GET(self):
+        if self._refuse_cross_site():
+            return None
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        src = current()
         try:
             if u.path == "/api/status":
-                return self._json(GRAPH.status(consume_config_created=True))
+                return self._json(public_status(consume=True))
+            if u.path == "/api/sources":
+                return self._json(_scrub_public(source_catalog(), _secret_values()))
+            if u.path == "/api/connection":
+                return self._json(connection_view())
+            if u.path == "/api/diagnostics":
+                return self._json({"entries": _scrub_public(diagnostics.snapshot(q.get("source")), _secret_values())})
             if u.path == "/api/schema":
-                return self._json(GRAPH.schema(refresh=q.get("refresh") == "1"))
+                # full=1 asks a GraphQL source for its whole data model. Neo4j has one model.
+                return self._json(schema_response(src, refresh=q.get("refresh") == "1", full=q.get("full") == "1"))
+            if u.path == "/api/cache":
+                return self._json(cache_view(src))
             if u.path == "/api/styles":
                 return self._json(CFG)
             if u.path == "/api/queries":
-                return self._json(json.loads((ROOT / "data" / "queries.json").read_text()))
+                return self._json(query_library(src))
+            if u.path == "/api/queries/export":
+                return self._json(query_action(src, "GET", "export"))
             if u.path == "/api/search":
-                return self._json(GRAPH.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
-                                               q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))
+                return self._json(src.search(q.get("q", ""), q.get("type", "node"), q.get("category") or None, q.get("prop") or None,
+                                             q.get("value"), int(q.get("limit", 20)), int(q.get("offset", 0)), q.get("fuzzy") == "1"))
         except Exception as e:  # noqa: BLE001
-            return self._json({"error": str(e)}, 500)
+            if isinstance(e, (TokenExpired, RateLimited, QueryRejected, GraphQLCallError, GraphQLConfigError, ValueError)):
+                return self._api_error(e)
+            return self._json({"error": _scrub_public(str(e), _secret_values())}, 500)
         path = (STATIC / (u.path.lstrip("/") or "index.html")).resolve()
         if u.path == "/":
             path = STATIC / "index.html"
@@ -1168,13 +2231,29 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, path.read_bytes(), mimetypes.guess_type(str(path))[0] or "application/octet-stream")
 
     def do_POST(self):
+        if self._refuse_cross_site():
+            return None
         u = urlparse(self.path)
+        src = current()
         try:
+            action = self._query_route(u.path)
+            if action is not None:
+                return self._json(query_action(src, "POST", action, self._body(query_store.FILE_MAX)))
             b = self._body()
+            if u.path == "/api/connection/test":
+                return self._json(test_connection(b))
+            if u.path == "/api/connection":
+                return self._json(save_connection(b))
+            if u.path == "/api/source":
+                return self._json(select_source(b.get("id")))
+            if u.path == "/api/cache/refresh":
+                return self._json(refresh_cache(src, b.get("what") if isinstance(b, dict) else None))
+            if u.path == "/api/cache/clear":
+                return self._json(clear_cache(src))
             if u.path == "/api/nodes":
-                return self._json(GRAPH.nodes(b["ids"]))
+                return self._json(src.nodes(b["ids"]))
             if u.path == "/api/neighbors":
-                return self._json(GRAPH.neighbor_summary(b["ids"], b.get("visible", [])))
+                return self._json(src.neighbor_summary(b["ids"], b.get("visible", [])))
             if u.path == "/api/budget/suggest":
                 return self._json(suggest_for(b))
             if u.path == "/api/budget/refine":
@@ -1182,40 +2261,90 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/budget":
                 return self._json({"config": save_config(b), "config_file": config_path().name})
             if u.path == "/api/expand":
-                return self._json(GRAPH.expand(b.get("ids") or [], b.get("visible") or [], b.get("categories"), b.get("types"),
-                                               b.get("limit", EXPAND_LIMIT), b.get("order", "neighbors"), b.get("offset", 0),
-                                               b.get("q") or None, b))
+                return self._json(src.expand(b.get("ids") or [], b.get("visible") or [], b.get("categories"), b.get("types"),
+                                             b.get("limit", EXPAND_LIMIT), b.get("order", "neighbors"), b.get("offset", 0),
+                                             b.get("q") or None, b))
             if u.path == "/api/edges-between":
-                return self._json(GRAPH.edges_between(b.get("ids") or [], b))
+                return self._json(src.edges_between(b.get("ids") or [], b))
             if u.path == "/api/cypher":
-                return self._json(GRAPH.cypher(b["query"], b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b))
-        except PermissionError as e:
-            return self._json({"error": str(e)}, 403)
-        except ValueError as e:
-            return self._json({"error": str(e)}, 400)
-        except neo4j.exceptions.Neo4jError as e:
-            return self._json({"error": f"{e.code}: {e.message}"}, 400)
+                statement = str(b.get("query") or "")
+                try:
+                    result = src.cypher(statement, b.get("params"), int(b.get("limit", CYPHER_ROW_LIMIT)), b)
+                except Exception as exc:
+                    _log_cypher(statement, error=exc)
+                    raise
+                _log_cypher(statement, result)
+                return self._json(result)
+            if u.path == "/api/graphql":
+                run = getattr(src, "run_document", None)
+                if not callable(run):
+                    raise ValueError("This source has no GraphQL. Switch to a GraphQL connection to run this query.")
+                caps = session_caps(b)
+                limit = min(caps["cypher_limit"], caps["remain_nodes"])
+                return self._json(run(b.get("document") or "", b.get("variables"), limit))
+        except RouteNotFound:
+            return self._send(404, b"not found", "text/plain")
         except Exception as e:  # noqa: BLE001
-            return self._json({"error": str(e)}, 500)
+            return self._api_error(e)
         self._send(404, b"not found", "text/plain")
+
+    def _query_write(self, method):
+        if self._refuse_cross_site():
+            return None
+        u = urlparse(self.path)
+        action = self._query_route(u.path)
+        if not action:
+            return self._send(404, b"not found", "text/plain")
+        try:
+            body = self._body(query_store.FILE_MAX) if method == "PUT" else None
+            return self._json(query_action(current(), method, action, body))
+        except RouteNotFound:
+            return self._send(404, b"not found", "text/plain")
+        except Exception as e:  # noqa: BLE001
+            return self._api_error(e)
+
+    def do_PUT(self):
+        return self._query_write("PUT")
+
+    def do_DELETE(self):
+        return self._query_write("DELETE")
 
 
 def main():
-    global GRAPH
-    try:
-        settings = neo4j_settings()
-    except Neo4jConfigError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+    graph = None
+    if "--fresh" in sys.argv[1:] or _fresh_process():
+        _drop_saved_connection()
+        print(
+            "This run has no data connection. The saved .env is left as it is. "
+            "Use Add Neo4j or Add GraphQL.",
+            flush=True)
+        graph = _unconfigured()
+    else:
+        try:
+            settings = neo4j_settings()
+        except Neo4jConfigError as e:
+            if not e.missing_password:
+                print(f"error: {diagnostics.redact(e)}", file=sys.stderr)
+                sys.exit(1)
+            print(f"WARNING: {diagnostics.redact(e)}", file=sys.stderr)
+            print("Neo4j is not configured. Open the page and use Add Neo4j or Add GraphQL.", file=sys.stderr)
+            graph = UnconfiguredNeo4j()
+        else:
+            graph = Graph(settings)
     cfg = ensure_config()
     print(f"Working set: {cfg['nodes']} nodes / {cfg['edges']} edges "
           f"({cfg['source']}) from {config_path()}.")
-    GRAPH = Graph(settings)
-    try:
-        st = GRAPH.status()
-        print(f"Connected to {st['uri']} ({st['server']}), db={st['database']}: {st['nodes']} nodes / {st['edges']} edges. READ-ONLY.")
-    except Exception as e:  # noqa: BLE001
-        print(f"WARNING: cannot reach Neo4j yet: {e}")
+    bind_sources(graph, cfg)
+    cache = schema_cache.default_cache()
+    print(f"Schema cache: {cache.folder} (rebuilt after {cache.max_age / 3600:g} h).", flush=True)
+    if isinstance(graph, Graph):
+        try:
+            st = GRAPH.status()
+            print(diagnostics.redact(
+                f"Connected to {st['uri']} ({st['server']}), db={st['database']}: "
+                f"{st['nodes']} nodes / {st['edges']} edges. READ-ONLY."), flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: cannot reach Neo4j yet: {_scrub_public(str(e), _secret_values())}", flush=True)
     host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 8744))
     srv = ThreadingHTTPServer((host, port), Handler)
     print(f"Open http://{host}:{port}/")
