@@ -10,15 +10,19 @@ Python 3.9+, the `neo4j` driver, and Neo4j 5. No build step. The UI is `static/`
 
 ## What it looks like
 
-`docs/screenshots/` is the curated set. The UI suite writes its own captures under `tests/screenshots/`, which is gitignored. `landing.png` is the empty-canvas start page. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
+`docs/screenshots/` is the curated set, taken against the Cartography fixture snapshot and the local Wiz fixture. The UI suite writes its own captures under `tests/screenshots/`, which is gitignored. `landing.png` is the empty-canvas start page. `before-after-v1.png` and `before-after-v2.png` are the older renderer comparison. `docs/compare/` holds the Linkurious comparison sheets.
 
-The empty canvas opens on the start page.
+The empty canvas opens on the start page. With Neo4j and the Wiz fixture both configured, the card has a source select.
 
 ![Start page](docs/screenshots/landing.png)
 
-A hub with its neighbors grouped by category. Double-click a group to load that page.
+The same select sits in the status bar. This capture has the Wiz fixture selected.
 
-![Hub groups around acme-prod](docs/screenshots/app-21-hub-groups.png)
+![Wiz fixture selected on the start page](docs/screenshots/app-22-wiz-source.png)
+
+A hub with its neighbors grouped by category. The account is `000000000000` from the fixture snapshot. Double-click a group to load that page.
+
+![Hub groups around account 000000000000](docs/screenshots/app-21-hub-groups.png)
 
 Filters hide a category and grey those nodes out.
 
@@ -31,6 +35,22 @@ The data-model view reads the live schema.
 The Cypher editor runs one read-only query and can add the result to the graph.
 
 ![Read-only Cypher editor](docs/screenshots/app-16-code-query.png)
+
+A Cypher result turns Focus on. Nodes outside that result are dimmed, and the result edges are coral. A Wiz graph-search result does not turn Focus on. TODO: decide whether it should. The switch is on the Queries panel for Wiz, and turning it on with an empty set asks you to run a query.
+
+![Focus on a Cypher result from the fixture](docs/screenshots/app-24-focus.png)
+
+Search on the Wiz fixture places its example entities. The legend lists the families on the canvas.
+
+![Wiz fixture graph with the legend](docs/screenshots/app-23-wiz-legend.png)
+
+Ctrl+K opens the command palette. Two or more characters also search nodes.
+
+![Command palette](docs/screenshots/app-25-command-palette.png)
+
+The selection panel opens on select and groups properties into Identity, Exposure, Relationships, Timestamps, and Properties.
+
+![Grouped selection panel](docs/screenshots/app-26-inspector.png)
 
 ## Run locally
 
@@ -45,6 +65,8 @@ That creates `.venv/`, starts container `gx-neo4j` on 127.0.0.1 (bolt 7687, brow
 
 When `GRAPHQL_ENDPOINT` is unset, the same command starts container `gx-graphql` on 127.0.0.1:8791. That fixture is a small Wiz-shaped graph. The test client is `gx-graphql` and the test secret is `tinkerlab-graphql`. Pick **Wiz fixture** on the page. The fixture has no volume.
 
+`docker-compose.yml` is the same two containers without the seed step. `docker compose up -d neo4j graphql`, then `seed_cartography.py --wipe --fixtures`, then `server.py` with `GRAPHQL_ENDPOINT=http://127.0.0.1:8791/graphql` and `GRAPHQL_AUTH_URL=http://127.0.0.1:8791/oauth/token`. The comments at the top of that file are the exact command. `python3 run_local.py --status` prints both containers and whether the explorer port is up.
+
 `python3 run_local.py --keep-data` leaves the database as it is. `--stop` stops the explorer and both containers. `--reset` deletes the Neo4j container, its volume, and the GraphQL fixture.
 
 | Option | What it does |
@@ -54,8 +76,8 @@ When `GRAPHQL_ENDPOINT` is unset, the same command starts container `gx-graphql`
 | `--synthetic N` / `--both` | Load the Cartography-shaped generator, or the fixtures plus that generator. |
 | `--live-scale` | Stream exactly 15,000,000 nodes and 60,000,000 edges. Needs about 16 GB of RAM for Docker and 30 GB of disk. `--nodes` and `--edges` override the totals. |
 | `--max-nodes N --max-edges M` | Fixed safety ceiling. Omit both and the ceiling follows this machine's RAM. |
-| `--port 8755` `--no-browser` `--detach` | Explorer port, skip the browser, run in the background. |
-| `--test` | Budget tests, GraphQL tests (mocked API and the `gx-graphql` fixture), and the 33 UI checks against the fixture snapshot, then keep serving. `--no-serve` exits after the tests. |
+| `--port 8755` `--no-browser` `--detach` `--status` | Explorer port, skip the browser, run in the background, or print what is running. |
+| `--test` | Budget tests, GraphQL tests (mocked API and the `gx-graphql` fixture), and the 40 UI checks in `tests/run_ui_tests.py`, then keep serving. `--no-serve` exits after the tests. |
 
 ## Your own Neo4j
 
@@ -109,7 +131,23 @@ Or a `graphql` list in `gx.local.json`:
 
 `GRAPHQL_ENDPOINT` overrides a file entry with the same id. `GRAPHQL_LABEL`, `GRAPHQL_ID`, `GRAPHQL_TOKEN_ENV` (default `GRAPHQL_TOKEN`), and `GRAPHQL_PROJECT_ID` (default `*`) are optional. On a `wiz.io` host the adapter defaults to `wiz`. Any other host defaults to `generic`.
 
-The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). The data model is the live introspection schema: every object type, field, and relationship, with scalar fields as properties. Search and expand load one page at a time. Diagnostics keeps the GraphQL document and its variables, and removes passwords, client secrets, and bearer tokens. The client id stays in the connection form.
+The token URL for each offering is `WIZ_OFFERINGS` in `graphql_source.py`. An endpoint is Wiz when its host is `wiz.io` or `wiz.us`, or ends in `.` plus that domain. A look-alike host is not Wiz and stays `generic` unless `GRAPHQL_ADAPTER=wiz`.
+
+A tree edge whose level the query selected is type `related` and is drawn solid. `related (via unselected)` is the dashed edge through a level the query did not select. The inspector says Wiz did not report a relationship type for either. Expand still uses type `related` because the result is the entity, not the relationship name (`graphql_source.py`, `WizAdapter`).
+
+The client sends queries only. A mutation is refused before the request is built. HTTP 401 with a client id and secret requests a new access token once and retries. The page says "token expired" only when the API says the token is expired. Other refusals keep the HTTP status. HTTP 429 backs off, and `GRAPHQL_MAX_INFLIGHT` caps concurrent requests (default 4). On a generic endpoint the data model is the introspection schema: object types, fields, and relationships, with scalar fields as properties. On Wiz, `GET /api/schema` is the search shape and `GET /api/schema?full=1` is full introspection. Search and expand load one page at a time. Diagnostics (`diagnostics.py`) keeps the GraphQL document and its variables, and removes passwords, client secrets, and bearer tokens. The client id stays in the connection form.
+
+## Workspace
+
+The landing card and the status bar each have a source select. One source is on screen at a time. The status bar also shows the canvas budget, "Laying out…" while a layout runs, and the schema-cache chip. Clicking the chip calls `POST /api/cache/refresh`.
+
+The legend under the canvas lists the style families that have a node on screen. `data/cartography_styles.json` defines those families (compute, storage, network, identity, github, okta, gcp, findings). Uppercase category names in that file are Wiz entity types. Each reuses the icon and color of the closest Cartography type.
+
+Focus dims every node that was not in the last result and draws the result edges in coral (`#e07a5f`). The button is on the top toolbar and the switch is in Queries. A Cypher run fills that set and turns focus on. A Wiz graph-search run does not. TODO: decide whether a Wiz result should turn focus on. The switch is visible for Wiz today, and turning it on with an empty set says to run a query.
+
+Ctrl+K opens the command palette. It lists commands (search, fit, expand, pin, help, queries, Cypher, data model, refresh data model, focus, theme) and the saved query names. Two or more characters also search nodes and group them by category. `/` focuses search, `F` fits, `E` expands the selection, `P` pins or unpins, `?` opens help.
+
+Selecting a node opens the left panel. Closing it leaves a tab. Properties are grouped into Identity, Exposure, Relationships, Timestamps, and Properties. Cartography `_module_*` fields sit under Module fields. Copy id works on every source. Open in Neo4j is shown only for a Neo4j source and uses the Bolt URI from `/api/status` to build a Browser URL. A Wiz node that arrived with a short property list shows "Reading properties…" and then loads the rest. An edge whose type is still the default grey is drawn coral when the type matches `TRUST`, `POLICY`, `IP_RULE`, `ALLOWED_BY`, `ASSUMED_ROLE`, `ASSUME_ROLE`, or `STS_ASSUMEROLE`, unless Design has set another color.
 
 ## Saved queries
 
@@ -140,7 +178,7 @@ The data model is slow to build. A 15M-node Neo4j takes about 80 s, and a full W
 - **Wiz rate limit.** Each HTTP 429 sets a cool-down from its `Retry-After`, the last one too. A background rebuild waits it out. The shape and the full introspection rebuild at least `GX_CACHE_GAP` seconds apart (20). The spacing belongs to the endpoint, so a Data connection save keeps it.
 - **Recovery.** A corrupt file, an unreadable file, or a file from an older cache version is ignored and rebuilt. A read-only or full disk turns the disk cache off with one log line, and the data model stays in memory.
 
-The landing card and the data-model window name the entry and its age, for example "Neo4j data model cached 3 h ago (built in 80 s)". On Wiz, the landing card shows the search shape and the data-model window shows the full schema. Each has its own Refresh button. The age moves forward while the page is open. Refresh rebuilds in the background, and a toast says when it is done. Diagnostics has Clear cache. `GET /api/cache` lists the saved copies, `POST /api/cache/refresh` with `{"what": "schema"}` or `{"what": "all"}` rebuilds now, and `POST /api/cache/clear` drops the files for the active source.
+The landing card and the data-model window name the entry and its age, for example "Neo4j data model cached 3 h ago (built in 80 s)". On Wiz, the landing card shows the search shape and the data-model window shows the full schema. Each has its own Refresh button. The age moves forward while the page is open. Refresh rebuilds in the background, and a toast says when it is done. Diagnostics has Clear cache. `GET /api/cache` lists the saved copies, `POST /api/cache/refresh` with `{"what": "schema"}`, `{"what": "model"}`, `{"what": "all"}`, or a slot name rebuilds now, and `POST /api/cache/clear` drops the files for the active source.
 
 ## API
 
@@ -155,9 +193,9 @@ The page calls these JSON endpoints on the same host. `POST /api/cypher` takes o
 | POST | `/api/connection` | saves one connection into `.env` |
 | POST | `/api/connection/test` | checks the form and does not save it |
 | GET | `/api/diagnostics` | server and explorer log lines, with secrets removed |
-| GET | `/api/schema` | labels, relationship types, counts, and how old the saved copy is. `?refresh=1` rebuilds it |
+| GET | `/api/schema` | labels, relationship types, counts, and how old the saved copy is. `?refresh=1` rebuilds it. `?full=1` asks a GraphQL source for full introspection. Wiz without `full=1` is the search shape |
 | GET | `/api/cache` | saved data models for the active source: built at, age, build time, size, rebuild running |
-| POST | `/api/cache/refresh` | `{"what":"schema"}` or `{"what":"all"}` rebuilds in the background and returns at once |
+| POST | `/api/cache/refresh` | `{"what":"schema"}`, `{"what":"model"}`, `{"what":"all"}`, or a slot name. `schema` is what `GET /api/schema` reads. `model` is what the data-model window reads. Returns at once |
 | POST | `/api/cache/clear` | drops the saved data models for the active source |
 | GET | `/api/styles` | colors, icons, captions |
 | GET | `/api/queries` | built-in and saved queries for the active source, each with `id`, `builtin`, and `editable` |
@@ -197,14 +235,16 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 |---|---|
 | `server.py` | HTTP server, source switch, and read-only Cypher |
 | `graphql_source.py` | GraphQL client, introspection model, and the Wiz adapter |
+| `diagnostics.py` | Diagnostics log. Secrets are removed before a line is stored |
 | `neo4j_env.py` | `NEO4J_*` from the environment, then `.env` |
 | `query_store.py` | saved queries per connection in `gx.queries.json` |
 | `schema_cache.py` | the saved data models in `.cache/` |
 | `static/app.js` | UI |
 | `static/render.js` | Canvas2D renderer |
 | `run_local.py` | venv, Docker Neo4j, GraphQL fixture, sample load, server |
+| `docker-compose.yml` | the same two containers, without seeding or starting the explorer |
 | `tools/graphql_fixture.py` | Wiz-shaped fixture served by container `gx-graphql` |
-| `data/cartography_styles.json` | category color, icon, caption |
+| `data/cartography_styles.json` | families, category color, icon, caption, and Wiz entity types |
 | `data/cartography-queries.json` | Neo4j Cypher library |
 | `data/wiz-queries.json` | Wiz graph-search library |
 | `docs/screenshots/` | Curated UI captures. The suite writes gitignored `tests/screenshots/` |

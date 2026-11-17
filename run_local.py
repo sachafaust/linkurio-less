@@ -21,7 +21,7 @@ What it does, in order:
 
 Other commands:
   --test        run the budget tests, the GraphQL tests (mocked API plus the gx-graphql fixture),
-                the UI suite (33 checks) and a quick browser + API benchmark, then keep serving.
+                the UI suite (40 checks) and a quick browser + API benchmark, then keep serving.
                 The UI tests run against the fixture snapshot. With --live-scale, --test runs the
                 budget tests, the GraphQL tests, and the live-scale checks against the 15M / 60M
                 graph instead of the UI suite.
