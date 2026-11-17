@@ -3,7 +3,9 @@
 Needs a running Neo4j loaded with the Cartography fixture snapshot
 (data/cartography-fixtures.json.gz). The synthetic acme-prod estate is not required.
 Starts server.py itself on a free port, drives the UI, and writes tests/results.json
-and tests/screenshots/app-*.png. Both outputs are gitignored.
+and tests/screenshots/app-*.png. Both outputs are gitignored: a run can point at any
+database, so its captures and results never land in a tracked file. docs/screenshots/
+is the curated set, and only a person copies a picture into it.
 
     NEO4J_PASSWORD=... python3 tests/run_ui_tests.py
 """
@@ -23,12 +25,15 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
+RESULTS_FILE = ROOT / "tests" / "results.json"
 SHOTS = ROOT / "tests" / "screenshots"
 # Anchors in the fixture snapshot. acme-prod exists only in the synthetic generator.
 FIXTURE_SEARCH = "AWSID"          # an AWSAccount id that no other node uses
 FIXTURE_HUB = "000000000000"      # the AWSAccount with more than 100 relationships
 DL = Path(os.environ.get("TMPDIR", "/tmp")) / "gx-downloads"
 RESULTS = []
+# True while a test expects the server to answer HTTP 400.
+EXPECT_400 = {"on": False}
 
 
 def free_port():
@@ -48,11 +53,14 @@ def check(name, fn):
 
 
 def main():
-    SHOTS.mkdir(exist_ok=True); DL.mkdir(parents=True, exist_ok=True)
+    SHOTS.mkdir(parents=True, exist_ok=True); DL.mkdir(parents=True, exist_ok=True)
     port = free_port()
     # Keep the suite off the machine's gx.local.json. The server writes a config on first launch.
+    # gx.queries.json sits next to that config, so saved queries stay in the temporary folder too.
+    folder = Path(tempfile.mkdtemp(prefix="gx-ui-config-"))
     env = {**os.environ, "PORT": str(port), "QUIET": "1",
-           "GX_CONFIG": str(Path(tempfile.mkdtemp(prefix="gx-ui-config-")) / "gx.local.json")}
+           "GX_CONFIG": str(folder / "gx.local.json"), "GX_CACHE_DIR": str(folder / "cache")}
+    env.pop("GX_QUERIES", None)
     srv = subprocess.Popen([sys.executable, str(ROOT / "server.py")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     url = f"http://127.0.0.1:{port}/"
     for _ in range(60):
@@ -72,7 +80,14 @@ def main():
             pg = ctx.new_page()
             pg.on("pageerror", lambda e: errors.append(str(e)))
             # the read-only test deliberately gets an HTTP 403 from /api/cypher; Chrome logs that as a console error
-            pg.on("console", lambda m: errors.append(m.text) if m.type == "error" and "status of 403" not in m.text else None)
+            # The syntax test gets an HTTP 400 from /api/queries/validate on purpose, so a 400 is allowed only then.
+            def on_console(m):
+                if m.type != "error" or "status of 403" in m.text:
+                    return
+                if "status of 400" in m.text and EXPECT_400["on"]:
+                    return
+                errors.append(m.text)
+            pg.on("console", on_console)
             run_all(pg, url)
             b.close()
     finally:
@@ -80,7 +95,10 @@ def main():
     RESULTS.append({"test": "no JavaScript errors during the run", "ok": not errors, "detail": errors[:5] or "none"})
     passed = sum(r["ok"] for r in RESULTS)
     out = {"passed": passed, "total": len(RESULTS), "when": time.strftime("%Y-%m-%d %H:%M %Z"), "results": RESULTS}
-    (ROOT / "tests" / "results.json").write_text(json.dumps(out, indent=1))
+    RESULTS_FILE.write_text(json.dumps(out, indent=1))
+    for row in RESULTS:
+        if not row["ok"]:
+            print(f"FAIL {row['test']}: {row['detail']}")
     print(f"\n{passed}/{len(RESULTS)} passed")
     sys.exit(0 if passed == len(RESULTS) else 1)
 
@@ -165,7 +183,8 @@ def run_all(pg, url):
         pg.wait_for_timeout(300)
         x, y = node_pos(pg, nid)
         pg.mouse.click(x, y, button="right"); pg.wait_for_selector(".menu .mi")
-        pg.hover(".menu .mi:has-text('Expand')"); pg.wait_for_function("document.querySelectorAll('.menu').length >= 2", timeout=8000)
+        # The submenu shows "Loading…" until the neighbor summary answers. Wait for the real items.
+        pg.hover(".menu .mi:has-text('Expand')"); pg.wait_for_function("document.querySelectorAll('.menu').length >= 2 && !document.querySelectorAll('.menu')[1].textContent.includes('Loading')", timeout=8000)
         items = pg.locator(".menu >> nth=1").locator(".mi").all_text_contents()
         shot(pg, "04-expand-menu")
         assert any("All neighbors" in i for i in items) and any("AWSEC2Instance" in i for i in items), items
@@ -206,25 +225,56 @@ def run_all(pg, url):
     check("expand all neighbors (limit 60) and lay out", t_expand_all)
 
     def t_property_panel():
-        nid = ev(pg, "cy.nodes().filter(n => n.data('category') === 'AWSEC2Instance')[0].id()")
+        # Not every fixture EC2 instance has the IMDS flags. Prefer one with a boolean, so the chip check has a value.
+        nid = ev(pg, """(() => { const ec2 = cy.nodes().filter(n => n.data('category') === 'AWSEC2Instance');
+            const flagged = ec2.filter(n => typeof (n.data('props') || {}).imdsv2required === 'boolean');
+            return (flagged.length ? flagged : ec2)[0].id(); })()""")
         ev(pg, f"selectOnly(cy.getElementById({json.dumps(nid)}))"); pg.wait_for_timeout(200)
-        assert pg.is_visible("#open-selpanel")
-        pg.click("#open-selpanel"); pg.wait_for_selector("#leftpanel .lp-title")
+        # Selecting a node opens the panel. The card stays hidden.
+        assert pg.is_visible("#leftpanel .lp-title") and not pg.is_visible("#open-selpanel"), "the panel did not open on select"
         title = pg.text_content("#leftpanel .lp-title"); props = pg.locator("#leftpanel .prop").count()
         chips = pg.locator("#leftpanel .lp-cats .cat").all_text_contents()
+        icon = pg.locator("#leftpanel .lp-cats .cat i[data-icon=Server]").count()
         shot(pg, "03-property-panel")
         pg.fill("#leftpanel .searchbox input", "instancetype"); pg.wait_for_timeout(150)
         vis = pg.locator("#leftpanel .prop:not(.hidden)").count()
         pg.fill("#leftpanel .searchbox input", "")
-        assert props > 8 and vis == 1 and "AWSEC2Instance" in chips, (props, vis, chips)
-        return f"title '{title}', {props} properties, chips {chips}, property search left {vis}"
+        fmt = ev(pg, """(() => {
+            const v = k => document.querySelector(`#leftpanel .prop[data-k="${k}"] .v`);
+            const props = cy.$(':selected').data('props') || {};
+            const boolKey = ['imdsv2required', ...Object.keys(props).sort()].find(k => typeof props[k] === 'boolean');
+            const seen = v('firstseen'); const flag = boolKey ? v(boolKey) : null;
+            return { seen: seen ? seen.textContent.trim() : null, seenTitle: seen ? (seen.querySelector('[title]') || {}).title || '' : '',
+                     raw: String(cy.$(':selected').data('props').firstseen),
+                     flag: flag && flag.querySelector('.pv-bool') ? flag.querySelector('.pv-bool').textContent.trim() : null,
+                     copy: document.querySelectorAll('#leftpanel .prop [data-copy]').length };
+        })()""")
+        assert props > 8 and vis == 1 and "AWSEC2Instance" in chips and icon == 1, (props, vis, chips, icon)
+        assert fmt["flag"] in ("true", "false") and fmt["seen"] and fmt["seen"] != fmt["raw"] and fmt["raw"] in fmt["seenTitle"] and fmt["copy"] == props, fmt
+        return f"title '{title}', {props} properties, chips {chips}, property search left {vis}, firstseen shown as '{fmt['seen']}'"
     check("property panel shows caption, id, categories and searchable properties", t_property_panel)
+
+    def t_panel_collapse():
+        # The < tab closes the panel and keeps it closed. The > tab opens it again.
+        pg.click("#leftpanel .lp-collapse"); pg.wait_for_timeout(150)
+        closed = not pg.is_visible("#leftpanel") and pg.is_visible("#lp-tab") and not pg.is_visible("#open-selpanel")
+        nid = ev(pg, "cy.nodes().filter(n => !n.selected())[0].id()")
+        ev(pg, f"selectOnly(cy.getElementById({json.dumps(nid)}))"); pg.wait_for_timeout(200)
+        stays = not pg.is_visible("#leftpanel") and pg.is_visible("#lp-tab")
+        pref = ev(pg, "JSON.parse(localStorage.getItem('gx:prefs') || '{}').selPanel")
+        pg.click("#lp-tab"); pg.wait_for_timeout(150)
+        back = pg.is_visible("#leftpanel .lp-title") and not pg.is_visible("#lp-tab")
+        assert closed and stays and pref == "closed" and back, (closed, stays, pref, back)
+        return "collapse tab closes the panel, the choice holds for the next selection, and the > tab opens it"
+    check("selection panel collapse tab", t_panel_collapse)
 
     def t_edge_panel():
         eid = ev(pg, "cy.edges()[0].id()")
         ev(pg, f"selectOnly(cy.getElementById({json.dumps(eid)}))"); pg.wait_for_timeout(200)
         t = pg.text_content("#leftpanel .lp-title"); src = pg.locator("#leftpanel [data-goto]").count()
-        return f"edge panel '{t}', {src} source/target links"
+        ends = pg.locator("#leftpanel .lp-ends .cat").count()
+        assert src == 2 and ends == 2, (src, ends)
+        return f"edge panel '{t}', {src} source/target links with {ends} category chips"
     check("edge selection shows edge type, source and target", t_edge_panel)
 
     def t_multi():
@@ -478,6 +528,156 @@ def run_all(pg, url):
         assert n1 > n0, (n0, n1)
         return f"built-in query added {n1 - n0} nodes"
     check("built-in Cartography queries panel", t_queries_panel)
+
+    def api_queries():
+        return json.loads(urllib.request.urlopen(url + "api/queries").read())
+
+    def open_queries_panel():
+        ev(pg, "(() => { if (S.rightPanel !== 'queries') openPanel('queries'); })()")
+        pg.wait_for_selector("#rightpanel [data-act=new-query]")
+
+    def t_query_create_run():
+        open_queries_panel()
+        foot = pg.locator("#rightpanel .rp-foot").inner_text()
+        tags = pg.locator("#rightpanel .q-item .q-builtin").count()
+        pg.click("#rightpanel [data-act=new-query]"); pg.wait_for_selector(".modal [data-qe-body]")
+        pg.fill(".modal [data-qe-name]", "GitHub users and orgs")
+        pg.fill(".modal [data-qe-desc]", "Every user with the organization it belongs to.")
+        pg.fill(".modal [data-qe-tags]", "github, ui-test")
+        pg.fill(".modal [data-qe-body]", "MATCH p=(u:GitHubUser)-[r]->(o:GitHubOrganization) RETURN p LIMIT 30")
+        pg.click(".modal [data-qe-validate]"); pg.wait_for_selector(".modal [data-qe-out] .ok")
+        pg.click(".modal [data-qe-preview]"); pg.wait_for_function("document.querySelector('.modal [data-qe-out]').textContent.includes('nodes')")
+        preview = pg.text_content(".modal [data-qe-out]")
+        ev(pg, "newViz()")
+        pg.click(".modal [data-qe-saverun]"); wait_layout(pg, 1800)
+        nodes, edges = ev(pg, "cy.nodes().length"), ev(pg, "cy.edges().length")
+        saved = [q for q in api_queries() if q["name"] == "GitHub users and orgs"]
+        rows = pg.locator("#rightpanel .q-item:has-text('GitHub users and orgs')").count()
+        assert "NEW QUERY" in foot.upper() and tags >= 9 and "nodes" in preview, (foot, tags, preview)
+        assert not pg.is_visible(".modal") and nodes > 0 and edges > 0 and rows == 1, (nodes, edges, rows)
+        assert saved and saved[0]["tags"] == ["github", "ui-test"] and saved[0]["editable"] is True, saved
+        return f"preview '{preview.strip()}', Save and run drew {nodes} nodes / {edges} edges, the row is in the panel"
+    check("saved queries: create a Cypher query, validate, preview, save and run", t_query_create_run)
+
+    def t_query_refuse_and_guard():
+        open_queries_panel()
+        pg.click("#rightpanel [data-act=new-query]"); pg.wait_for_selector(".modal [data-qe-body]")
+        pg.fill(".modal [data-qe-name]", "Write attempt")
+        pg.fill(".modal [data-qe-body]", "MATCH (n) DETACH DELETE n")
+        pg.click(".modal [data-qe-save]"); pg.wait_for_selector(".modal [data-qe-out] .err")
+        err = pg.text_content(".modal [data-qe-out] .err")
+        ev(pg, "window.confirm = () => false")
+        pg.click(".modal [data-qe-cancel]"); pg.wait_for_timeout(150)
+        kept = pg.is_visible(".modal [data-qe-body]")
+        ev(pg, "window.confirm = () => true")
+        pg.click(".modal [data-close]"); pg.wait_for_timeout(150)
+        closed = not pg.is_visible(".modal")
+        names = [q["name"] for q in api_queries()]
+        assert "not allowed" in err and kept and closed and "Write attempt" not in names, (err, kept, closed)
+        return f"write refused at save ('{err.strip()}'), unsaved edits ask before closing"
+    check("saved queries: a write is refused at save time and unsaved edits ask first", t_query_refuse_and_guard)
+
+    def t_query_edit_builtin_restore():
+        open_queries_panel()
+        before = api_queries()
+        okta = next(q for q in before if q["name"].startswith("Okta groups mapped"))
+        row = pg.locator("#rightpanel .q-item", has=pg.locator(f"[data-qact=edit][data-qid='{okta['id']}']"))
+        row.hover(); row.locator("[data-qact=edit]").click()
+        pg.wait_for_selector(".modal [data-qe-body]")
+        pg.fill(".modal [data-qe-name]", "Okta to AWS (mine)")
+        pg.click(".modal [data-qe-save]"); pg.wait_for_selector(".modal", state="detached")
+        after = api_queries()
+        ids = [q["id"] for q in after]
+        copy = next((q for q in after if q["name"] == "Okta to AWS (mine)"), None)
+        assert okta["id"] not in ids and copy and copy["cypher"] == okta["cypher"] and not copy["builtin"], (ids, copy)
+        pg.click("#rightpanel [data-qmenu]"); pg.click(".menu .mi:has-text('Restore built-in queries')"); pg.wait_for_timeout(500)
+        restored = [q["id"] for q in api_queries()]
+        rows = pg.locator(f"#rightpanel [data-qrun='{okta['id']}']").count()
+        assert okta["id"] in restored and copy["id"] in restored and rows == 1, (restored, rows)
+        return "editing a built-in saved a copy and hid it; Restore brought the built-in back"
+    check("saved queries: edit a built-in makes a copy, restore brings it back", t_query_edit_builtin_restore)
+
+    def t_query_delete_undo_search():
+        open_queries_panel()
+        mine = next(q for q in api_queries() if q["name"] == "GitHub users and orgs")
+        ev(pg, "window.confirm = () => true")
+        row = pg.locator(f"#rightpanel .q-item[data-qrun='{mine['id']}']")
+        row.hover(); row.locator("[data-qact=del]").click()
+        pg.wait_for_function(f"!document.querySelector(\"#rightpanel [data-qrun='{mine['id']}']\")")
+        gone = mine["id"] not in [q["id"] for q in api_queries()]
+        toast = pg.text_content("#toast")
+        pg.click("#toast [data-toast-act]")
+        pg.wait_for_selector(f"#rightpanel [data-qrun='{mine['id']}']")
+        back = [q for q in api_queries() if q["id"] == mine["id"]]
+        pg.fill("#rightpanel [data-qsearch]", "ui-test"); pg.wait_for_timeout(150)
+        shown = pg.locator("#rightpanel .q-item:visible").count()
+        pg.fill("#rightpanel [data-qsearch]", "organization it belongs"); pg.wait_for_timeout(150)
+        by_desc = pg.locator("#rightpanel .q-item:visible").count()
+        pg.fill("#rightpanel [data-qsearch]", "")
+        assert gone and "Undo" in toast and back and back[0]["created"] == mine["created"], (gone, toast, back)
+        assert shown == 1 and by_desc == 1, (shown, by_desc)
+        return f"delete then Undo kept id {mine['id']}; search by tag and description left one row"
+    check("saved queries: delete with Undo, and search by tag and description", t_query_delete_undo_search)
+
+    def t_query_validate_syntax():
+        open_queries_panel()
+        pg.click("#rightpanel [data-act=new-query]"); pg.wait_for_selector(".modal [data-qe-body]")
+        pg.fill(".modal [data-qe-name]", "broken syntax")
+        pg.fill(".modal [data-qe-body]", "MATCH (n RETURN n")
+        EXPECT_400["on"] = True
+        try:
+            pg.click(".modal [data-qe-validate]"); pg.wait_for_selector(".modal [data-qe-out] .err, .modal [data-qe-out] .ok")
+            pg.wait_for_timeout(200)
+        finally:
+            EXPECT_400["on"] = False
+        bad = pg.text_content(".modal [data-qe-out]")
+        pg.fill(".modal [data-qe-body]", "MATCH (n:AWSAccount) RETURN n LIMIT 1")
+        pg.click(".modal [data-qe-validate]"); pg.wait_for_selector(".modal [data-qe-out] .ok")
+        good = pg.text_content(".modal [data-qe-out]")
+        ev(pg, "window.confirm = () => true")
+        pg.click(".modal [data-qe-cancel]"); pg.wait_for_timeout(150)
+        assert "cannot parse" in bad and "parsed the query" in good and "passes" not in good, (bad, good)
+        return f"Validate showed '{bad.strip()[:80]}' and then '{good.strip()}'"
+    check("saved queries: Validate parses Cypher on Neo4j and says what it checked", t_query_validate_syntax)
+
+    def t_query_delete_copy_restores_builtin():
+        open_queries_panel()
+        ev(pg, "window.confirm = () => true")
+        ec2 = next(q for q in api_queries() if q["name"] == "Internet-exposed EC2 instances")
+        row = pg.locator("#rightpanel .q-item", has=pg.locator(f"[data-qact=edit][data-qid='{ec2['id']}']"))
+        row.hover(); row.locator("[data-qact=edit]").click()
+        pg.wait_for_selector(".modal [data-qe-body]")
+        pg.click(".modal [data-qe-save]"); pg.wait_for_selector(".modal", state="detached")
+        copy = next(q for q in api_queries() if q["name"] == "Internet-exposed EC2 instances" and not q["builtin"])
+        asked = []
+        ev(pg, "window.confirm = (m) => { window.__asked = m; return true; }")
+        row = pg.locator(f"#rightpanel .q-item[data-qrun='{copy['id']}']")
+        row.hover(); row.locator("[data-qact=del]").click()
+        pg.wait_for_selector(f"#rightpanel [data-qrun='{ec2['id']}']")
+        asked = ev(pg, "window.__asked")
+        toast = pg.text_content("#toast")
+        ids = [q["id"] for q in api_queries()]
+        ev(pg, "window.confirm = () => true")
+        assert ec2["id"] in ids and copy["id"] not in ids, ids
+        assert "shows again" in asked and "shows again" in toast, (asked, toast)
+        return f"deleting the copy brought the built-in back: '{toast.strip()[:90]}'"
+    check("saved queries: deleting a copy of a built-in shows the built-in again", t_query_delete_copy_restores_builtin)
+
+    def t_query_migration():
+        # Queries saved in this browser before the server store move to the server once.
+        ev(pg, """localStorage.setItem('gx:queries', JSON.stringify([
+            { name: 'Old local query', cypher: 'MATCH (a:AWSAccount) RETURN a LIMIT 3', tags: ['local'] }]))""")
+        pg.reload()
+        pg.wait_for_function("typeof cy !== 'undefined' && !!cy && typeof cy.nodes === 'function' && S.ready", timeout=90000)
+        pg.wait_for_function("(document.querySelector('#toast') || {}).textContent.includes('server')", timeout=15000)
+        toast = pg.text_content("#toast")
+        left = ev(pg, "localStorage.getItem('gx:queries')")
+        moved = [q for q in api_queries() if q["name"] == "Old local query"]
+        open_queries_panel()
+        rows = pg.locator("#rightpanel .q-item:has-text('Old local query')").count()
+        assert left is None and moved and moved[0]["editable"] and rows == 1, (toast, left, moved, rows)
+        return f"moved one browser query to the server store: '{toast.strip()}'"
+    check("saved queries: browser queries move to the server store once", t_query_migration)
 
     def t_data_model():
         pg.click("[data-panel=queries]")

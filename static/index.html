@@ -15,8 +15,12 @@
   <div id="landing">
     <div class="land">
       <h1 class="land-logo"><img src="/logo.jpg" alt="linkurio-less"></h1>
-      <div class="land-kicker">Read-only Neo4j</div>
-      <p class="land-lead">Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.</p>
+      <div class="land-kicker" id="land-kicker">Read-only Neo4j</div>
+      <p class="land-lead" id="land-lead">Search a node, open a saved query, or write Cypher. Each result adds one neighborhood to the canvas. The database stays read-only.</p>
+      <label class="land-source hidden" id="land-source">Data source
+        <select id="source-pick"></select>
+      </label>
+      <p class="land-error hidden" id="land-error" role="status"></p>
       <div class="land-stats" id="land-meta">
         <div><b id="land-nodes">—</b><span>Nodes</span></div>
         <div><b id="land-edges">—</b><span>Relationships</span></div>
@@ -24,16 +28,21 @@
       </div>
       <p class="land-wait hidden" id="land-wait" role="status">
         <span class="land-spin" aria-hidden="true"></span>
-        <span><b>Initializing…</b><small class="hidden" id="land-wait-note">Reading the data model for this Neo4j. The first time can take a minute, and this machine keeps the result.</small></span>
+        <span><b>Initializing…</b><small class="hidden" id="land-wait-note">Reading the data model. The first time can take a minute. This machine keeps the result for the next start.</small></span>
       </p>
+      <div class="land-cache hidden" id="land-cache" role="status"></div>
       <div class="land-grid">
         <button class="land-act" data-act="focus-search"><i data-icon="Magnify"></i><span><b>Search</b><small>Find a node or relationship and place it on the canvas.</small></span></button>
         <button class="land-act" data-act="explore-queries"><i data-icon="CodeBraces"></i><span><b>Queries</b><small>Open a saved query and add its result.</small></span></button>
-        <button class="land-act" data-act="code-query"><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small>Write one read-only statement.</small></span></button>
+        <button class="land-act" data-act="code-query" data-neo4j-only><i data-icon="CodeBracesBox"></i><span><b>Cypher</b><small id="land-cypher-note">Write one read-only statement.</small></span></button>
         <button class="land-act" data-act="data-model"><i data-icon="DatabaseOutline"></i><span><b>Data model</b><small>See labels, relationships, and property types.</small></span></button>
       </div>
       <div id="land-views" class="land-list"></div>
-      <p id="land-error" class="land-error hidden" role="alert"></p>
+      <div class="land-connect" id="land-connect">
+        <button class="land-help" data-act="connection-neo4j"><i data-icon="DatabaseOutline"></i><span data-neo-label>Add Neo4j</span></button>
+        <button class="land-help" data-act="connection-graphql"><i data-icon="GraphOutline"></i><span data-gql-label>Add Wiz</span></button>
+        <button class="land-help" data-act="diagnostics"><i data-icon="FileDocumentOutline"></i>Diagnostics</button>
+      </div>
       <button class="land-help" data-act="help"><i data-icon="HelpCircleOutline"></i>Help and shortcuts</button>
     </div>
   </div>
@@ -43,7 +52,7 @@
       <button data-act="main-menu" title="Menu"><i data-icon="Menu"></i></button>
       <button data-act="undo" id="btn-undo" title="Undo (Ctrl+Z)"><i data-icon="ArrowLeft"></i></button>
       <button data-act="redo" id="btn-redo" title="Redo (Ctrl+Y)"><i data-icon="ArrowRight"></i></button>
-      <button id="toolbar-cypher" data-act="code-query" title="Code a query"><i data-icon="CodeBracesBox"></i></button>
+      <button id="toolbar-cypher" data-act="code-query" data-neo4j-only title="Code a query"><i data-icon="CodeBracesBox"></i></button>
       <button data-act="more-menu" title="More"><i data-icon="DotsHorizontal"></i></button>
     </div>
     <div id="viz-title">Untitled</div>
@@ -53,7 +62,7 @@
       <button id="search-clear" title="Clear"><i data-icon="Close"></i></button>
       <div id="search-dd" class="card hidden">
         <div class="sd-head">
-          <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span>
+          <span class="sd-kind"><a data-kind="node" class="on"><i data-icon="CircleMultipleOutline"></i>NODES</a><span data-neo4j-only> - <a data-kind="edge"><i data-icon="VectorPolyline"></i>EDGES</a></span></span>
           <span class="sd-scope"><a data-scope="all" class="on">ALL</a> - <a data-scope="local">LOCAL</a></span>
           <a class="sd-adv" data-act="advanced-search">Advanced</a>
         </div>
@@ -77,8 +86,9 @@
   </div>
   <aside id="rightpanel" class="hidden"></aside>
   <aside id="leftpanel" class="hidden"></aside>
+  <button class="card hidden" id="lp-tab" data-act="open-selpanel" data-dir="open" title="Open selection panel"><i data-icon="ChevronRight"></i></button>
 
-  <div id="statusbar"><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span><span id="layout-chip" class="chip hidden">Laying out…</span><span id="conn" class="chip"></span></div>
+  <div id="statusbar"><span id="save-chip" class="chip warn"><i data-icon="AlertCircleOutline"></i>Not saved</span><span id="budget-chip" class="chip" data-act="budget" title="Working set on screen"></span><span id="layout-chip" class="chip hidden">Laying out…</span><span id="conn" class="chip"></span><span id="cache-chip" class="chip hidden" data-act="cache-refresh" title="Saved data model. Click to refresh it."></span><select id="source-bar" class="hidden" title="Data source"></select></div>
   <div id="legend" class="card hidden"></div>
   <div class="card toolbar" id="zoomctl">
     <button data-act="zoom-out" title="Zoom out (-)"><i data-icon="Minus"></i></button>

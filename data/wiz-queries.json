@@ -1,0 +1,18 @@
+[
+  {
+    "id": "internet-exposed-ec2",
+    "name": "Internet-exposed EC2 instances",
+    "tags": ["aws", "network"],
+    "variables": {"projectId": "*", "first": 500, "quick": true,
+      "where": {"cloudPlatform": {"EQUALS": ["AWS"]}, "nativeType": {"EQUALS": ["virtualMachine"]},
+                "accessibleFrom.internet": {"EQUALS": true}}},
+    "graphql": "query InternetExposedEC2($projectId: String!, $first: Int, $after: String, $quick: Boolean, $where: GraphPropertyPredicate) {\n  graphSearch(\n    projectId: $projectId, first: $first, after: $after, quick: $quick,\n    query: { type: [VIRTUAL_MACHINE] select: true where: $where }\n  ) {\n    totalCount\n    pageInfo { hasNextPage endCursor }\n    nodes { entities { id name type properties } }\n  }\n}\n"
+  },
+  {
+    "id": "open-security-groups",
+    "name": "Security groups open to 0.0.0.0/0",
+    "tags": ["aws", "network"],
+    "variables": {"projectId": "*", "first": 500, "quick": true},
+    "graphql": "query SecurityGroupsOpenToWorld($projectId: String!, $first: Int, $after: String, $quick: Boolean) {\n  graphSearch(\n    projectId: $projectId, first: $first, after: $after, quick: $quick,\n    query: {\n      type: [FIREWALL]\n      select: true\n      where: {\n        cloudPlatform: { EQUALS: [\"AWS\"] }\n        nativeType: { EQUALS: [\"securityGroup\"] }\n      }\n      relationships: [{\n        type: [{ type: CONTAINS }]\n        with: {\n          type: [NETWORK_SECURITY_RULE]\n          select: true\n          where: { inbound: { EQUALS: true }, actionAllow: { EQUALS: true } }\n          relationships: [{\n            type: [{ type: CONTAINS_SRC_IP_RANGE }]\n            with: { type: [IP_RANGE], where: { cidr: { EQUALS: [\"0.0.0.0/0\"] } } }\n          }]\n        }\n      }]\n    }\n  ) {\n    totalCount\n    pageInfo { hasNextPage endCursor }\n    nodes { entities { id name type properties } }\n  }\n}\n"
+  }
+]

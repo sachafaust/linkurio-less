@@ -1,5 +1,5 @@
 {
- "note": "Default styles for Cartography data. Category = most specific Cartography label (see category_priority).",
+ "note": "Default styles for Cartography data. Category = most specific Cartography label (see category_priority). Uppercase names are Wiz entity types. Each reuses the icon and colour of the closest Cartography type.",
  "category_priority": [
   "AWSAccount",
   "AWSEC2Instance",
@@ -494,6 +494,270 @@
     "id",
     "name"
    ]
+  },
+  "VIRTUAL_MACHINE": {
+   "color": "#ea580c",
+   "icon": "Server",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "FIREWALL": {
+   "color": "#8b5cf6",
+   "icon": "ShieldOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "NETWORK_SECURITY_RULE": {
+   "color": "#a78bfa",
+   "icon": "Wall",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "IP_RANGE": {
+   "color": "#c4b5fd",
+   "icon": "IpOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "SUBNET": {
+   "color": "#7c3aed",
+   "icon": "IpNetworkOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "VIRTUAL_NETWORK": {
+   "color": "#6d28d9",
+   "icon": "Lan",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "BUCKET": {
+   "color": "#15803d",
+   "icon": "BucketOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "DATABASE": {
+   "color": "#22c55e",
+   "icon": "Database",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "ENCRYPTION_KEY": {
+   "color": "#86efac",
+   "icon": "KeyVariant",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "ACCESS_KEY": {
+   "color": "#881337",
+   "icon": "Key",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "SERVERLESS": {
+   "color": "#f97316",
+   "icon": "Lambda",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "LOAD_BALANCER": {
+   "color": "#fdba74",
+   "icon": "ScaleBalance",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "SUBSCRIPTION": {
+   "color": "#c2410c",
+   "icon": "Aws",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "USER_ACCOUNT": {
+   "color": "#be185d",
+   "icon": "Account",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "SERVICE_ACCOUNT": {
+   "color": "#f43f5e",
+   "icon": "ShieldKeyOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "GROUP": {
+   "color": "#db2777",
+   "icon": "AccountGroup",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "ACCESS_ROLE": {
+   "color": "#e11d48",
+   "icon": "BadgeAccountHorizontalOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "RAW_ACCESS_POLICY": {
+   "color": "#fb7185",
+   "icon": "FileDocumentOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "POLICY_STATEMENT": {
+   "color": "#9f1239",
+   "icon": "FormatListBulleted",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "REPOSITORY": {
+   "color": "#64748b",
+   "icon": "SourceRepository",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "REPOSITORY_BRANCH": {
+   "color": "#94a3b8",
+   "icon": "SourceBranch",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "LOCAL_USER": {
+   "color": "#334155",
+   "icon": "AccountOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "TECHNOLOGY": {
+   "color": "#cbd5e1",
+   "icon": "CodeTags",
+   "caption": [
+    "name"
+   ],
+   "family": "github"
+  },
+  "NETWORK_INTERFACE": {
+   "color": "#b39ddb",
+   "icon": "Ethernet",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "SECRET_INSTANCE": {
+   "color": "#ffa000",
+   "icon": "LockOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "identity"
+  },
+  "SNAPSHOT": {
+   "color": "#90a4ae",
+   "icon": "ImageOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "VOLUME": {
+   "color": "#78909c",
+   "icon": "DatabaseOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "storage"
+  },
+  "CONTAINER": {
+   "color": "#29b6f6",
+   "icon": "Cube",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "KUBERNETES_CLUSTER": {
+   "color": "#326ce5",
+   "icon": "HexagonMultipleOutline",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "CLOUD_ORGANIZATION": {
+   "color": "#0d652d",
+   "icon": "OfficeBuilding",
+   "caption": [
+    "name"
+   ],
+   "family": "compute"
+  },
+  "DNS_RECORD": {
+   "color": "#26a69a",
+   "icon": "Web",
+   "caption": [
+    "name"
+   ],
+   "family": "network"
+  },
+  "CONFIGURATION_FINDING": {
+   "color": "#e53935",
+   "icon": "Alert",
+   "caption": [
+    "name"
+   ],
+   "family": "findings"
+  },
+  "IAC_RESOURCE_DECLARATION": {
+   "color": "#8d6e63",
+   "icon": "CodeBraces",
+   "caption": [
+    "name"
+   ],
+   "family": null
   }
  },
  "fallback_palette": [
