@@ -2,7 +2,7 @@
 
 <img src="static/logo.jpg" alt="linkurio-less" width="460">
 
-Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`data/cartography_styles.json`), and the built-in queries (`data/queries.json`).
+Read-only graph explorer for any Neo4j database. The page is a Linkurious-style workspace: search, expand, filter, layout, and a Cypher editor. `server.py` serves that page and a JSON API, and runs each read in a Neo4j READ transaction. Cartography is the bundled sample graph, the default styles (`data/cartography_styles.json`), and the built-in queries (`data/cartography-queries.json`).
 
 A GraphQL endpoint is a separate source on the same page. Wiz is the first adapter. See [GraphQL source](#graphql-source).
 
@@ -123,8 +123,8 @@ Your queries live in `gx.queries.json`, next to `gx.local.json`. `GX_QUERIES` na
 
 The file holds one list per connection: a Neo4j URI and database, or a GraphQL endpoint, adapter, and project. The key is a hash, so two connections never share a list. The file never holds a password or a token.
 
-- Each built-in has an `id` in `data/queries.json` or `data/wiz-queries.json`. The page id is `builtin:<file>:<id>`. An entry with no `id` takes a slug of its name. A new entry or a removed entry does not move the other ids.
-- Editing a built-in query saves your own copy and hides the built-in. A later `git pull` that changes `data/queries.json` does not overwrite your edit. Deleting that copy shows the built-in again.
+- Each built-in has an `id` in `data/cartography-queries.json` or `data/wiz-queries.json`. The page id is `builtin:<file>:<id>`. An entry with no `id` takes a slug of its name. A new entry or a removed entry does not move the other ids.
+- Editing a built-in query saves your own copy and hides the built-in. A later `git pull` that changes `data/cartography-queries.json` does not overwrite your edit. Deleting that copy shows the built-in again.
 - Delete on a built-in hides it. The three-dot menu has Restore built-in queries.
 - Delete asks first, and the toast offers Undo.
 - The three-dot menu also has Import and Export. Export writes a JSON array of your queries. Import adds each valid entry and lists the entries it skipped, with the reason. One import has at most 1,000 entries.
@@ -205,7 +205,7 @@ Rebuild the snapshot from a Cartography checkout with `sh tools/cartography_fixt
 | `run_local.py` | venv, Docker Neo4j, GraphQL fixture, sample load, server |
 | `tools/graphql_fixture.py` | Wiz-shaped fixture served by container `gx-graphql` |
 | `data/cartography_styles.json` | category color, icon, caption |
-| `data/queries.json` | Neo4j Cypher library |
+| `data/cartography-queries.json` | Neo4j Cypher library |
 | `data/wiz-queries.json` | Wiz graph-search library |
 | `docs/screenshots/` | Curated UI captures. The suite writes gitignored `tests/screenshots/` |
 | `docs/compare/` | Linkurious comparison sheets |

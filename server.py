@@ -71,7 +71,7 @@ GraphQL (optional second source; omit it to use Neo4j only):
     for the active source. GET /api/schema?refresh=1 rebuilds in the request and
     rewrites the file.
     GET /api/queries returns the library for the active source. Neo4j gets
-    data/queries.json. A Wiz source gets data/wiz-queries.json. A generic
+    data/cartography-queries.json. A Wiz source gets data/wiz-queries.json. A generic
     endpoint gets none. POST /api/graphql runs one of those documents.
     GX_QUERIES      path of the saved-query store. It defaults to gx.queries.json
                     in the folder of gx.local.json (or GX_CONFIG). The page adds,
@@ -1499,7 +1499,7 @@ def _builtin_file(src):
         return None
     kind = getattr(src, "kind", "")
     if kind == "neo4j":
-        return "queries.json"
+        return "cartography-queries.json"
     if kind == "graphql" and getattr(src, "adapter_name", "") == "wiz":
         return "wiz-queries.json"
     return None

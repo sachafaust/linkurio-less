@@ -5,7 +5,7 @@ path. Its shape is:
 
     {"version": 1, "sources": {"<source key>": {
         "label": "...", "kind": "cypher" | "graphql",
-        "queries": [...], "hidden_builtins": ["builtin:queries:0", ...]}}}
+        "queries": [...], "hidden_builtins": ["builtin:cartography-queries:0", ...]}}}
 
 The source key is a hash of the connection: the Neo4j URI and database, or
 the GraphQL endpoint, adapter, and project. Two connections never share a

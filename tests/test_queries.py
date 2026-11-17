@@ -143,7 +143,7 @@ def test_crud_and_isolation():
     try:
         listed = qs.list_queries(path, neo_a, builtins)
         check("a missing store lists the built-ins and creates no file",
-              [q["id"] for q in listed] == [f"builtin:queries:{q['id']}" for q in json.loads((ROOT / "data" / "queries.json").read_text())]
+              [q["id"] for q in listed] == [f"builtin:cartography-queries:{q['id']}" for q in json.loads((ROOT / "data" / "cartography-queries.json").read_text())]
               and all(q["builtin"] is True and q["editable"] is False and q["kind"] == "cypher" for q in listed)
               and not path.exists(), [q["id"] for q in listed])
         made = qs.create(path, neo_a, {
@@ -387,12 +387,12 @@ def test_review_fixes():
 
         ids = [q["id"] for q in builtins]
         check("built-in ids come from the entry id, not its place in the file",
-              ids[0] == "builtin:queries:internet-exposed-ec2" and len(set(ids)) == len(ids), ids)
-        real = (server.ROOT / "data" / "queries.json").read_text()
+              ids[0] == "builtin:cartography-queries:internet-exposed-ec2" and len(set(ids)) == len(ids), ids)
+        real = (server.ROOT / "data" / "cartography-queries.json").read_text()
         entries = json.loads(real)
         moved = Path(tmp.name) / "data"
         moved.mkdir()
-        (moved / "queries.json").write_text(json.dumps([{"name": "A new first query", "cypher": CYPHER}] + entries))
+        (moved / "cartography-queries.json").write_text(json.dumps([{"name": "A new first query", "cypher": CYPHER}] + entries))
         old_root = server.ROOT
         server.ROOT = Path(tmp.name)
         try:
@@ -400,16 +400,16 @@ def test_review_fixes():
         finally:
             server.ROOT = old_root
         check("a new entry at the top of the file does not move the other ids",
-              [q["id"] for q in shifted[1:]] == ids and shifted[0]["id"] == "builtin:queries:a-new-first-query",
+              [q["id"] for q in shifted[1:]] == ids and shifted[0]["id"] == "builtin:cartography-queries:a-new-first-query",
               [q["id"] for q in shifted[:3]])
         twins = [{"name": "Same name", "cypher": CYPHER}, {"name": "Same name", "cypher": CYPHER}]
-        (moved / "queries.json").write_text(json.dumps(twins))
+        (moved / "cartography-queries.json").write_text(json.dumps(twins))
         server.ROOT = Path(tmp.name)
         try:
             pair = [q["id"] for q in server.builtin_queries(FakeNeo4j("bolt://db-a:7687"))]
         finally:
             server.ROOT = old_root
-        check("two built-ins with one name get two ids", pair == ["builtin:queries:same-name", "builtin:queries:same-name-2"], pair)
+        check("two built-ins with one name get two ids", pair == ["builtin:cartography-queries:same-name", "builtin:cartography-queries:same-name-2"], pair)
 
         first = builtins[0]["id"]
         edited = qs.update(path, neo, first, {"name": "My EC2 copy"}, validate, builtins)

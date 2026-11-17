@@ -3754,7 +3754,7 @@ def test_wiz_library_and_node_total():
     """Each connection has its own query library. Wiz node total is one totalCount."""
     print("wiz library and node total")
     wiz = json.loads((ROOT / "data" / "wiz-queries.json").read_text())
-    cypher = json.loads((ROOT / "data" / "queries.json").read_text())
+    cypher = json.loads((ROOT / "data" / "cartography-queries.json").read_text())
     names = [item["name"] for item in wiz]
     check("the Wiz library is the two shared graph searches",
           names == ["Internet-exposed EC2 instances", "Security groups open to 0.0.0.0/0"]
@@ -4793,7 +4793,7 @@ def test_query_routes():
         code, raw, neo = http_json("GET", base + "/api/queries")
         check("Neo4j lists its built-ins with an id and the flags",
               code == 200 and neo and all(item.get("builtin") is True and item.get("editable") is False
-                                          and str(item.get("id")).startswith("builtin:queries:")
+                                          and str(item.get("id")).startswith("builtin:cartography-queries:")
                                           and item.get("kind") == "cypher" for item in neo),
               safe(raw[:300]))
         cypher = "MATCH (a:AWSAccount)-[r:RESOURCE]->(b:S3Bucket) RETURN a, r, b LIMIT 5"
